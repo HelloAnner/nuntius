@@ -1,0 +1,197 @@
+/* User-level SSE manager: reconnect-aware event dispatch into the query
+ * caches, the live thread store, approvals and command tracking. */
+import { create } from "zustand";
+import type { QueryClient } from "@tanstack/react-query";
+import {
+  type ApprovalRequestedPayload,
+  type CommandStatusPayload,
+  type DeviceSummary,
+  type HistoryProgressPayload,
+  type NuntiusEvent,
+  type ProjectSummary,
+} from "@nuntius/shared";
+import { api, ApiError } from "./api";
+import { liveStore, useApprovals, useCommands } from "./stores";
+
+export type SseStatus = "connecting" | "live" | "reconnecting" | "syncing";
+interface SseState {
+  status: SseStatus;
+  set: (status: SseStatus) => void;
+}
+export const useSse = create<SseState>((set) => ({
+  status: "connecting",
+  set: (status) => set({ status }),
+}));
+
+const TERMINAL_CMD = new Set(["completed", "failed", "rejected", "unknown", "expired"]);
+
+/** register a command receipt; falls back to polling if the SSE update is lost */
+export function trackCommand(qc: QueryClient, commandId: string, threadId?: string, kind?: string) {
+  useCommands.getState().track(commandId, threadId, kind);
+  const poll = async (attempt: number) => {
+    const cur = useCommands.getState().byId[commandId];
+    if (!cur || TERMINAL_CMD.has(cur.status)) return;
+    try {
+      const view = await api.command(commandId);
+      applyCommandStatus(qc, commandId, view.status, view.kind);
+    } catch (e) {
+      if (!(e instanceof ApiError && e.code === "not_found") && attempt < 4) {
+        setTimeout(() => void poll(attempt + 1), 3000 * attempt);
+      }
+      return;
+    }
+    if (!TERMINAL_CMD.has(useCommands.getState().byId[commandId]?.status ?? "") && attempt < 4) {
+      setTimeout(() => void poll(attempt + 1), 3000 * attempt);
+    }
+  };
+  setTimeout(() => void poll(1), 4000);
+}
+
+function applyCommandStatus(qc: QueryClient, commandId: string, status: string, kind?: string) {
+  const cmd = useCommands.getState().byId[commandId];
+  useCommands.getState().apply(commandId, status as never);
+  liveStore.applyCommandStatus(commandId, status as never);
+  const resolvedKind = kind ?? cmd?.kind;
+  if (TERMINAL_CMD.has(status) && resolvedKind) {
+    if (resolvedKind.startsWith("thread.")) {
+      void qc.invalidateQueries({ queryKey: ["projectThreads"] });
+      void qc.invalidateQueries({ queryKey: ["allThreads"] });
+      if (cmd?.threadId) void qc.invalidateQueries({ queryKey: ["threadHistory", cmd.threadId] });
+    }
+    if (resolvedKind.startsWith("project.")) {
+      void qc.invalidateQueries({ queryKey: ["projects"] });
+      void qc.invalidateQueries({ queryKey: ["devices"] });
+    }
+  }
+}
+
+export function startEvents(qc: QueryClient): () => void {
+  let es: EventSource | null = null;
+  let closed = false;
+  let everLive = false;
+  const dirtyThreads = new Set<string>();
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const markThreadDirty = (threadId: string | null) => {
+    if (!threadId) return;
+    dirtyThreads.add(threadId);
+    if (!flushTimer) {
+      flushTimer = setTimeout(() => {
+        flushTimer = null;
+        const ids = [...dirtyThreads];
+        dirtyThreads.clear();
+        for (const id of ids) {
+          void qc.invalidateQueries({ queryKey: ["threadHistory", id] });
+        }
+        void qc.invalidateQueries({ queryKey: ["projectThreads"] });
+        void qc.invalidateQueries({ queryKey: ["allThreads"] });
+      }, 600);
+    }
+  };
+
+  const resync = () => {
+    useSse.getState().set("syncing");
+    void qc.invalidateQueries().then(() => {
+      if (useSse.getState().status === "syncing") useSse.getState().set("live");
+    });
+  };
+
+  const dispatch = (event: NuntiusEvent) => {
+    const type = event.eventType;
+    liveStore.apply(event);
+
+    if (type === "device.online" || type === "device.offline") {
+      qc.setQueryData<DeviceSummary[]>(["devices"], (old) =>
+        old?.map((d) =>
+          d.id === event.deviceId
+            ? { ...d, status: type === "device.online" ? "online" : "offline" }
+            : d,
+        ),
+      );
+      void qc.invalidateQueries({ queryKey: ["devices"] });
+      return;
+    }
+    if (type === "project.summary") {
+      const project = event.payload as ProjectSummary;
+      qc.setQueryData<ProjectSummary[]>(["projects", event.deviceId], (old) => {
+        if (!old) return old;
+        const idx = old.findIndex((p) => p.id === project.id);
+        if (idx < 0) return [project, ...old];
+        const next = [...old];
+        next[idx] = project;
+        return next;
+      });
+      return;
+    }
+    if (type === "approval.requested") {
+      const p = event.payload as ApprovalRequestedPayload;
+      useApprovals.getState().add({
+        id: p.approvalId,
+        method: p.method,
+        params: p.params,
+        state: "pending",
+        occurredAt: event.occurredAt,
+        threadId: event.threadId,
+        deviceId: event.deviceId,
+      });
+      void qc.invalidateQueries({ queryKey: ["devices"] });
+      return;
+    }
+    if (type === "command.status_changed") {
+      const p = event.payload as CommandStatusPayload;
+      applyCommandStatus(qc, p.commandId, p.status);
+      return;
+    }
+    if (type === "history.sync_progress") {
+      const p = event.payload as HistoryProgressPayload;
+      markThreadDirty(p.threadId);
+      return;
+    }
+    if (type === "turn.started") {
+      markThreadDirty(event.threadId);
+      return;
+    }
+    if (type.startsWith("app_server.")) {
+      const m = type.slice("app_server.".length).toLowerCase();
+      if (m === "turn.completed" || m === "turn.failed" || m.startsWith("turn.interrupt")) {
+        if (event.threadId) useApprovals.getState().cancelForThread(event.threadId);
+        markThreadDirty(event.threadId);
+        void qc.invalidateQueries({ queryKey: ["devices"] });
+      }
+    }
+  };
+
+  const connect = () => {
+    if (closed) return;
+    es = new EventSource("/api/v1/events");
+    es.onopen = () => {
+      useSse.getState().set("live");
+      if (everLive) resync();
+      everLive = true;
+    };
+    es.addEventListener("nuntius", (e) => {
+      try {
+        dispatch(JSON.parse((e as MessageEvent).data) as NuntiusEvent);
+      } catch {
+        /* malformed event */
+      }
+    });
+    es.addEventListener("resync_required", () => resync());
+    es.onerror = () => {
+      if (useSse.getState().status !== "syncing") useSse.getState().set("reconnecting");
+    };
+  };
+
+  const onVisible = () => {
+    if (document.visibilityState === "visible" && everLive) resync();
+  };
+  document.addEventListener("visibilitychange", onVisible);
+
+  connect();
+  return () => {
+    closed = true;
+    es?.close();
+    document.removeEventListener("visibilitychange", onVisible);
+    if (flushTimer) clearTimeout(flushTimer);
+  };
+}

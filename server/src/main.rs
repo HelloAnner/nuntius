@@ -1,0 +1,177 @@
+mod api;
+mod assets;
+mod auth;
+mod config;
+mod error;
+mod event_hub;
+mod protocol;
+mod store;
+mod tunnel;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use config::{ServerConfig, initialize_data_dir};
+use event_hub::EventHub;
+use protocol::TransportSecurity;
+use std::{path::PathBuf, sync::Arc};
+use store::ServerStore;
+use tower_http::{catch_panic::CatchPanicLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
+use tracing_subscriber::EnvFilter;
+
+#[derive(Parser)]
+#[command(
+    name = "nuntius-server",
+    version,
+    about = "Nuntius public control server"
+)]
+struct Cli {
+    #[arg(long, env = "NUNTIUS_SERVER_DATA_DIR")]
+    data_dir: PathBuf,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Init {
+        #[arg(long)]
+        force: bool,
+    },
+    Serve,
+    Backup,
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    pub config: Arc<ServerConfig>,
+    pub data_dir: Arc<PathBuf>,
+    pub store: ServerStore,
+    pub events: EventHub,
+    pub tunnels: Arc<tunnel::TunnelRegistry>,
+}
+
+impl AppState {
+    pub fn transport_security(&self) -> TransportSecurity {
+        if self.config.is_secure() {
+            TransportSecurity::Secure
+        } else {
+            TransportSecurity::Insecure
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Init { force } => {
+            let result = initialize_data_dir(&cli.data_dir, force)?;
+            ServerStore::open(&result.data_dir)
+                .await
+                .context("initialize server SQLite")?;
+            println!("initialized {}", result.data_dir.display());
+            println!("bootstrap token: {}", result.bootstrap_token);
+            println!(
+                "edit {} before serving",
+                result.data_dir.join(config::CONFIG_FILE).display()
+            );
+            Ok(())
+        }
+        Command::Serve => serve(cli.data_dir).await,
+        Command::Backup => backup(cli.data_dir).await,
+    }
+}
+
+async fn backup(data_dir: PathBuf) -> Result<()> {
+    let _data_dir_lock = config::DataDirLock::acquire(&data_dir)?;
+    let store = ServerStore::open(&data_dir)
+        .await
+        .context("open server SQLite")?;
+    let file_name = format!(
+        "nuntius-server-{}.db",
+        time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+    );
+    let destination = data_dir.join("backups").join(file_name);
+    store.backup(&destination).await?;
+    config::set_private_file_permissions(&destination)?;
+    println!("backup created {}", destination.display());
+    Ok(())
+}
+
+async fn serve(data_dir: PathBuf) -> Result<()> {
+    let _data_dir_lock = config::DataDirLock::acquire(&data_dir)?;
+    let config = ServerConfig::load(&data_dir)?;
+    let _log_guard = init_tracing(&config, &data_dir);
+    let store = ServerStore::open(&data_dir)
+        .await
+        .context("open server SQLite")?;
+    let state = AppState {
+        config: Arc::new(config.clone()),
+        data_dir: Arc::new(data_dir),
+        store,
+        events: EventHub::new(4096),
+        tunnels: tunnel::TunnelRegistry::new(),
+    };
+    let maintenance_store = state.store.clone();
+    let retention_hours = config.event_retention_hours;
+    let maintenance_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) = maintenance_store.maintenance(retention_hours).await {
+                tracing::warn!(error=?error, "server maintenance failed");
+            }
+        }
+    });
+    let app = api::router(state)
+        .layer(RequestBodyLimitLayer::new(1024 * 1024))
+        .layer(CatchPanicLayer::new())
+        .layer(TraceLayer::new_for_http());
+    let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    tracing::info!(bind=%config.bind,public_base_url=%config.public_base_url,secure=config.is_secure(),"nuntius server listening");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    maintenance_task.abort();
+    Ok(())
+}
+
+fn init_tracing(
+    config: &ServerConfig,
+    data_dir: &std::path::Path,
+) -> tracing_appender::non_blocking::WorkerGuard {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("nuntius_server=info,tower_http=info"));
+    let appender = tracing_appender::rolling::never(data_dir.join("logs"), "nuntius-server.log");
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+    if config.log_format == "json" {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(writer)
+            .json()
+            .init()
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(writer)
+            .init()
+    }
+    guard
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        let _ = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("signal handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {_=ctrl_c=>{},_=terminate=>{}}
+}

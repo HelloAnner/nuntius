@@ -1,0 +1,117 @@
+/* Nuntius design tokens — warm paper light / quiet ink dark */
+:root {
+  color-scheme: light;
+
+  /* palette */
+  --bg: #f6f5f1;
+  --bg-sunken: #efeee9;
+  --surface: #fdfdfb;
+  --surface-2: #f4f3ef;
+  --surface-3: #ecebe6;
+  --hairline: rgba(28, 27, 24, 0.1);
+  --hairline-strong: rgba(28, 27, 24, 0.16);
+
+  --ink: #1d1c19;
+  --ink-2: #55524b;
+  --ink-3: #8d887d;
+  --ink-4: #b6b1a6;
+
+  --accent: #175c42;
+  --accent-strong: #0f4a34;
+  --accent-soft: rgba(23, 92, 66, 0.09);
+  --accent-ink: #127350;
+  --on-accent: #f4f8f5;
+
+  --ok: #1d7a4f;
+  --ok-soft: rgba(29, 122, 79, 0.1);
+  --warn: #9a6a1c;
+  --warn-soft: rgba(154, 106, 28, 0.11);
+  --danger: #b23a2d;
+  --danger-soft: rgba(178, 58, 45, 0.1);
+  --info: #38618c;
+  --info-soft: rgba(56, 97, 140, 0.1);
+
+  --code-bg: #f0efe9;
+  --code-ink: #2a2926;
+
+  /* device avatar tints */
+  --tint-1: #175c42;
+  --tint-2: #38618c;
+  --tint-3: #8c5a24;
+  --tint-4: #6d4d8c;
+  --tint-5: #9c3f57;
+  --tint-6: #4a6b2f;
+
+  /* type */
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
+    "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Noto Sans CJK SC", sans-serif;
+  --font-display:
+    ui-serif, "New York", "Songti SC", "Noto Serif CJK SC", Georgia,
+    "Times New Roman", serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* metrics */
+  --r-lg: 16px;
+  --r-md: 12px;
+  --r-sm: 9px;
+  --r-xs: 6px;
+  --shadow-float:
+    0 1px 2px rgba(24, 22, 18, 0.05), 0 12px 32px -12px rgba(24, 22, 18, 0.22);
+  --shadow-pop: 0 24px 64px -16px rgba(24, 22, 18, 0.35);
+
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.5, 1);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #12110f;
+  --bg-sunken: #0d0c0b;
+  --surface: #1a1917;
+  --surface-2: #22211e;
+  --surface-3: #2b2a26;
+  --hairline: rgba(236, 233, 226, 0.09);
+  --hairline-strong: rgba(236, 233, 226, 0.16);
+
+  --ink: #ebe9e3;
+  --ink-2: #b0aca1;
+  --ink-3: #7e7a70;
+  --ink-4: #57544d;
+
+  --accent: #63b28f;
+  --accent-strong: #7cc4a3;
+  --accent-soft: rgba(99, 178, 143, 0.13);
+  --accent-ink: #7cc4a3;
+  --on-accent: #0e241b;
+
+  --ok: #63b28f;
+  --ok-soft: rgba(99, 178, 143, 0.13);
+  --warn: #d3a04f;
+  --warn-soft: rgba(211, 160, 79, 0.13);
+  --danger: #e07a6a;
+  --danger-soft: rgba(224, 122, 106, 0.13);
+  --info: #7ea6cf;
+  --info-soft: rgba(126, 166, 207, 0.13);
+
+  --code-bg: #171614;
+  --code-ink: #d9d6cd;
+
+  --tint-1: #63b28f;
+  --tint-2: #7ea6cf;
+  --tint-3: #d3a04f;
+  --tint-4: #a98fd1;
+  --tint-5: #d17f96;
+  --tint-6: #9ab56b;
+
+  --shadow-float:
+    0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 32px -12px rgba(0, 0, 0, 0.6);
+  --shadow-pop: 0 24px 64px -16px rgba(0, 0, 0, 0.7);
+}

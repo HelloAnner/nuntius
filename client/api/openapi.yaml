@@ -1,0 +1,187 @@
+openapi: 3.1.0
+info:
+  title: Nuntius Client Local API
+  version: 0.1.0
+  description: |
+    当前工作电脑的 loopback-only 管理 API，直接控制本机 Codex App Server。
+    服务仅允许 127.0.0.1/localhost/[::1] Host；带 Origin 时也必须是本机 HTTP
+    Origin。请求体上限 1 MiB。该 API 不代理其他设备。
+servers:
+  - url: /api/v1
+paths:
+  /info:
+    get:
+      operationId: getClientInfo
+      responses: {'200': {description: Agent、配对、队列和 App Server 状态, content: {application/json: {schema: {type: object, additionalProperties: true}}}}}
+  /directories/roots:
+    get:
+      operationId: listLocalDirectoryRoots
+      responses: {'200': {description: 配置允许根的不透明引用, content: {application/json: {schema: {$ref: '#/components/schemas/DirectoryPage'}}}}}
+  /directories:
+    get:
+      operationId: listLocalDirectories
+      parameters:
+        - {name: parentRef, in: query, required: true, schema: {type: string}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        '200': {description: 不包含隐藏目录和符号链接的分页子目录, content: {application/json: {schema: {$ref: '#/components/schemas/DirectoryPage'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+  /projects:
+    get:
+      operationId: listLocalProjects
+      responses: {'200': {description: 本机活动项目, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Project'}}}}}}
+    post:
+      operationId: createLocalProject
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateProject'}}}}
+      responses: {'200': {description: 项目已创建, content: {application/json: {schema: {$ref: '#/components/schemas/Project'}}}}, '400': {$ref: '#/components/responses/BadRequest'}}
+  /projects/{projectId}/threads:
+    parameters: [{$ref: '#/components/parameters/ProjectId'}]
+    get:
+      operationId: listLocalProjectThreads
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}}
+      responses: {'200': {description: 项目会话, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Thread'}}}}}}
+    post:
+      operationId: createLocalThread
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateThread'}}}}
+      responses: {'200': {description: Codex Thread 已创建, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, '400': {$ref: '#/components/responses/BadRequest'}}
+  /threads:
+    get:
+      operationId: listLocalThreads
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}}
+      responses: {'200': {description: 本机全部已发现会话（包含未归类历史）, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Thread'}}}}}}
+  /threads/{threadId}/history:
+    get:
+      operationId: getLocalThreadHistory
+      parameters: [{$ref: '#/components/parameters/ThreadId'}]
+      responses: {'200': {description: 本地权威 Thread/Turn/Item 记录, content: {application/json: {schema: {type: array, items: {type: object, additionalProperties: true}}}}}, '404': {$ref: '#/components/responses/NotFound'}}
+  /threads/{threadId}/turns:
+    post:
+      operationId: startLocalTurn
+      parameters: [{$ref: '#/components/parameters/ThreadId'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartTurn'}}}}
+      responses: {'200': {description: Turn 已提交给 App Server, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, '400': {$ref: '#/components/responses/BadRequest'}}
+  /threads/{threadId}/steer:
+    post:
+      operationId: steerLocalTurn
+      parameters: [{$ref: '#/components/parameters/ThreadId'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TextInput'}}}}
+      responses: {'200': {description: 已转向活动 Turn}, '400': {$ref: '#/components/responses/BadRequest'}}
+  /threads/{threadId}/interrupt:
+    post:
+      operationId: interruptLocalTurn
+      parameters: [{$ref: '#/components/parameters/ThreadId'}]
+      responses: {'200': {description: 已请求中断}, '400': {$ref: '#/components/responses/BadRequest'}}
+  /threads/{threadId}/archive:
+    post:
+      operationId: setLocalThreadArchived
+      parameters: [{$ref: '#/components/parameters/ThreadId'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [archived], properties: {archived: {type: boolean}}}}}}
+      responses: {'200': {description: 归档状态已更新}, '400': {$ref: '#/components/responses/BadRequest'}}
+  /approvals/{approvalId}/decision:
+    post:
+      operationId: decideLocalApproval
+      parameters: [{name: approvalId, in: path, required: true, schema: {type: string}}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ApprovalDecision'}}}}
+      responses: {'200': {description: 审批响应已写给 App Server}, '400': {$ref: '#/components/responses/BadRequest'}}
+  /events:
+    get:
+      operationId: subscribeLocalEvents
+      responses: {'200': {description: 本机实时 SSE；消费者落后时发送 resync_required, content: {text/event-stream: {schema: {type: string}}}}}
+components:
+  parameters:
+    ProjectId: {name: projectId, in: path, required: true, schema: {type: string}}
+    ThreadId: {name: threadId, in: path, required: true, schema: {type: string}}
+  responses:
+    BadRequest: {description: 输入非法或 App Server 拒绝, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: 本地资源不存在, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    DirectoryPage:
+      type: object
+      required: [deviceId, breadcrumb, entries, expiresAt]
+      properties:
+        deviceId: {type: string}
+        parentName: {type: [string, 'null']}
+        breadcrumb: {type: array, items: {type: string}}
+        entries:
+          type: array
+          items:
+            type: object
+            required: [name, directoryRef, breadcrumb, hasChildren, selectable, symlink]
+            properties:
+              name: {type: string}
+              directoryRef: {type: string}
+              breadcrumb: {type: array, items: {type: string}}
+              hasChildren: {type: boolean}
+              gitKind: {type: [string, 'null']}
+              projectId: {type: [string, 'null']}
+              selectable: {type: boolean}
+              symlink: {type: boolean, const: false}
+        nextCursor: {type: [string, 'null']}
+        expiresAt: {type: string, format: date-time}
+    Project:
+      type: object
+      required: [id, deviceId, kind, displayName, status, threadCount]
+      properties:
+        id: {type: string}
+        deviceId: {type: string}
+        kind: {enum: [workspace, system_unassigned]}
+        displayName: {type: string}
+        pathHint: {type: [string, 'null']}
+        status: {type: string}
+        threadCount: {type: integer}
+        lastActivityAt: {type: [string, 'null'], format: date-time}
+    Thread:
+      type: object
+      required: [id, deviceId, projectId, title, status, archived, historyCompleteness]
+      properties:
+        id: {type: string}
+        deviceId: {type: string}
+        projectId: {type: string}
+        appServerThreadId: {type: [string, 'null']}
+        title: {type: string}
+        status: {type: string}
+        archived: {type: boolean}
+        historyCompleteness: {enum: [not_started, backfilling, complete, partial, error]}
+        lastSyncedAt: {type: [string, 'null'], format: date-time}
+        lastActivityAt: {type: [string, 'null'], format: date-time}
+    CreateProject:
+      type: object
+      required: [directoryRef, displayName]
+      properties:
+        directoryRef: {type: string, minLength: 1, maxLength: 256}
+        displayName: {type: string, minLength: 1, maxLength: 128}
+        defaults: {type: object, additionalProperties: true}
+    CreateThread:
+      type: object
+      properties:
+        title: {type: [string, 'null'], maxLength: 256}
+        firstMessage: {type: [string, 'null'], maxLength: 262144}
+        options: {type: object, additionalProperties: true}
+    StartTurn:
+      type: object
+      required: [text]
+      properties:
+        text: {type: string, minLength: 1, maxLength: 262144}
+        options: {type: object, additionalProperties: true}
+    TextInput:
+      type: object
+      required: [text]
+      properties: {text: {type: string, minLength: 1, maxLength: 262144}}
+    ApprovalDecision:
+      type: object
+      required: [decision]
+      properties:
+        decision: {type: string, description: accept | accept_for_session | decline | cancel}
+        response: {}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties: {code: {type: string}, message: {type: string}}

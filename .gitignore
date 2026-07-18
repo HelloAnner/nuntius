@@ -1,0 +1,9 @@
+/target/
+node_modules/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/run/*.pid
+**/logs/*.log
+.DS_Store
+

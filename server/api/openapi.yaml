@@ -1,0 +1,438 @@
+openapi: 3.1.0
+info:
+  title: Nuntius Server API
+  version: 0.1.0
+  description: |
+    手机/平板远程控制 API。除明确标注的认证入口外，请求使用 HttpOnly
+    `nuntius_session` Cookie；所有状态修改还需要 `X-CSRF-Token`。会产生设备
+    副作用的请求同时必须带 `Idempotency-Key`，新命令仅在设备在线时接受；
+    已接受命令在断线后由持久队列重放。
+servers:
+  - url: /api/v1
+security:
+  - webSession: []
+paths:
+  /info:
+    get:
+      security: []
+      operationId: getServerInfo
+      responses:
+        '200': {description: 服务能力与传输安全档位, content: {application/json: {schema: {$ref: '#/components/schemas/ServerInfo'}}}}
+  /sync:
+    get:
+      operationId: getSyncSnapshot
+      responses:
+        '200': {description: 设备、项目、会话、审批快照及事件游标, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /auth/bootstrap:
+    post:
+      security: []
+      operationId: bootstrapOwner
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/BootstrapRequest'}}}}
+      responses:
+        '200': {$ref: '#/components/responses/WebSession'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /auth/login:
+    post:
+      security: []
+      operationId: login
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/LoginRequest'}}}}
+      responses:
+        '200': {$ref: '#/components/responses/WebSession'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /auth/session:
+    get:
+      operationId: getCurrentSession
+      responses:
+        '200': {$ref: '#/components/responses/WebSession'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /auth/logout:
+    post:
+      operationId: logout
+      parameters: [{$ref: '#/components/parameters/Csrf'}]
+      responses:
+        '204': {description: 会话已撤销并清除 Cookie}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /pairing-codes:
+    post:
+      operationId: createPairingCode
+      parameters: [{$ref: '#/components/parameters/Csrf'}]
+      responses:
+        '200': {description: 一次性配对码, content: {application/json: {schema: {$ref: '#/components/schemas/PairingCode'}}}}
+  /device-auth/pair:
+    post:
+      security: []
+      operationId: pairDevice
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PairDeviceRequest'}}}}
+      responses:
+        '201': {description: 设备注册成功, content: {application/json: {schema: {type: object, required: [deviceId], properties: {deviceId: {type: string}}}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+  /device-auth/challenge:
+    post:
+      security: []
+      operationId: createDeviceChallenge
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [deviceId], properties: {deviceId: {type: string}}}}}}
+      responses:
+        '200': {description: 短期签名挑战, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /device-auth/token:
+    post:
+      security: []
+      operationId: exchangeDeviceToken
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [deviceId, challengeId, signature], properties: {deviceId: {type: string}, challengeId: {type: string}, signature: {type: string}}}}}}
+      responses:
+        '200': {description: 短期设备 Bearer Token, content: {application/json: {schema: {type: object, required: [accessToken, expiresAt], properties: {accessToken: {type: string}, expiresAt: {type: string, format: date-time}}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /devices:
+    get:
+      operationId: listDevices
+      responses:
+        '200': {description: 当前用户设备, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Device'}}}}}
+  /devices/{deviceId}:
+    parameters: [{$ref: '#/components/parameters/DeviceId'}]
+    get:
+      operationId: getDevice
+      responses:
+        '200': {description: 设备详情, content: {application/json: {schema: {$ref: '#/components/schemas/Device'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      operationId: renameDevice
+      parameters: [{$ref: '#/components/parameters/Csrf'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [displayName], properties: {displayName: {type: string, minLength: 1, maxLength: 128}}}}}}
+      responses:
+        '200': {description: 已更新设备, content: {application/json: {schema: {$ref: '#/components/schemas/Device'}}}}
+    delete:
+      operationId: revokeDevice
+      parameters: [{$ref: '#/components/parameters/Csrf'}]
+      responses:
+        '204': {description: 设备已撤销，现有隧道立即关闭}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /devices/{deviceId}/refresh:
+    post:
+      operationId: refreshDevice
+      parameters: [{$ref: '#/components/parameters/DeviceId'}, {$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+  /devices/{deviceId}/history-sync:
+    post:
+      operationId: syncDeviceHistory
+      parameters: [{$ref: '#/components/parameters/DeviceId'}, {$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+  /devices/{deviceId}/directories/roots:
+    get:
+      operationId: listDirectoryRoots
+      parameters: [{$ref: '#/components/parameters/DeviceId'}]
+      responses:
+        '200': {description: 设备实时安全根目录, content: {application/json: {schema: {$ref: '#/components/schemas/DirectoryPage'}}}}
+        '503': {$ref: '#/components/responses/DeviceOffline'}
+  /devices/{deviceId}/directories:
+    get:
+      operationId: listDirectories
+      parameters:
+        - {$ref: '#/components/parameters/DeviceId'}
+        - {name: parentRef, in: query, required: true, schema: {type: string}}
+        - {name: cursor, in: query, required: false, schema: {type: string}}
+      responses:
+        '200': {description: 分页子目录, content: {application/json: {schema: {$ref: '#/components/schemas/DirectoryPage'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '503': {$ref: '#/components/responses/DeviceOffline'}
+  /devices/{deviceId}/projects:
+    parameters: [{$ref: '#/components/parameters/DeviceId'}]
+    get:
+      operationId: listProjects
+      responses:
+        '200': {description: 设备项目, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Project'}}}}}
+    post:
+      operationId: createProject
+      parameters: [{$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateProject'}}}}
+      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+  /devices/{deviceId}/projects/{projectId}/threads:
+    parameters: [{$ref: '#/components/parameters/DeviceId'}, {$ref: '#/components/parameters/ProjectId'}]
+    get:
+      operationId: listProjectThreads
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}}
+      responses:
+        '200': {description: 项目会话, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Thread'}}}}}
+    post:
+      operationId: createThread
+      parameters: [{$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateThread'}}}}
+      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+  /threads:
+    get:
+      operationId: listAllThreads
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}}
+      responses:
+        '200': {description: 跨设备会话历史索引, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Thread'}}}}}
+  /threads/{threadId}/turns:
+    parameters: [{$ref: '#/components/parameters/ThreadId'}]
+    get:
+      operationId: listHistoryTurns
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000, default: 200}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}}
+      responses: {'200': {description: Server 聚合的 Turn, content: {application/json: {schema: {type: array, items: {type: object, additionalProperties: true}}}}}}
+    post:
+      operationId: startTurn
+      parameters: [{$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartTurn'}}}}
+      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+  /threads/{threadId}/steer:
+    post:
+      operationId: steerTurn
+      parameters: [{$ref: '#/components/parameters/ThreadId'}, {$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TextInput'}}}}
+      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+  /threads/{threadId}/interrupt:
+    post:
+      operationId: interruptTurn
+      parameters: [{$ref: '#/components/parameters/ThreadId'}, {$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+  /threads/{threadId}/archive:
+    post:
+      operationId: setThreadArchived
+      parameters: [{$ref: '#/components/parameters/ThreadId'}, {$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object, required: [archived], properties: {archived: {type: boolean}}}}}}
+      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+  /threads/{threadId}/history-sync:
+    post:
+      operationId: syncThreadHistory
+      parameters: [{$ref: '#/components/parameters/ThreadId'}, {$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+  /turns/{turnId}/items:
+    get:
+      operationId: listHistoryItems
+      parameters:
+        - {name: turnId, in: path, required: true, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 2000, default: 500}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}}
+      responses: {'200': {description: Server 聚合的消息与工具项, content: {application/json: {schema: {type: array, items: {type: object, additionalProperties: true}}}}}}
+  /approvals:
+    get:
+      operationId: listApprovals
+      parameters: [{name: pending, in: query, schema: {type: boolean, default: true}}]
+      responses: {'200': {description: 待处理或最近审批, content: {application/json: {schema: {type: array, items: {type: object, additionalProperties: true}}}}}}
+  /approvals/{approvalId}/decision:
+    post:
+      operationId: decideApproval
+      parameters:
+        - {name: approvalId, in: path, required: true, schema: {type: string}}
+        - {$ref: '#/components/parameters/Csrf'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ApprovalDecision'}}}}
+      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '409': {$ref: '#/components/responses/Conflict'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+  /commands/{commandId}:
+    get:
+      operationId: getCommand
+      parameters: [{name: commandId, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: 命令状态, content: {application/json: {schema: {$ref: '#/components/schemas/Command'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /events:
+    get:
+      operationId: subscribeEvents
+      parameters:
+        - {name: Last-Event-ID, in: header, required: false, schema: {type: integer}}
+        - {name: after, in: query, required: false, schema: {type: integer}}
+      responses:
+        '200': {description: text/event-stream；历史缺口以 resync_required 事件通知, content: {text/event-stream: {schema: {type: string}}}}
+  /device-tunnel:
+    get:
+      security: [{deviceBearer: []}]
+      operationId: connectDeviceTunnel
+      responses:
+        '101': {description: WebSocket upgrade，子协议 nuntius.device.v1，消息上限 2 MiB}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+components:
+  securitySchemes:
+    webSession: {type: apiKey, in: cookie, name: nuntius_session}
+    deviceBearer: {type: http, scheme: bearer}
+  parameters:
+    DeviceId: {name: deviceId, in: path, required: true, schema: {type: string}}
+    ProjectId: {name: projectId, in: path, required: true, schema: {type: string}}
+    ThreadId: {name: threadId, in: path, required: true, schema: {type: string}}
+    Csrf: {name: X-CSRF-Token, in: header, required: true, schema: {type: string}}
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 1, maxLength: 128}}
+  responses:
+    WebSession: {description: 登录会话；同时设置 HttpOnly Cookie, content: {application/json: {schema: {$ref: '#/components/schemas/WebSession'}}}}
+    CommandAccepted: {description: 命令已经 Server SQLite 持久化, content: {application/json: {schema: {$ref: '#/components/schemas/CommandReceipt'}}}}
+    BadRequest: {description: 输入非法, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Unauthorized: {description: 未认证, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Forbidden: {description: 禁止访问或 CSRF 失败, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: 资源不存在或不属于当前用户, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Conflict: {description: 状态冲突或幂等键复用, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    DeviceOffline: {description: 新命令因设备离线未被接受, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    ServerInfo:
+      type: object
+      required: [apiVersion, serverVersion, transportSecurity, initialized, capabilities]
+      properties:
+        apiVersion: {type: string}
+        serverVersion: {type: string}
+        transportSecurity: {enum: [secure, insecure, local]}
+        initialized: {type: boolean}
+        capabilities: {type: array, items: {type: string}}
+    BootstrapRequest:
+      type: object
+      required: [bootstrapToken, loginName, password]
+      properties:
+        bootstrapToken: {type: string}
+        loginName: {type: string, minLength: 1, maxLength: 128}
+        password: {type: string, minLength: 12, maxLength: 1024}
+    LoginRequest:
+      type: object
+      required: [loginName, password]
+      properties:
+        loginName: {type: string, minLength: 1, maxLength: 128}
+        password: {type: string, maxLength: 1024}
+    WebSession:
+      type: object
+      required: [userId, loginName, csrfToken, expiresAt, transportSecurity]
+      properties:
+        userId: {type: string}
+        loginName: {type: string}
+        csrfToken: {type: string}
+        expiresAt: {type: string, format: date-time}
+        transportSecurity: {enum: [secure, insecure, local]}
+    PairingCode:
+      type: object
+      required: [id, code, expiresAt]
+      properties: {id: {type: string}, code: {type: string}, expiresAt: {type: string, format: date-time}}
+    PairDeviceRequest:
+      type: object
+      required: [code, displayName, publicKey, agentVersion, osFamily, architecture]
+      properties:
+        code: {type: string, maxLength: 128}
+        displayName: {type: string, maxLength: 128}
+        publicKey: {type: string, description: Base64 Ed25519 公钥，解码后 32 字节}
+        agentVersion: {type: string, maxLength: 128}
+        osFamily: {type: string, maxLength: 64}
+        architecture: {type: string, maxLength: 64}
+    Device:
+      type: object
+      required: [id, displayName, status, projectCount, activeTurnCount, pendingApprovalCount, historyCompleteness, inboxDepth, outboxDepth, historyBackfillDepth]
+      properties:
+        id: {type: string}
+        displayName: {type: string}
+        status: {enum: [pairing, syncing, online, degraded, offline, revoked]}
+        lastSeenAt: {type: [string, 'null'], format: date-time}
+        agentVersion: {type: [string, 'null']}
+        codexVersion: {type: [string, 'null']}
+        osFamily: {type: [string, 'null']}
+        architecture: {type: [string, 'null']}
+        projectCount: {type: integer}
+        activeTurnCount: {type: integer}
+        pendingApprovalCount: {type: integer}
+        historyCompleteness: {enum: [not_started, backfilling, complete, partial, error]}
+        historyLastSyncedAt: {type: [string, 'null'], format: date-time}
+        transportSecurity: {type: [string, 'null'], enum: [secure, insecure, local, null]}
+        appServerStatus: {type: [string, 'null']}
+        storageStatus: {type: [string, 'null']}
+        inboxDepth: {type: integer}
+        outboxDepth: {type: integer}
+        historyBackfillDepth: {type: integer}
+    Project:
+      type: object
+      required: [id, deviceId, kind, displayName, status, threadCount]
+      properties:
+        id: {type: string}
+        deviceId: {type: string}
+        kind: {enum: [workspace, system_unassigned]}
+        displayName: {type: string}
+        pathHint: {type: [string, 'null']}
+        status: {type: string}
+        threadCount: {type: integer}
+        lastActivityAt: {type: [string, 'null'], format: date-time}
+    Thread:
+      type: object
+      required: [id, deviceId, projectId, title, status, archived, historyCompleteness]
+      properties:
+        id: {type: string}
+        deviceId: {type: string}
+        projectId: {type: string}
+        appServerThreadId: {type: [string, 'null']}
+        title: {type: string}
+        status: {type: string}
+        archived: {type: boolean}
+        historyCompleteness: {enum: [not_started, backfilling, complete, partial, error]}
+        lastSyncedAt: {type: [string, 'null'], format: date-time}
+        lastActivityAt: {type: [string, 'null'], format: date-time}
+    DirectoryPage:
+      type: object
+      required: [deviceId, breadcrumb, entries, expiresAt]
+      properties:
+        deviceId: {type: string}
+        parentName: {type: [string, 'null']}
+        breadcrumb: {type: array, items: {type: string}}
+        entries: {type: array, items: {type: object, additionalProperties: true}}
+        nextCursor: {type: [string, 'null']}
+        expiresAt: {type: string, format: date-time}
+    CreateProject:
+      type: object
+      required: [directoryRef, displayName]
+      properties:
+        directoryRef: {type: string, minLength: 1, maxLength: 256}
+        displayName: {type: string, minLength: 1, maxLength: 128}
+        defaults: {type: object, additionalProperties: true}
+    CreateThread:
+      type: object
+      properties:
+        title: {type: [string, 'null'], maxLength: 256}
+        firstMessage: {type: [string, 'null'], maxLength: 262144}
+        options: {type: object, additionalProperties: true}
+    StartTurn:
+      type: object
+      required: [text]
+      properties:
+        text: {type: string, minLength: 1, maxLength: 262144}
+        options: {type: object, additionalProperties: true}
+    TextInput:
+      type: object
+      required: [text]
+      properties: {text: {type: string, minLength: 1, maxLength: 262144}}
+    ApprovalDecision:
+      type: object
+      required: [decision]
+      properties:
+        decision: {type: string, description: accept | accept_for_session | decline | cancel；自定义 response 时可扩展}
+        response: {type: [object, array, string, number, boolean, 'null']}
+    CommandReceipt:
+      type: object
+      required: [commandId, status, acceptedAt, statusUrl]
+      properties:
+        commandId: {type: string}
+        status: {$ref: '#/components/schemas/CommandStatus'}
+        acceptedAt: {type: string, format: date-time}
+        statusUrl: {type: string}
+    Command:
+      type: object
+      required: [id, deviceId, status, kind, acceptedAt]
+      properties:
+        id: {type: string}
+        deviceId: {type: string}
+        status: {$ref: '#/components/schemas/CommandStatus'}
+        kind: {type: string}
+        acceptedAt: {type: string, format: date-time}
+        completedAt: {type: [string, 'null'], format: date-time}
+        errorCode: {type: [string, 'null']}
+        result: {}
+    CommandStatus: {enum: [accepted, waiting_device, device_accepted, applying, completed, failed, rejected, unknown, expired]}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId, retryable, details]
+          properties:
+            code: {type: string}
+            message: {type: string}
+            requestId: {type: string}
+            retryable: {type: boolean}
+            details: {}
