@@ -26,6 +26,7 @@ nix.workspace = true
 nuntius-updater = { path = "../updater" }
 rand.workspace = true
 reqwest.workspace = true
+rpassword.workspace = true
 rust-embed.workspace = true
 schemars.workspace = true
 serde.workspace = true

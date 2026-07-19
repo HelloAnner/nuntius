@@ -145,6 +145,24 @@ nuntius-server --data-dir /srv/nuntius backup
 
 Client 的路径固定为当前用户的 `~/.nuntius/`，配置文件固定为 `~/.nuntius/config.toml`：
 
+新设备从源码安装时，在仓库根目录执行：
+
+```bash
+make device-setup
+```
+
+命令会先把 release 二进制安装到 `~/.local/bin/nuntius-client`。编译完成并出现输入
+提示后，在 Server 的“设置 → 设备配对”中生成一次性配对码并输入；随后命令会自动
+初始化、注册和启动 Client。配对码不会进入命令参数或 shell 历史。等到提示出现后
+再生成配对码，可以避免首次源码编译时间占用配对码的十分钟有效期。
+默认 Server 地址为 `http://47.97.154.221:8765/`；如需临时覆盖，可执行
+`make device-setup NUNTIUS_SERVER_URL=https://example.com/`。
+
+> 当前默认地址是公网 HTTP，验证码和设备注册流量不受 TLS 保护。迁移到 HTTPS 前，
+> 只应在可信网络或受保护的隧道中执行设备配对。
+
+也可以继续分步执行：
+
 ```bash
 nuntius-client init
 # 在 Server 页面生成一次性 pairing code
