@@ -1,5 +1,5 @@
 use crate::{config::DATABASE_FILE, protocol::*};
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use serde_json::Value;
 use sqlx::{
     ConnectOptions, Row, SqlitePool,
@@ -20,6 +20,11 @@ pub struct ProjectRecord {
     pub summary: ProjectSummary,
     pub canonical_path: PathBuf,
     pub defaults: Value,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectRemoval {
+    pub thread_count: i64,
+    pub already_removed: bool,
 }
 #[derive(Debug, Clone)]
 pub struct InboxRecord {
@@ -195,8 +200,124 @@ impl ClientStore {
         defaults: &Value,
     ) -> Result<()> {
         let stamp = now();
-        sqlx::query("INSERT INTO projects(id,display_name,canonical_path,defaults_json,created_at,updated_at) VALUES(?,?,?,?,?,?)").bind(id).bind(name).bind(path.to_string_lossy().as_ref()).bind(serde_json::to_string(defaults)?).bind(&stamp).bind(&stamp).execute(&self.pool).await?;
+        let canonical_path = path.to_string_lossy();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("DELETE FROM removed_app_threads WHERE canonical_path=?")
+            .bind(canonical_path.as_ref())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM removed_project_paths WHERE canonical_path=?")
+            .bind(canonical_path.as_ref())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO projects(id,display_name,canonical_path,defaults_json,created_at,updated_at) VALUES(?,?,?,?,?,?)").bind(id).bind(name).bind(canonical_path.as_ref()).bind(serde_json::to_string(defaults)?).bind(&stamp).bind(&stamp).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn remove_project(&self, id: &str) -> Result<Option<ProjectRemoval>> {
+        let stamp = now();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let project = sqlx::query("SELECT kind,canonical_path FROM projects WHERE id=?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(project) = project else {
+            let already_removed: Option<i64> =
+                sqlx::query_scalar("SELECT 1 FROM removed_project_paths WHERE project_id=?")
+                    .bind(id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            tx.commit().await?;
+            return Ok(already_removed.map(|_| ProjectRemoval {
+                thread_count: 0,
+                already_removed: true,
+            }));
+        };
+        if project.get::<String, _>("kind") != "workspace" {
+            bail!("系统项目不能删除");
+        }
+        let active_threads: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM threads WHERE project_id=? AND status='active'",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if active_threads > 0 {
+            bail!("项目中仍有运行中的会话，请先中断或等待会话结束");
+        }
+        let canonical_path: String = project.get("canonical_path");
+        let threads = sqlx::query("SELECT id,app_server_thread_id FROM threads WHERE project_id=?")
+            .bind(id)
+            .fetch_all(&mut *tx)
+            .await?;
+        let thread_count = threads.len() as i64;
+
+        sqlx::query("INSERT INTO removed_project_paths(canonical_path,project_id,removed_at) VALUES(?,?,?) ON CONFLICT(canonical_path) DO UPDATE SET project_id=excluded.project_id,removed_at=excluded.removed_at")
+            .bind(&canonical_path)
+            .bind(id)
+            .bind(&stamp)
+            .execute(&mut *tx)
+            .await?;
+        for thread in &threads {
+            let thread_id: String = thread.get("id");
+            if let Some(app_thread_id) = thread.get::<Option<String>, _>("app_server_thread_id") {
+                sqlx::query("INSERT INTO removed_app_threads(app_server_thread_id,canonical_path,removed_at) VALUES(?,?,?) ON CONFLICT(app_server_thread_id) DO UPDATE SET canonical_path=excluded.canonical_path,removed_at=excluded.removed_at")
+                    .bind(&app_thread_id)
+                    .bind(&canonical_path)
+                    .bind(&stamp)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM runtime_state WHERE key=?")
+                    .bind(format!("app_thread_fingerprint:{app_thread_id}"))
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            sqlx::query("DELETE FROM history_outbox WHERE thread_id=?")
+                .bind(&thread_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM runtime_state WHERE key IN (?,?)")
+                .bind(format!("history_hash:{thread_id}"))
+                .bind(format!("history_revision:{thread_id}"))
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("DELETE FROM event_outbox WHERE json_extract(payload,'$.projectId')=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM threads WHERE project_id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM projects WHERE id=?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(Some(ProjectRemoval {
+            thread_count,
+            already_removed: false,
+        }))
+    }
+
+    pub async fn project_path_removed(&self, path: &Path) -> Result<bool> {
+        let removed: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM removed_project_paths WHERE canonical_path=?")
+                .bind(path.to_string_lossy().as_ref())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(removed.is_some())
+    }
+
+    pub async fn app_thread_removed(&self, app_thread_id: &str) -> Result<bool> {
+        let removed: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM removed_app_threads WHERE app_server_thread_id=?")
+                .bind(app_thread_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(removed.is_some())
     }
 
     pub async fn list_threads(
@@ -1029,6 +1150,79 @@ fn truncate_utf8(value: String, max_bytes: usize) -> (String, bool) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn project_removal_cleans_records_and_blocks_automatic_reimport() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_remove", "Remove me", &workspace, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_thread(
+                "thr_remove",
+                "prj_remove",
+                "app_remove",
+                "Old thread",
+                &json!({}),
+            )
+            .await
+            .unwrap();
+        store
+            .enqueue_event(&NuntiusEvent {
+                event_id: "evt_old_summary".into(),
+                user_id: None,
+                device_id: "dev_test".into(),
+                project_id: Some("prj_remove".into()),
+                thread_id: None,
+                turn_id: None,
+                stream_id: "device:dev_test".into(),
+                seq: 1,
+                event_type: "project.summary".into(),
+                durability: "durable".into(),
+                occurred_at: now(),
+                payload: json!({"id":"prj_remove"}),
+            })
+            .await
+            .unwrap();
+
+        let removed = store.remove_project("prj_remove").await.unwrap().unwrap();
+        assert_eq!(removed.thread_count, 1);
+        assert!(!removed.already_removed);
+        assert!(
+            store
+                .project("prj_remove", "dev_test")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .list_threads("dev_test", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.project_path_removed(&workspace).await.unwrap());
+        assert!(store.app_thread_removed("app_remove").await.unwrap());
+        assert!(store.pending_events(10).await.unwrap().is_empty());
+
+        let replay = store.remove_project("prj_remove").await.unwrap().unwrap();
+        assert!(replay.already_removed);
+
+        store
+            .create_project("prj_readded", "Re-added", &workspace, &json!({}))
+            .await
+            .unwrap();
+        assert!(!store.project_path_removed(&workspace).await.unwrap());
+        assert!(!store.app_thread_removed("app_remove").await.unwrap());
+
+        let unassigned = store.ensure_unassigned_project("dev_test").await.unwrap();
+        assert!(store.remove_project(&unassigned).await.is_err());
+    }
 
     #[tokio::test]
     async fn durable_inbox_outbox_and_history_round_trip() {

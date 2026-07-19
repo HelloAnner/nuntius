@@ -3,13 +3,16 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   IconChat,
+  IconArchive,
+  IconRefresh,
   IconSearch,
   Sheet,
+  SwipeActionRow,
   relTime,
   statusLabel,
 } from "@nuntius/shared";
 import { api } from "../api";
-import { useNavigate } from "../hooks";
+import { useArchiveThreadAction, useNavigate } from "../hooks";
 
 export function ThreadSwitcher({
   open,
@@ -21,6 +24,7 @@ export function ThreadSwitcher({
   currentThreadId?: string;
 }) {
   const navigate = useNavigate();
+  const { archive, busyIds } = useArchiveThreadAction();
   const [query, setQuery] = useState("");
   const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
@@ -69,32 +73,39 @@ export function ThreadSwitcher({
           <div key={deviceId}>
             <div className="switch-group-label">{deviceName(deviceId)}</div>
             {list.map((t) => (
-              <button
+              <SwipeActionRow
                 key={t.id}
-                className="list-row"
-                style={t.id === currentThreadId ? { background: "var(--accent-soft)" } : undefined}
-                onClick={() => {
-                  navigate({
-                    name: "thread",
-                    deviceId: t.deviceId,
-                    projectId: t.projectId,
-                    threadId: t.id,
-                  });
-                  onClose();
-                }}
+                icon={t.archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
+                label={t.archived ? "恢复" : "归档"}
+                busy={busyIds.has(t.id)}
+                onAction={() => archive(t.id, !t.archived)}
               >
-                <span className={`row-glyph thread${t.status === "active" ? " live" : ""}`}>
-                  <IconChat size={15} />
-                </span>
-                <div className="grow">
-                  <div className="title" style={{ fontSize: 14.5 }}>{t.title || "未命名会话"}</div>
-                  <div className="sub">
-                    <span>{statusLabel(t.status)}</span>
-                    <span>·</span>
-                    <span className="num">{relTime(t.lastActivityAt)}</span>
+                <button
+                  className="list-row"
+                  style={t.id === currentThreadId ? { background: "var(--accent-soft)" } : undefined}
+                  onClick={() => {
+                    navigate({
+                      name: "thread",
+                      deviceId: t.deviceId,
+                      projectId: t.projectId,
+                      threadId: t.id,
+                    });
+                    onClose();
+                  }}
+                >
+                  <span className={`row-glyph thread${t.status === "active" ? " live" : ""}`}>
+                    <IconChat size={15} />
+                  </span>
+                  <div className="grow">
+                    <div className="title" style={{ fontSize: 14.5 }}>{t.title || "未命名会话"}</div>
+                    <div className="sub">
+                      <span>{statusLabel(t.status)}</span>
+                      <span>·</span>
+                      <span className="num">{relTime(t.lastActivityAt)}</span>
+                    </div>
                   </div>
-                </div>
-              </button>
+                </button>
+              </SwipeActionRow>
             ))}
           </div>
         ))

@@ -228,6 +228,9 @@ pub struct HistoryBatch {
 pub enum DeviceCommandKind {
     Refresh,
     ProjectCreate(CreateProjectRequest),
+    ProjectDelete {
+        project_id: String,
+    },
     ThreadCreate {
         project_id: String,
         request: CreateThreadRequest,
@@ -400,6 +403,16 @@ pub enum TunnelFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_delete_wire_tag_is_stable() {
+        let value = serde_json::to_value(DeviceCommandKind::ProjectDelete {
+            project_id: "prj_test".into(),
+        })
+        .unwrap();
+        assert_eq!(value["kind"], "project_delete");
+        assert_eq!(value["payload"]["projectId"], "prj_test");
+    }
 
     #[test]
     fn event_ack_wire_tag_is_stable() {

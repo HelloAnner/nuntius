@@ -11,7 +11,8 @@ pub fn target_key(command: &DeviceCommand) -> String {
         return format!("thread:{thread_id}");
     }
     match &command.command {
-        DeviceCommandKind::ThreadCreate { project_id, .. } => format!("project:{project_id}"),
+        DeviceCommandKind::ProjectDelete { project_id }
+        | DeviceCommandKind::ThreadCreate { project_id, .. } => format!("project:{project_id}"),
         DeviceCommandKind::ApprovalDecide { approval_id, .. } => {
             format!("approval:{approval_id}")
         }

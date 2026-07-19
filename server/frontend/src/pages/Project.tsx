@@ -3,20 +3,24 @@ import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Empty,
+  IconArchive,
   IconChat,
   IconPlus,
+  IconRefresh,
   Sheet,
   Spinner,
+  SwipeActionRow,
   newIdemKey,
   threadOptionsForAccess,
   turnOptionsForAccess,
+  useConfirmAction,
   useToast,
   type ThreadSummary,
 } from "@nuntius/shared";
 import { api, ApiError } from "../api";
-import { useNavigate } from "../hooks";
+import { useArchiveThreadAction, useNavigate } from "../hooks";
 import { liveStore, useAccessMode, useRoute } from "../stores";
-import { trackCommand } from "../events";
+import { trackCommand, waitForCommand } from "../events";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 
 const TERMINAL_COMMANDS = new Set(["completed", "failed", "rejected", "unknown", "expired"]);
@@ -68,13 +72,16 @@ async function waitForCreatedThread(commandId: string): Promise<CreatedThread> {
 
 export function ProjectPage({ deviceId, projectId }: { deviceId: string; projectId: string }) {
   const navigate = useNavigate();
+  const { archive, busyIds } = useArchiveThreadAction();
   const back = useRoute((s) => s.back);
   const toast = useToast();
   const qc = useQueryClient();
   const accessMode = useAccessMode((state) => state.mode);
+  const { confirm, node: confirmNode } = useConfirmAction();
   const [creating, setCreating] = useState(false);
   const [firstMessage, setFirstMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const projects = useQuery({
@@ -92,13 +99,14 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
   useEffect(() => {
     const missingDevice = devices.isSuccess && !device;
     const missingProject = projects.isSuccess && !project;
-    if (devices.isError || projects.isError || missingDevice || missingProject) {
+    if (!deleting && (devices.isError || projects.isError || missingDevice || missingProject)) {
       navigate({ name: "devices" }, { replace: true });
     }
-  }, [device, devices.isError, devices.isSuccess, navigate, project, projects.isError, projects.isSuccess]);
+  }, [deleting, device, devices.isError, devices.isSuccess, navigate, project, projects.isError, projects.isSuccess]);
 
   const unassigned = project?.kind === "system_unassigned";
   const canCreate = device?.status === "online" && !unassigned;
+  const canDelete = device?.status === "online" && !unassigned;
   const sorted = [...(threads.data ?? [])].sort(
     (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
   );
@@ -170,6 +178,41 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
     }
   };
 
+  const remove = () => {
+    if (!project || !canDelete || deleting) return;
+    confirm({
+      title: `删除「${project.displayName}」？`,
+      body: `会从 Nuntius 服务器和「${device?.displayName ?? "这台设备"}」删除项目登记及 ${project.threadCount} 个会话记录。不会删除磁盘上的项目文件或 Codex 原始会话文件；以后重新添加此目录可以再次同步历史。`,
+      confirmLabel: "删除项目",
+      danger: true,
+      action: async () => {
+        setDeleting(true);
+        try {
+          const receipt = await api.deleteProject(deviceId, projectId, newIdemKey());
+          trackCommand(qc, receipt.commandId, undefined, "project.delete");
+          await waitForCommand(receipt.commandId);
+          qc.setQueryData<typeof projects.data>(["projects", deviceId], (old) =>
+            old?.filter((item) => item.id !== projectId),
+          );
+          qc.setQueryData<ThreadSummary[]>(["allThreads"], (old) =>
+            old?.filter((item) => item.projectId !== projectId),
+          );
+          await Promise.all([
+            qc.invalidateQueries({ queryKey: ["projects", deviceId] }),
+            qc.invalidateQueries({ queryKey: ["allThreads"] }),
+            qc.invalidateQueries({ queryKey: ["devices"] }),
+          ]);
+          toast("项目已从服务器和设备删除");
+          navigate({ name: "device", deviceId }, { replace: true });
+        } catch (error) {
+          toast(error instanceof Error ? error.message : "删除失败，请重试", { error: true });
+        } finally {
+          setDeleting(false);
+        }
+      },
+    });
+  };
+
   return (
     <div className="page">
       <TopBar
@@ -213,16 +256,39 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
           ) : (
             <div className="list-group">
               {sorted.map((t) => (
-                <ThreadRow
+                <SwipeActionRow
                   key={t.id}
-                  thread={t}
-                  onClick={() =>
-                    navigate({ name: "thread", deviceId, projectId, threadId: t.id })
-                  }
-                />
+                  icon={t.archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
+                  label={t.archived ? "恢复" : "归档"}
+                  busy={busyIds.has(t.id)}
+                  disabled={!canDelete}
+                  onAction={() => archive(t.id, !t.archived)}
+                >
+                  <ThreadRow
+                    thread={t}
+                    onClick={() =>
+                      navigate({ name: "thread", deviceId, projectId, threadId: t.id })
+                    }
+                  />
+                </SwipeActionRow>
               ))}
             </div>
           )}
+          {!unassigned && project ? (
+            <>
+              <div className="section-label micro project-management-label">项目管理</div>
+              <div className="danger-zone project-danger-zone">
+                <div className="project-danger-copy">
+                  <strong>从 Nuntius 中删除项目</strong>
+                  <span>同步删除服务器与设备上的项目登记和会话记录，不会动磁盘文件。</span>
+                </div>
+                <button className="btn danger sm" onClick={remove} disabled={!canDelete || deleting}>
+                  {deleting ? <Spinner sm /> : null}
+                  {device?.status === "online" ? "删除项目" : "设备离线"}
+                </button>
+              </div>
+            </>
+          ) : null}
         </div>
       </div>
 
@@ -244,6 +310,7 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
           </button>
         </div>
       </Sheet>
+      {confirmNode}
     </div>
   );
 }

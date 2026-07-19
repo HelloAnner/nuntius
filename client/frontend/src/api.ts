@@ -58,6 +58,8 @@ export const api = {
   projects: () => req<ProjectSummary[]>("GET", "/projects"),
   createProject: (directoryRef: string, displayName: string) =>
     req<ProjectSummary>("POST", "/projects", { directoryRef, displayName, defaults: {} }),
+  deleteProject: (projectId: string) =>
+    req<{ projectId: string; threadCount: number }>("DELETE", `/projects/${projectId}`),
   projectThreads: (projectId: string) =>
     req<ThreadSummary[]>("GET", `/projects/${projectId}/threads`),
   createThread: (projectId: string, title: string | null) =>

@@ -96,6 +96,8 @@ export const api = {
     req<ProjectSummary[]>("GET", `/devices/${deviceId}/projects`),
   createProject: (deviceId: string, directoryRef: string, displayName: string, idemKey: string) =>
     req<CommandReceipt>("POST", `/devices/${deviceId}/projects`, { directoryRef, displayName, defaults: {} }, { idemKey }),
+  deleteProject: (deviceId: string, projectId: string, idemKey: string) =>
+    req<CommandReceipt>("DELETE", `/devices/${deviceId}/projects/${projectId}`, undefined, { idemKey }),
 
   directoryRoots: (deviceId: string) =>
     req<DirectoryListResponse>("GET", `/devices/${deviceId}/directories/roots`),
@@ -127,8 +129,8 @@ export const api = {
     req<CommandReceipt>("POST", `/threads/${threadId}/steer`, { text }, { idemKey }),
   interruptTurn: (threadId: string) =>
     req<CommandReceipt>("POST", `/threads/${threadId}/interrupt`),
-  archiveThread: (threadId: string) =>
-    req<CommandReceipt>("POST", `/threads/${threadId}/archive`),
+  archiveThread: (threadId: string, archived = true) =>
+    req<CommandReceipt>("POST", `/threads/${threadId}/archive`, { archived }),
 
   decideApproval: (deviceId: string, approvalId: string, decision: string, idemKey: string) =>
     req<CommandReceipt>(

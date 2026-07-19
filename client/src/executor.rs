@@ -36,6 +36,9 @@ impl CommandExecutor {
                 Ok(json!({"refreshed":true}))
             }
             DeviceCommandKind::ProjectCreate(request) => self.create_project(request).await,
+            DeviceCommandKind::ProjectDelete { project_id } => {
+                self.delete_project(project_id).await
+            }
             DeviceCommandKind::ThreadCreate {
                 project_id,
                 request,
@@ -45,18 +48,34 @@ impl CommandExecutor {
                 archived,
             } => {
                 let thread = self.command_thread(thread_id).await?;
-                let method = if *archived {
-                    "thread/archive"
+                let app_result = if thread.archived == *archived {
+                    json!({"alreadyInRequestedState":true})
                 } else {
-                    "thread/unarchive"
+                    let method = if *archived {
+                        "thread/archive"
+                    } else {
+                        "thread/unarchive"
+                    };
+                    let result = self
+                        .app
+                        .call(method, json!({"threadId":thread.app_server_thread_id}))
+                        .await?;
+                    self.store.set_thread_archived(thread_id, *archived).await?;
+                    result
                 };
-                let result = self
-                    .app
-                    .call(method, json!({"threadId":thread.app_server_thread_id}))
-                    .await?;
-                self.store.set_thread_archived(thread_id, *archived).await?;
-                self.sync_thread(thread_id).await?;
-                Ok(result)
+                let updated = self.thread(thread_id).await?;
+                if let Err(error) = self.sync_thread(thread_id).await {
+                    // The archive side effect and local SQLite state are already durable.
+                    // A transient history-outbox failure must not report the idempotent
+                    // archive operation itself as failed.
+                    tracing::warn!(%thread_id,error=?error,"archived thread history sync deferred");
+                }
+                Ok(json!({
+                    "threadId": thread_id,
+                    "archived": archived,
+                    "thread": updated,
+                    "appServerResult": app_result,
+                }))
             }
             DeviceCommandKind::TurnStart { thread_id, request } => {
                 self.start_turn(thread_id, request).await
@@ -176,6 +195,32 @@ impl CommandExecutor {
             }
         });
         Ok(serde_json::to_value(project)?)
+    }
+
+    async fn delete_project(&self, project_id: &str) -> Result<Value> {
+        let removal = self
+            .store
+            .remove_project(project_id)
+            .await?
+            .context("project not found")?;
+        self.emit(
+            "project.removed",
+            Some(project_id),
+            None,
+            None,
+            json!({
+                "projectId": project_id,
+                "threadCount": removal.thread_count,
+                "alreadyRemoved": removal.already_removed,
+            }),
+            true,
+        )
+        .await?;
+        Ok(json!({
+            "projectId": project_id,
+            "threadCount": removal.thread_count,
+            "alreadyRemoved": removal.already_removed,
+        }))
     }
 
     async fn create_thread(
@@ -495,6 +540,9 @@ impl CommandExecutor {
             let Some(app_id) = app_thread.get("id").and_then(Value::as_str) else {
                 continue;
             };
+            if self.app_thread_is_removed(app_thread).await? {
+                continue;
+            }
             let fingerprint = thread_fingerprint(app_thread)?;
             let key = thread_fingerprint_key(app_id);
             let missing = self.store.local_thread_id(app_id).await?.is_none();
@@ -530,6 +578,9 @@ impl CommandExecutor {
             .await
             .with_context(|| format!("cannot read changed Codex thread {app_id}"))?;
         let app_thread = response.get("thread").unwrap_or(&response);
+        if self.app_thread_is_removed(app_thread).await? {
+            return Ok(());
+        }
         let project_id = if let Some(local_id) = self.store.local_thread_id(app_id).await? {
             self.thread(&local_id).await?.project_id
         } else {
@@ -642,6 +693,9 @@ impl CommandExecutor {
                 .cloned()
                 .unwrap_or_default();
             for app_thread in threads {
+                if self.app_thread_is_removed(&app_thread).await? {
+                    continue;
+                }
                 let project_id = self
                     .project_for_app_thread_with_unassigned(
                         fixed_project_id,
@@ -710,6 +764,22 @@ impl CommandExecutor {
             .await?;
         }
         Ok(imported)
+    }
+
+    async fn app_thread_is_removed(&self, app_thread: &Value) -> Result<bool> {
+        if let Some(app_id) = app_thread.get("id").and_then(Value::as_str)
+            && self.store.app_thread_removed(app_id).await?
+        {
+            return Ok(true);
+        }
+        let Some(raw_cwd) = app_thread.get("cwd").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        let Some(canonical) = directory::canonical_project_path(std::path::Path::new(raw_cwd)).ok()
+        else {
+            return Ok(false);
+        };
+        self.store.project_path_removed(&canonical).await
     }
 
     async fn project_for_app_thread(
@@ -1055,6 +1125,9 @@ fn validate_command(kind: &DeviceCommandKind) -> Result<()> {
             text("directoryRef", &request.directory_ref, 256)?;
             text("displayName", &request.display_name, 128)?;
             value("defaults", &request.defaults, 64 * 1024)?;
+        }
+        DeviceCommandKind::ProjectDelete { project_id } => {
+            text("projectId", project_id, 128)?;
         }
         DeviceCommandKind::ThreadCreate { request, .. } => {
             if let Some(title) = &request.title {

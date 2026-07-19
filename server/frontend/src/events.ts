@@ -25,6 +25,27 @@ export const useSse = create<SseState>((set) => ({
 
 const TERMINAL_CMD = new Set(["completed", "failed", "rejected", "unknown", "expired"]);
 
+export async function waitForCommand(commandId: string, timeoutMs = 90_000) {
+  const deadline = Date.now() + timeoutMs;
+  let delay = 180;
+  while (Date.now() < deadline) {
+    try {
+      const command = await api.command(commandId);
+      if (command.status === "completed") return command;
+      if (TERMINAL_CMD.has(command.status)) {
+        throw new Error(command.errorMessage || "操作失败，请重试");
+      }
+    } catch (error) {
+      if (!(error instanceof ApiError && (error.retryable || error.code === "not_found"))) {
+        throw error;
+      }
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, delay));
+    delay = Math.min(1_000, Math.round(delay * 1.5));
+  }
+  throw new Error("操作超时，请检查设备连接后重试");
+}
+
 /** register a command receipt; falls back to polling if the SSE update is lost */
 export function trackCommand(qc: QueryClient, commandId: string, threadId?: string, kind?: string) {
   useCommands.getState().track(commandId, threadId, kind);
@@ -75,6 +96,10 @@ function applyCommandStatus(
     if (resolvedKind.startsWith("project.")) {
       void qc.invalidateQueries({ queryKey: ["projects"] });
       void qc.invalidateQueries({ queryKey: ["devices"] });
+      if (resolvedKind === "project.delete") {
+        void qc.invalidateQueries({ queryKey: ["projectThreads"] });
+        void qc.invalidateQueries({ queryKey: ["allThreads"] });
+      }
     }
   }
 }
@@ -135,6 +160,22 @@ export function startEvents(qc: QueryClient): () => void {
         next[idx] = project;
         return next;
       });
+      return;
+    }
+    if (type === "project.removed") {
+      const projectId =
+        typeof (event.payload as { projectId?: unknown }).projectId === "string"
+          ? (event.payload as { projectId: string }).projectId
+          : event.projectId;
+      if (projectId) {
+        qc.setQueryData<ProjectSummary[]>(["projects", event.deviceId], (old) =>
+          old?.filter((project) => project.id !== projectId),
+        );
+      }
+      void qc.invalidateQueries({ queryKey: ["projects", event.deviceId] });
+      void qc.invalidateQueries({ queryKey: ["projectThreads"] });
+      void qc.invalidateQueries({ queryKey: ["allThreads"] });
+      void qc.invalidateQueries({ queryKey: ["devices"] });
       return;
     }
     if (type === "approval.requested") {

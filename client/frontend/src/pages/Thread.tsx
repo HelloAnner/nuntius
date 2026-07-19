@@ -5,6 +5,7 @@ import {
   IconArchive,
   IconRefresh,
   Spinner,
+  SwipeActionRow,
   ThreadView,
   newIdemKey,
   useConfirmAction,
@@ -14,7 +15,7 @@ import {
   type HistoryRecord,
 } from "@nuntius/shared";
 import { api } from "../api";
-import { useMedia, useNavigate } from "../hooks";
+import { useArchiveThreadAction, useMedia, useNavigate } from "../hooks";
 import { liveStore, useApprovals, useRoute, useThreadLive } from "../stores";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 
@@ -51,6 +52,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
   const toast = useToast();
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const { archive: archiveThread, busyIds } = useArchiveThreadAction();
   const back = useRoute((s) => s.back);
   const wide = useMedia("(min-width: 768px)");
   const { confirm, node: confirmNode } = useConfirmAction();
@@ -269,11 +271,18 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
             <div className="page-col">
               <div className="list-group" style={{ border: "none", background: "transparent" }}>
                 {sortedThreads.map((t) => (
-                  <ThreadRow
+                  <SwipeActionRow
                     key={t.id}
-                    thread={t}
-                    onClick={() => navigate({ name: "thread", projectId, threadId: t.id })}
-                  />
+                    icon={t.archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
+                    label={t.archived ? "恢复" : "归档"}
+                    busy={busyIds.has(t.id)}
+                    onAction={() => archiveThread(t.id, !t.archived)}
+                  >
+                    <ThreadRow
+                      thread={t}
+                      onClick={() => navigate({ name: "thread", projectId, threadId: t.id })}
+                    />
+                  </SwipeActionRow>
                 ))}
               </div>
             </div>

@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{
-    ConnectOptions, Row, SqlitePool,
+    ConnectOptions, Row, Sqlite, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::{path::Path, str::FromStr, sync::Arc};
@@ -567,6 +567,35 @@ impl ServerStore {
         Ok(rows.into_iter().map(project_from_row).collect())
     }
 
+    pub async fn remove_project(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        project_id: &str,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        let project = sqlx::query(
+            "SELECT kind,removed_at FROM projects WHERE id=? AND device_id=? AND user_id=?",
+        )
+        .bind(project_id)
+        .bind(device_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(project) = project else {
+            return Ok(false);
+        };
+        if project.get::<String, _>("kind") != "workspace" {
+            bail!("system project cannot be removed");
+        }
+        if project.get::<Option<String>, _>("removed_at").is_some() {
+            return Ok(false);
+        }
+        let changed = remove_project_records(&mut tx, device_id, project_id).await?;
+        tx.commit().await?;
+        Ok(changed)
+    }
+
     pub async fn list_threads(
         &self,
         user_id: &str,
@@ -852,24 +881,34 @@ impl ServerStore {
         sqlx::query("UPDATE commands SET status=?,device_accepted_at=CASE WHEN ?='device_accepted' THEN COALESCE(device_accepted_at,?) ELSE device_accepted_at END,completed_at=CASE WHEN ? THEN ? ELSE completed_at END,result=COALESCE(?,result),error_code=COALESCE(?,error_code),error_message=COALESCE(?,error_message) WHERE id=? AND device_id=?")
             .bind(incoming.as_str()).bind(incoming.as_str()).bind(now()).bind(terminal).bind(now()).bind(result_json).bind(error_code).bind(error_message).bind(command_id).bind(device_id)
             .execute(&mut *tx).await?;
-        if terminal
-            && let DeviceCommandKind::ApprovalDecide {
-                approval_id,
-                request,
-            } = serde_json::from_str::<DeviceCommand>(&row.get::<String, _>("payload"))?.command
-        {
-            if incoming == CommandStatus::Completed {
-                sqlx::query("UPDATE approvals SET status='decided',decided_at=?,decision=?,last_error=NULL WHERE id=? AND device_id=?")
-                    .bind(now()).bind(request.decision).bind(approval_id).bind(device_id).execute(&mut *tx).await?;
-            } else {
-                let approval_status = match incoming {
-                    CommandStatus::Unknown => "unknown",
-                    CommandStatus::Expired => "expired",
-                    _ => "failed",
-                };
-                sqlx::query("UPDATE approvals SET status=?,decided_at=?,last_error=? WHERE id=? AND device_id=?")
-                    .bind(approval_status).bind(now()).bind(error_code.unwrap_or("decision_failed"))
-                    .bind(approval_id).bind(device_id).execute(&mut *tx).await?;
+        let device_command =
+            serde_json::from_str::<DeviceCommand>(&row.get::<String, _>("payload"))?;
+        if terminal {
+            match device_command.command {
+                DeviceCommandKind::ApprovalDecide {
+                    approval_id,
+                    request,
+                } => {
+                    if incoming == CommandStatus::Completed {
+                        sqlx::query("UPDATE approvals SET status='decided',decided_at=?,decision=?,last_error=NULL WHERE id=? AND device_id=?")
+                            .bind(now()).bind(request.decision).bind(approval_id).bind(device_id).execute(&mut *tx).await?;
+                    } else {
+                        let approval_status = match incoming {
+                            CommandStatus::Unknown => "unknown",
+                            CommandStatus::Expired => "expired",
+                            _ => "failed",
+                        };
+                        sqlx::query("UPDATE approvals SET status=?,decided_at=?,last_error=? WHERE id=? AND device_id=?")
+                            .bind(approval_status).bind(now()).bind(error_code.unwrap_or("decision_failed"))
+                            .bind(approval_id).bind(device_id).execute(&mut *tx).await?;
+                    }
+                }
+                DeviceCommandKind::ProjectDelete { project_id }
+                    if incoming == CommandStatus::Completed =>
+                {
+                    remove_project_records(&mut tx, device_id, &project_id).await?;
+                }
+                _ => {}
             }
         }
         tx.commit().await?;
@@ -1067,6 +1106,16 @@ impl ServerStore {
                 .await?;
         if owner.as_deref() != Some(user_id) {
             bail!("history device ownership mismatch");
+        }
+        let removed_thread: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM removed_project_threads WHERE thread_id=? AND device_id=?",
+        )
+        .bind(&batch.thread_id)
+        .bind(&batch.device_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if removed_thread.is_some() {
+            return Ok(batch.to_cursor.clone());
         }
         let conflicting_link: Option<i64> = sqlx::query_scalar("SELECT 1 FROM history_sync_batches WHERE device_id=? AND thread_id=? AND inventory_revision=? AND from_cursor IS ? AND to_cursor<>?")
             .bind(&batch.device_id).bind(&batch.thread_id).bind(batch.inventory_revision).bind(&batch.from_cursor).bind(&batch.to_cursor)
@@ -1272,6 +1321,43 @@ impl ServerStore {
     }
 }
 
+async fn remove_project_records(
+    tx: &mut Transaction<'_, Sqlite>,
+    device_id: &str,
+    project_id: &str,
+) -> Result<bool> {
+    let stamp = now();
+    sqlx::query("INSERT OR IGNORE INTO removed_project_threads(thread_id,project_id,device_id,removed_at) SELECT id,project_id,device_id,? FROM threads WHERE project_id=? AND device_id=?")
+        .bind(&stamp)
+        .bind(project_id)
+        .bind(device_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM approvals WHERE project_id=? AND device_id=?")
+        .bind(project_id)
+        .bind(device_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM history_sync_batches WHERE thread_id IN (SELECT id FROM threads WHERE project_id=? AND device_id=?)")
+        .bind(project_id)
+        .bind(device_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM threads WHERE project_id=? AND device_id=?")
+        .bind(project_id)
+        .bind(device_id)
+        .execute(&mut **tx)
+        .await?;
+    let changed = sqlx::query("UPDATE projects SET status='removed',thread_count=0,removed_at=COALESCE(removed_at,?) WHERE id=? AND device_id=? AND kind='workspace' AND removed_at IS NULL")
+        .bind(&stamp)
+        .bind(project_id)
+        .bind(device_id)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    Ok(changed == 1)
+}
+
 fn project_from_row(r: sqlx::sqlite::SqliteRow) -> ProjectSummary {
     ProjectSummary {
         id: r.get("id"),
@@ -1434,6 +1520,132 @@ mod tests {
             .expect("persisted session should remain valid after reopening SQLite");
         assert_eq!(session.id, session_id);
         assert_eq!(session.login_name, "owner");
+    }
+
+    #[tokio::test]
+    async fn completed_project_delete_command_removes_server_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ServerStore::open(temp.path()).await.unwrap();
+        let user = store.create_owner("owner", "test-hash").await.unwrap();
+        store
+            .create_pairing_code(&user.id, "pair-hash", 10)
+            .await
+            .unwrap();
+        let device_id = store
+            .pair_device(
+                &PairDeviceRequest {
+                    code: "unused".into(),
+                    display_name: "Device".into(),
+                    public_key: "key".into(),
+                    agent_version: "test".into(),
+                    os_family: "test".into(),
+                    architecture: "test".into(),
+                },
+                "pair-hash",
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_project_summary(
+                &user.id,
+                &ProjectSummary {
+                    id: "prj_remove".into(),
+                    device_id: device_id.clone(),
+                    kind: ProjectKind::Workspace,
+                    display_name: "Remove me".into(),
+                    path_hint: Some("workspace".into()),
+                    status: "active".into(),
+                    repo_name: None,
+                    branch: None,
+                    is_dirty: None,
+                    thread_count: 1,
+                    last_activity_at: Some(now()),
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_created_thread(
+                &user.id,
+                &ThreadSummary {
+                    id: "thr_remove".into(),
+                    device_id: device_id.clone(),
+                    project_id: "prj_remove".into(),
+                    app_server_thread_id: Some("app_remove".into()),
+                    title: "Old thread".into(),
+                    status: "idle".into(),
+                    archived: false,
+                    history_completeness: HistoryCompleteness::Complete,
+                    last_synced_at: Some(now()),
+                    last_activity_at: Some(now()),
+                },
+            )
+            .await
+            .unwrap();
+        let command = DeviceCommand {
+            command_id: "cmd_remove".into(),
+            device_id: device_id.clone(),
+            project_id: Some("prj_remove".into()),
+            thread_id: None,
+            issued_at: now(),
+            expires_at: now(),
+            command: DeviceCommandKind::ProjectDelete {
+                project_id: "prj_remove".into(),
+            },
+        };
+        store
+            .insert_command(
+                &user.id,
+                "remove-idem",
+                "remove-fingerprint",
+                &command,
+                i64::MAX,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .update_command_ack(
+                    &device_id,
+                    "cmd_remove",
+                    "completed",
+                    Some(&serde_json::json!({"projectId":"prj_remove"})),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap(),
+            CommandStatus::Completed
+        );
+        assert!(
+            store
+                .list_projects(&user.id, &device_id)
+                .await
+                .unwrap()
+                .iter()
+                .all(|project| project.id != "prj_remove")
+        );
+        assert!(
+            store
+                .list_threads(&user.id, Some(&device_id), None, 10, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let tombstone: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM removed_project_threads WHERE thread_id='thr_remove'",
+        )
+        .fetch_optional(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(tombstone, Some(1));
+        assert!(
+            !store
+                .remove_project(&user.id, &device_id, "prj_remove")
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

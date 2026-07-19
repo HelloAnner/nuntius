@@ -17,7 +17,7 @@ use axum::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use base64::Engine;
 use futures_util::Stream;
@@ -64,6 +64,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/devices/{device_id}/projects",
             get(list_projects).post(create_project),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/projects/{project_id}",
+            delete(delete_project),
         )
         .route(
             "/api/v1/devices/{device_id}/projects/{project_id}/threads",
@@ -146,6 +150,7 @@ async fn info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiErro
             "device-tunnel.v1".into(),
             "history.v1".into(),
             "directory-browser.v1".into(),
+            "project-delete.v1".into(),
             "sync-snapshot.v1".into(),
             "approvals.v1".into(),
             "server-update-relay.ssh.v1".into(),
@@ -634,6 +639,31 @@ async fn create_project(
         None,
         None,
         DeviceCommandKind::ProjectCreate(request),
+    )
+    .await
+}
+
+async fn delete_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((device_id, project_id)): Path<(String, String)>,
+) -> Result<(StatusCode, Json<CommandReceipt>), ApiError> {
+    let session = web_mutation(&state, &headers).await?;
+    if !state
+        .store
+        .project_accepts_commands(&session.user_id, &device_id, &project_id)
+        .await?
+    {
+        return Err(ApiError::NotFound);
+    }
+    enqueue(
+        &state,
+        &headers,
+        &session,
+        device_id,
+        Some(project_id.clone()),
+        None,
+        DeviceCommandKind::ProjectDelete { project_id },
     )
     .await
 }
@@ -1165,6 +1195,9 @@ fn validate_device_command(kind: &DeviceCommandKind) -> Result<(), ApiError> {
             bounded_nonempty("directoryRef", &request.directory_ref, 256)?;
             bounded_nonempty("displayName", &request.display_name, 128)?;
             bounded_json("defaults", &request.defaults, 64 * 1024)?;
+        }
+        DeviceCommandKind::ProjectDelete { project_id } => {
+            bounded_nonempty("projectId", project_id, 128)?;
         }
         DeviceCommandKind::ThreadCreate { request, .. } => {
             if let Some(title) = &request.title {

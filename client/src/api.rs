@@ -11,7 +11,7 @@ use axum::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use futures_util::Stream;
 use serde::Deserialize;
@@ -27,6 +27,7 @@ pub fn router(executor: CommandExecutor) -> Router {
         .route("/api/v1/directories/roots", get(directory_roots))
         .route("/api/v1/directories", get(directory_list))
         .route("/api/v1/projects", get(projects).post(create_project))
+        .route("/api/v1/projects/{project_id}", delete(delete_project))
         .route(
             "/api/v1/projects/{project_id}/threads",
             get(project_threads).post(create_thread),
@@ -123,7 +124,7 @@ async fn ready(State(executor): State<CommandExecutor>) -> Result<Json<Value>, A
 async fn info(State(executor): State<CommandExecutor>) -> Result<Json<Value>, ApiError> {
     let (projects, inbox, outbox, active) = executor.store.counts().await?;
     Ok(Json(
-        json!({"apiVersion":"v1","clientVersion":env!("CARGO_PKG_VERSION"),"buildSha":nuntius_updater::build_sha(),"deviceId":executor.device_id,"paired":executor.config.device_id.is_some(),"localBind":executor.config.local_bind,"appServerRunning":executor.app.is_running().await,"projects":projects,"pendingCommands":inbox,"pendingEvents":outbox,"activeTurns":active,"capabilities":["local-console.v1","directory-browser.v1","app-server.v1","sse.v1"]}),
+        json!({"apiVersion":"v1","clientVersion":env!("CARGO_PKG_VERSION"),"buildSha":nuntius_updater::build_sha(),"deviceId":executor.device_id,"paired":executor.config.device_id.is_some(),"localBind":executor.config.local_bind,"appServerRunning":executor.app.is_running().await,"projects":projects,"pendingCommands":inbox,"pendingEvents":outbox,"activeTurns":active,"capabilities":["local-console.v1","directory-browser.v1","project-delete.v1","app-server.v1","sse.v1"]}),
     ))
 }
 async fn openapi() -> Response {
@@ -183,6 +184,20 @@ async fn create_project(
         &executor,
         DeviceCommandKind::ProjectCreate(request),
         None,
+        None,
+    )
+    .await
+}
+async fn delete_project(
+    State(executor): State<CommandExecutor>,
+    Path(project_id): Path<String>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    run(
+        &executor,
+        DeviceCommandKind::ProjectDelete {
+            project_id: project_id.clone(),
+        },
+        Some(project_id),
         None,
     )
     .await

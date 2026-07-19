@@ -426,6 +426,9 @@ pub struct HistoryBatch {
 pub enum DeviceCommandKind {
     Refresh,
     ProjectCreate(CreateProjectRequest),
+    ProjectDelete {
+        project_id: String,
+    },
     ThreadCreate {
         project_id: String,
         request: CreateThreadRequest,
@@ -459,6 +462,7 @@ impl DeviceCommandKind {
         match self {
             Self::Refresh => "device.refresh",
             Self::ProjectCreate(_) => "project.create",
+            Self::ProjectDelete { .. } => "project.delete",
             Self::ThreadCreate { .. } => "thread.create",
             Self::ThreadArchive { archived: true, .. } => "thread.archive",
             Self::ThreadArchive {
@@ -620,6 +624,17 @@ pub enum TunnelFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_delete_wire_tag_is_stable() {
+        let value = serde_json::to_value(DeviceCommandKind::ProjectDelete {
+            project_id: "prj_test".into(),
+        })
+        .unwrap();
+        assert_eq!(value["kind"], "project_delete");
+        assert_eq!(value["payload"]["projectId"], "prj_test");
+    }
+
     #[test]
     fn tunnel_tags_are_stable() {
         let value = serde_json::to_value(TunnelFrame::ServerNotice {

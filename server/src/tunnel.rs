@@ -223,6 +223,7 @@ async fn run_socket(
                     "event-ack.v1".into(),
                     "history.v1".into(),
                     "directory-browser.v1".into(),
+                    "project-delete.v1".into(),
                 ],
             })
             .await?;
@@ -376,6 +377,19 @@ async fn handle_frame(
                 state
                     .store
                     .upsert_project_summary(user_id, &project, event.seq)
+                    .await?;
+            }
+            if event.event_type == "project.removed" {
+                let project_id = event
+                    .project_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("project removal event has no project id"))?;
+                if event.payload.get("projectId").and_then(Value::as_str) != Some(project_id) {
+                    return Err(anyhow!("project removal payload mismatch"));
+                }
+                state
+                    .store
+                    .remove_project(user_id, device_id, project_id)
                     .await?;
             }
             if event.event_type == "approval.requested" {

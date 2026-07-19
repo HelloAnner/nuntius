@@ -5,6 +5,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -49,6 +50,93 @@ export function Empty({
       <div className="headline">{headline}</div>
       {hint ? <div className="hint">{hint}</div> : null}
       {action ? <div style={{ marginTop: 14 }}>{action}</div> : null}
+    </div>
+  );
+}
+
+/* ---- touch-friendly row action: drag right to reveal the leading action ---- */
+export function SwipeActionRow({
+  children,
+  icon,
+  label,
+  onAction,
+  disabled,
+  busy,
+}: {
+  children: ReactNode;
+  icon: ReactNode;
+  label: string;
+  onAction: () => unknown;
+  disabled?: boolean;
+  busy?: boolean;
+}) {
+  const [offset, setOffset] = useState(0);
+  const start = useRef<{ x: number; y: number } | null>(null);
+  const horizontal = useRef(false);
+  const dragged = useRef(false);
+  const maximum = 88;
+
+  const pointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (disabled || busy || event.button !== 0) return;
+    start.current = { x: event.clientX - offset, y: event.clientY };
+    horizontal.current = false;
+    dragged.current = false;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const pointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!start.current) return;
+    const dx = event.clientX - start.current.x;
+    const dy = event.clientY - start.current.y;
+    if (!horizontal.current && Math.abs(dx - offset) < 7 && Math.abs(dy) < 7) return;
+    if (!horizontal.current && Math.abs(dy) > Math.abs(dx - offset)) {
+      start.current = null;
+      setOffset(0);
+      return;
+    }
+    horizontal.current = true;
+    dragged.current = true;
+    setOffset(Math.max(0, Math.min(maximum, dx)));
+  };
+  const pointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    start.current = null;
+    setOffset(offset >= 42 ? maximum : 0);
+  };
+
+  return (
+    <div className={`swipe-row${offset > 0 ? " open" : ""}`}>
+      <button
+        className="swipe-action"
+        type="button"
+        disabled={disabled || busy}
+        aria-label={label}
+        onFocus={() => setOffset(maximum)}
+        onClick={() => {
+          setOffset(0);
+          void onAction();
+        }}
+      >
+        {busy ? <Spinner sm /> : icon}
+        <span>{label}</span>
+      </button>
+      <div
+        className="swipe-content"
+        style={{ transform: `translateX(${offset}px)` }}
+        onPointerDown={pointerDown}
+        onPointerMove={pointerMove}
+        onPointerUp={pointerEnd}
+        onPointerCancel={pointerEnd}
+        onClickCapture={(event) => {
+          if (!dragged.current) return;
+          event.preventDefault();
+          event.stopPropagation();
+          dragged.current = false;
+        }}
+      >
+        {children}
+      </div>
     </div>
   );
 }

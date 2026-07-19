@@ -784,3 +784,36 @@
   flex-direction: column;
   gap: 10px;
 }
+.project-management-label {
+  margin-top: 32px;
+}
+.project-danger-zone {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+.project-danger-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.project-danger-copy strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.project-danger-copy span {
+  color: var(--ink-3);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+@media (max-width: 520px) {
+  .project-danger-zone {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .project-danger-zone .btn {
+    width: 100%;
+  }
+}

@@ -65,6 +65,12 @@ export function startEvents(qc: QueryClient): () => void {
       void qc.invalidateQueries({ queryKey: ["projects"] });
       return;
     }
+    if (type === "project.removed") {
+      void qc.invalidateQueries({ queryKey: ["projects"] });
+      void qc.invalidateQueries({ queryKey: ["projectThreads"] });
+      void qc.invalidateQueries({ queryKey: ["threads"] });
+      return;
+    }
     if (type === "turn.started") {
       markThreadDirty(event.threadId);
       return;

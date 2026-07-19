@@ -1,11 +1,20 @@
 /* All local threads, newest activity first. */
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Empty, IconClock, Spinner } from "@nuntius/shared";
+import {
+  Empty,
+  IconArchive,
+  IconClock,
+  IconRefresh,
+  Spinner,
+  SwipeActionRow,
+} from "@nuntius/shared";
 import { api } from "../api";
+import { useArchiveThreadAction } from "../hooks";
 import { ConnIndicator, ThreadRowLink, TopBar } from "../components";
 
 export function ThreadsPage() {
+  const { archive, busyIds } = useArchiveThreadAction();
   const threads = useQuery({ queryKey: ["threads"], queryFn: api.threads });
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
 
@@ -35,7 +44,15 @@ export function ThreadsPage() {
           ) : (
             <div className="list-group">
               {list.map((t) => (
-                <ThreadRowLink key={t.id} thread={t} context={projectName(t.projectId)} />
+                <SwipeActionRow
+                  key={t.id}
+                  icon={t.archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
+                  label={t.archived ? "恢复" : "归档"}
+                  busy={busyIds.has(t.id)}
+                  onAction={() => archive(t.id, !t.archived)}
+                >
+                  <ThreadRowLink thread={t} context={projectName(t.projectId)} />
+                </SwipeActionRow>
               ))}
             </div>
           )}

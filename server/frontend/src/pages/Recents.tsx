@@ -1,13 +1,22 @@
 /* Recents: every synced thread across all devices, filterable. */
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Empty, IconClock, Segmented, Spinner } from "@nuntius/shared";
+import {
+  Empty,
+  IconArchive,
+  IconClock,
+  IconRefresh,
+  Segmented,
+  Spinner,
+  SwipeActionRow,
+} from "@nuntius/shared";
 import { api } from "../api";
-import { useNavigate } from "../hooks";
+import { useArchiveThreadAction, useNavigate } from "../hooks";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 
 export function RecentsPage() {
   const navigate = useNavigate();
+  const { archive, busyIds } = useArchiveThreadAction();
   const [filter, setFilter] = useState<string>("all");
   const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
@@ -51,19 +60,26 @@ export function RecentsPage() {
           ) : (
             <div className="list-group">
               {list.map((t) => (
-                <ThreadRow
+                <SwipeActionRow
                   key={t.id}
-                  thread={t}
-                  context={deviceName(t.deviceId)}
-                  onClick={() =>
-                    navigate({
-                      name: "thread",
-                      deviceId: t.deviceId,
-                      projectId: t.projectId,
-                      threadId: t.id,
-                    })
-                  }
-                />
+                  icon={t.archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
+                  label={t.archived ? "恢复" : "归档"}
+                  busy={busyIds.has(t.id)}
+                  onAction={() => archive(t.id, !t.archived)}
+                >
+                  <ThreadRow
+                    thread={t}
+                    context={deviceName(t.deviceId)}
+                    onClick={() =>
+                      navigate({
+                        name: "thread",
+                        deviceId: t.deviceId,
+                        projectId: t.projectId,
+                        threadId: t.id,
+                      })
+                    }
+                  />
+                </SwipeActionRow>
               ))}
             </div>
           )}

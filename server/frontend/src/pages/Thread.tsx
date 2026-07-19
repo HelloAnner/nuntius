@@ -3,7 +3,9 @@ import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   IconArchive,
+  IconRefresh,
   Spinner,
+  SwipeActionRow,
   ThreadView,
   newIdemKey,
   statusLabel,
@@ -16,7 +18,7 @@ import {
 } from "@nuntius/shared";
 import { api, ApiError } from "../api";
 import { trackCommand } from "../events";
-import { useMedia, useNavigate } from "../hooks";
+import { useArchiveThreadAction, useMedia, useNavigate } from "../hooks";
 import { liveStore, useAccessMode, useApprovals, useRoute, useThreadLive } from "../stores";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 import { ThreadSwitcher } from "../sheets/ThreadSwitcher";
@@ -46,13 +48,13 @@ export function ThreadPage({
   const qc = useQueryClient();
   const accessMode = useAccessMode((state) => state.mode);
   const navigate = useNavigate();
+  const { archive: archiveThread, busyIds } = useArchiveThreadAction();
   const back = useRoute((s) => s.back);
   const wide = useMedia("(min-width: 768px)");
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [turnCount, setTurnCount] = useState(12);
   const [routeGraceElapsed, setRouteGraceElapsed] = useState(false);
   const { confirm, node: confirmNode } = useConfirmAction();
-  const [actionBusy, setActionBusy] = useState(false);
 
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const projects = useQuery({
@@ -241,24 +243,15 @@ export function ThreadPage({
     }
   };
 
-  const archive = () =>
+  const setArchived = (next: boolean) =>
     confirm({
-      title: "归档这个会话？",
-      body: "归档后会话变为只读，历史记录保留，随时可以在列表中找到。",
-      confirmLabel: "归档",
+      title: next ? "归档这个会话？" : "取消归档？",
+      body: next
+        ? "归档后会话变为只读，历史记录保留，随时可以在列表中找到。"
+        : "会话将恢复为可继续对话的状态。",
+      confirmLabel: next ? "归档" : "取消归档",
       action: async () => {
-        setActionBusy(true);
-        try {
-          const receipt = await api.archiveThread(threadId);
-          trackCommand(qc, receipt.commandId, threadId, "thread.archive");
-          await qc.invalidateQueries({ queryKey: ["projectThreads", deviceId, projectId] });
-          await qc.invalidateQueries({ queryKey: ["allThreads"] });
-          toast("已归档");
-        } catch {
-          toast("归档失败", { error: true });
-        } finally {
-          setActionBusy(false);
-        }
+        await archiveThread(threadId, next);
       },
     });
 
@@ -293,7 +286,7 @@ export function ThreadPage({
       canSend={canSend}
       lockedReason={lockedReason}
       running={running}
-      busy={actionBusy}
+      busy={busyIds.has(threadId)}
       onSend={send}
       onRetry={retry}
       onInterrupt={interrupt}
@@ -308,9 +301,13 @@ export function ThreadPage({
       onTitleClick={() => setSwitcherOpen(true)}
       trailing={
         <>
-          {!archived && !unassigned ? (
-            <button className="icon-btn" onClick={archive} aria-label="归档会话">
-              <IconArchive size={18} />
+          {!unassigned ? (
+            <button
+              className="icon-btn"
+              onClick={() => setArchived(!archived)}
+              aria-label={archived ? "取消归档" : "归档会话"}
+            >
+              {archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
             </button>
           ) : null}
           <ConnIndicator />
@@ -351,13 +348,21 @@ export function ThreadPage({
             <div className="page-col">
               <div className="list-group" style={{ border: "none", background: "transparent" }}>
                 {sortedThreads.map((t) => (
-                  <ThreadRow
+                  <SwipeActionRow
                     key={t.id}
-                    thread={t}
-                    onClick={() =>
-                      navigate({ name: "thread", deviceId, projectId, threadId: t.id })
-                    }
-                  />
+                    icon={t.archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
+                    label={t.archived ? "恢复" : "归档"}
+                    busy={busyIds.has(t.id)}
+                    disabled={!online || unassigned}
+                    onAction={() => archiveThread(t.id, !t.archived)}
+                  >
+                    <ThreadRow
+                      thread={t}
+                      onClick={() =>
+                        navigate({ name: "thread", deviceId, projectId, threadId: t.id })
+                      }
+                    />
+                  </SwipeActionRow>
                 ))}
               </div>
             </div>

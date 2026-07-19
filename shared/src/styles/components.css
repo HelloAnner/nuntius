@@ -162,6 +162,46 @@
 .list-row + .list-row {
   border-top: 1px solid var(--hairline);
 }
+.swipe-row {
+  position: relative;
+  overflow: hidden;
+  background: var(--accent);
+}
+.swipe-row + .swipe-row,
+.list-row + .swipe-row,
+.swipe-row + .list-row {
+  border-top: 1px solid var(--hairline);
+}
+.swipe-content {
+  position: relative;
+  z-index: 1;
+  background: var(--surface);
+  touch-action: pan-y;
+  transition: transform 0.2s var(--ease-out);
+  will-change: transform;
+}
+.swipe-content:active {
+  transition: none;
+}
+.swipe-content > .list-row {
+  background: var(--surface);
+}
+.swipe-action {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 88px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  color: var(--on-accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+.swipe-action:disabled {
+  opacity: 0.5;
+}
 .list-row .grow {
   flex: 1;
   min-width: 0;

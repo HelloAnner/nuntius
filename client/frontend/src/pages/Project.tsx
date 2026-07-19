@@ -1,20 +1,34 @@
 /* Project page: threads of one local project + new-thread entry. */
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Empty, IconChat, IconPlus, Sheet, Spinner, useToast } from "@nuntius/shared";
+import {
+  Empty,
+  IconArchive,
+  IconChat,
+  IconPlus,
+  IconRefresh,
+  Sheet,
+  Spinner,
+  SwipeActionRow,
+  useConfirmAction,
+  useToast,
+} from "@nuntius/shared";
 import { api } from "../api";
-import { useNavigate } from "../hooks";
+import { useArchiveThreadAction, useNavigate } from "../hooks";
 import { liveStore, useRoute } from "../stores";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 
 export function ProjectPage({ projectId }: { projectId: string }) {
   const navigate = useNavigate();
+  const { archive, busyIds } = useArchiveThreadAction();
   const back = useRoute((s) => s.back);
   const toast = useToast();
   const qc = useQueryClient();
+  const { confirm, node: confirmNode } = useConfirmAction();
   const [creating, setCreating] = useState(false);
   const [firstMessage, setFirstMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const info = useQuery({ queryKey: ["info"], queryFn: api.info });
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
@@ -26,12 +40,13 @@ export function ProjectPage({ projectId }: { projectId: string }) {
   const project = projects.data?.find((p) => p.id === projectId);
 
   useEffect(() => {
-    if (projects.isError || (projects.isSuccess && !project)) {
+    if (!deleting && (projects.isError || (projects.isSuccess && !project))) {
       navigate({ name: "overview" }, { replace: true });
     }
-  }, [navigate, project, projects.isError, projects.isSuccess]);
+  }, [deleting, navigate, project, projects.isError, projects.isSuccess]);
 
-  const canCreate = info.data?.appServerRunning ?? false;
+  const unassigned = project?.kind === "system_unassigned";
+  const canCreate = Boolean(info.data?.appServerRunning && !unassigned);
   const sorted = [...(threads.data ?? [])].sort(
     (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
   );
@@ -73,6 +88,33 @@ export function ProjectPage({ projectId }: { projectId: string }) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const remove = () => {
+    if (!project || unassigned || deleting) return;
+    confirm({
+      title: `删除「${project.displayName}」？`,
+      body: `会从本机 Nuntius 删除项目登记及 ${project.threadCount} 个会话记录，并在设备重新连上服务器后同步删除。不会删除磁盘上的项目文件或 Codex 原始会话文件。`,
+      confirmLabel: "删除项目",
+      danger: true,
+      action: async () => {
+        setDeleting(true);
+        try {
+          await api.deleteProject(projectId);
+          await Promise.all([
+            qc.invalidateQueries({ queryKey: ["projects"] }),
+            qc.invalidateQueries({ queryKey: ["threads"] }),
+            qc.invalidateQueries({ queryKey: ["info"] }),
+          ]);
+          toast("项目已删除");
+          navigate({ name: "projects" }, { replace: true });
+        } catch (error) {
+          toast(error instanceof Error ? error.message : "删除失败，请重试", { error: true });
+        } finally {
+          setDeleting(false);
+        }
+      },
+    });
   };
 
   return (
@@ -118,14 +160,37 @@ export function ProjectPage({ projectId }: { projectId: string }) {
           ) : (
             <div className="list-group">
               {sorted.map((t) => (
-                <ThreadRow
+                <SwipeActionRow
                   key={t.id}
-                  thread={t}
-                  onClick={() => navigate({ name: "thread", projectId, threadId: t.id })}
-                />
+                  icon={t.archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
+                  label={t.archived ? "恢复" : "归档"}
+                  busy={busyIds.has(t.id)}
+                  disabled={unassigned}
+                  onAction={() => archive(t.id, !t.archived)}
+                >
+                  <ThreadRow
+                    thread={t}
+                    onClick={() => navigate({ name: "thread", projectId, threadId: t.id })}
+                  />
+                </SwipeActionRow>
               ))}
             </div>
           )}
+          {!unassigned && project ? (
+            <>
+              <div className="section-label micro project-management-label">项目管理</div>
+              <div className="danger-zone project-danger-zone">
+                <div className="project-danger-copy">
+                  <strong>从 Nuntius 中删除项目</strong>
+                  <span>删除项目登记和会话记录，不会动磁盘文件；已配对时会同步到服务器。</span>
+                </div>
+                <button className="btn danger sm" onClick={remove} disabled={deleting}>
+                  {deleting ? <Spinner sm /> : null}
+                  删除项目
+                </button>
+              </div>
+            </>
+          ) : null}
         </div>
       </div>
 
@@ -147,6 +212,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
           </button>
         </div>
       </Sheet>
+      {confirmNode}
     </div>
   );
 }

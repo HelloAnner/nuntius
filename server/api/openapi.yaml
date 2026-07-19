@@ -148,6 +148,16 @@ paths:
       parameters: [{$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateProject'}}}}
       responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+  /devices/{deviceId}/projects/{projectId}:
+    parameters: [{$ref: '#/components/parameters/DeviceId'}, {$ref: '#/components/parameters/ProjectId'}]
+    delete:
+      operationId: deleteProject
+      description: 删除 Server 与在线 Client 中的项目登记和 Nuntius 会话记录，不删除工作目录或 Codex 原始历史文件。
+      parameters: [{$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      responses:
+        '202': {$ref: '#/components/responses/CommandAccepted'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/DeviceOffline'}
   /devices/{deviceId}/projects/{projectId}/threads:
     parameters: [{$ref: '#/components/parameters/DeviceId'}, {$ref: '#/components/parameters/ProjectId'}]
     get:

@@ -34,6 +34,15 @@ paths:
       operationId: createLocalProject
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateProject'}}}}
       responses: {'200': {description: 项目已创建, content: {application/json: {schema: {$ref: '#/components/schemas/Project'}}}}, '400': {$ref: '#/components/responses/BadRequest'}}
+  /projects/{projectId}:
+    parameters: [{$ref: '#/components/parameters/ProjectId'}]
+    delete:
+      operationId: deleteLocalProject
+      description: 删除本机 Nuntius 项目登记和会话记录，不删除工作目录或 Codex 原始历史文件；已配对时通过事件同步到 Server。
+      responses:
+        '200': {description: 项目已删除, content: {application/json: {schema: {type: object, required: [projectId, threadCount], properties: {projectId: {type: string}, threadCount: {type: integer}}}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /projects/{projectId}/threads:
     parameters: [{$ref: '#/components/parameters/ProjectId'}]
     get:

@@ -89,6 +89,7 @@ async fn run_connection(executor: CommandExecutor) -> Result<()> {
                 "event-ack.v1".into(),
                 "history.v1".into(),
                 "directory-browser.v1".into(),
+                "project-delete.v1".into(),
             ],
         },
     )
