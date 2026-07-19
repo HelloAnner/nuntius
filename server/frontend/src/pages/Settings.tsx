@@ -3,8 +3,10 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Avatar,
+  IconBolt,
   IconKey,
   IconMoon,
+  IconShield,
   IconSun,
   Segmented,
   Spinner,
@@ -19,10 +21,11 @@ import {
   useToast,
   Pill,
   type PairingCodeView,
+  type ConversationAccessMode,
   type Theme,
 } from "@nuntius/shared";
 import { api } from "../api";
-import { useSession, useThemeStore } from "../stores";
+import { useAccessMode, useSession, useThemeStore } from "../stores";
 import { ConnIndicator, TopBar } from "../components";
 
 export function SettingsPage() {
@@ -30,6 +33,7 @@ export function SettingsPage() {
   const qc = useQueryClient();
   const { session, setSession } = useSession();
   const { theme, setTheme } = useThemeStore();
+  const { mode: accessMode, setMode: setAccessMode } = useAccessMode();
   const { confirm, node: confirmNode } = useConfirmAction();
   const [pairing, setPairing] = useState<PairingCodeView | null>(null);
   const [busyPairing, setBusyPairing] = useState(false);
@@ -96,6 +100,44 @@ export function SettingsPage() {
             <button className="btn ghost sm" onClick={logout}>
               退出
             </button>
+          </div>
+
+          <div className="section-label micro">对话访问级别</div>
+          <div className="card access-settings">
+            <div className="access-settings-head">
+              <span className={`row-glyph${accessMode === "full" ? " access-full" : ""}`}>
+                {accessMode === "full" ? <IconBolt size={17} /> : <IconShield size={17} />}
+              </span>
+              <div>
+                <div className="access-settings-title">
+                  {accessMode === "full" ? "完全访问" : "操作前询问"}
+                </div>
+                <div className="access-settings-sub">用于新会话，也会在已有会话的下一条消息生效</div>
+              </div>
+            </div>
+            <Segmented
+              options={
+                [
+                  { value: "full", label: "完全访问（默认）" },
+                  { value: "ask", label: "需要询问" },
+                ] satisfies { value: ConversationAccessMode; label: string }[]
+              }
+              value={accessMode}
+              onChange={setAccessMode}
+            />
+            <div className={`access-settings-note ${accessMode}`}>
+              {accessMode === "full" ? (
+                <>
+                  <strong>无需批准，拥有完整系统与网络访问。</strong>
+                  适合你信任的个人设备；Codex 可以直接执行命令、修改任意可访问文件。
+                </>
+              ) : (
+                <>
+                  <strong>默认只在项目工作区内执行。</strong>
+                  需要越过工作区或访问受限资源时，会在审批页面等待你的确认。
+                </>
+              )}
+            </div>
           </div>
 
           <div className="section-label micro">设备配对</div>

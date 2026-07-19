@@ -56,11 +56,19 @@ impl AppServerRuntime {
             .is_some_and(|s| matches!(s.child.try_wait(), Ok(None)))
     }
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
+        self.call_with_timeout(method, params, std::time::Duration::from_secs(60))
+            .await
+    }
+    pub async fn call_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: std::time::Duration,
+    ) -> Result<Value> {
         let mut guard = self.session.lock().await;
         let must_start = match guard.as_mut() {
             Some(session) => {
-                session.child.try_wait()?.is_some()
-                    || !session.reader_alive.load(Ordering::Relaxed)
+                session.child.try_wait()?.is_some() || !session.reader_alive.load(Ordering::Relaxed)
             }
             None => true,
         };
@@ -74,7 +82,7 @@ impl AppServerRuntime {
         // App Server can issue an approval request while this call is pending. Never
         // hold the lifecycle lock across the await, otherwise `respond` deadlocks.
         drop(guard);
-        handle.request(method, params).await
+        handle.request_with_timeout(method, params, timeout).await
     }
     pub async fn respond(&self, request_id: Value, result: Value) -> Result<()> {
         let guard = self.session.lock().await;
@@ -164,7 +172,8 @@ impl AppSession {
                                 let response_id = value
                                     .get("id")
                                     .filter(|_| {
-                                        value.get("result").is_some() || value.get("error").is_some()
+                                        value.get("result").is_some()
+                                            || value.get("error").is_some()
                                     })
                                     .map(id_key);
                                 if let Some(id) = response_id {
@@ -228,11 +237,6 @@ impl AppSession {
 }
 
 impl AppSessionHandle {
-    async fn request(&self, method: &str, params: Value) -> Result<Value> {
-        self.request_with_timeout(method, params, std::time::Duration::from_secs(60))
-            .await
-    }
-
     async fn request_with_timeout(
         &self,
         method: &str,

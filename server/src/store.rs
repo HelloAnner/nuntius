@@ -556,6 +556,35 @@ impl ServerStore {
         Ok(rows.into_iter().map(thread_from_row).collect())
     }
 
+    pub async fn upsert_created_thread(&self, user_id: &str, thread: &ThreadSummary) -> Result<()> {
+        let project_exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM projects WHERE id=? AND device_id=? AND user_id=? AND removed_at IS NULL",
+        )
+        .bind(&thread.project_id)
+        .bind(&thread.device_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if project_exists.is_none() {
+            bail!("created thread references an unavailable project")
+        }
+        sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,app_server_thread_id,title,status,archived,history_completeness,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,last_activity_at=COALESCE(excluded.last_activity_at,threads.last_activity_at) WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id")
+            .bind(&thread.id)
+            .bind(user_id)
+            .bind(&thread.device_id)
+            .bind(&thread.project_id)
+            .bind(&thread.app_server_thread_id)
+            .bind(&thread.title)
+            .bind(&thread.status)
+            .bind(thread.archived)
+            .bind("backfilling")
+            .bind(&thread.last_synced_at)
+            .bind(&thread.last_activity_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn thread_belongs_to_user(
         &self,
         user_id: &str,
@@ -1343,6 +1372,35 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn web_session_survives_store_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_id = {
+            let store = ServerStore::open(temp.path()).await.unwrap();
+            let user = store.create_owner("owner", "test-hash").await.unwrap();
+            let (session_id, _) = store
+                .create_session(
+                    &user,
+                    "persistent-session-hash",
+                    "persistent-csrf-hash",
+                    1,
+                    Some("restart-test"),
+                )
+                .await
+                .unwrap();
+            session_id
+        };
+
+        let reopened = ServerStore::open(temp.path()).await.unwrap();
+        let session = reopened
+            .session_by_token_hash("persistent-session-hash")
+            .await
+            .unwrap()
+            .expect("persisted session should remain valid after reopening SQLite");
+        assert_eq!(session.id, session_id);
+        assert_eq!(session.login_name, "owner");
+    }
+
+    #[tokio::test]
     async fn command_idempotency_returns_original_command() {
         let temp = tempfile::tempdir().unwrap();
         let store = ServerStore::open(temp.path()).await.unwrap();
@@ -1506,9 +1564,26 @@ mod tests {
                 thread: None,
                 turn: None,
                 item: Some(HistoryItemView {
-                    id: "itm_history".into(),
+                    id: "itm_history_user".into(),
                     turn_id: "trn_history".into(),
                     ordinal: 1,
+                    kind: "user_message".into(),
+                    status: "completed".into(),
+                    revision: 1,
+                    content_text: Some("question".into()),
+                    structured_detail: None,
+                    is_truncated: false,
+                    occurred_at: now(),
+                    completed_at: Some(now()),
+                }),
+            },
+            HistoryRecord {
+                thread: None,
+                turn: None,
+                item: Some(HistoryItemView {
+                    id: "itm_history_agent".into(),
+                    turn_id: "trn_history".into(),
+                    ordinal: 2,
                     kind: "agent_message".into(),
                     status: "completed".into(),
                     revision: 1,
@@ -1548,6 +1623,105 @@ mod tests {
         assert_eq!(
             imported[0].history_completeness,
             HistoryCompleteness::Complete
+        );
+        let stored_messages = sqlx::query_scalar::<_, String>(
+            "SELECT i.content_text FROM items i JOIN turns t ON t.id=i.turn_id WHERE t.thread_id=? ORDER BY i.ordinal",
+        )
+        .bind("thr_history")
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(stored_messages, vec!["question", "done"]);
+
+        store
+            .create_pairing_code(&user.id, "pair-hash-second", 10)
+            .await
+            .unwrap();
+        let second_device = store
+            .pair_device(
+                &PairDeviceRequest {
+                    code: "unused".into(),
+                    display_name: "Second Device".into(),
+                    public_key: "second-key".into(),
+                    agent_version: "test".into(),
+                    os_family: "test".into(),
+                    architecture: "test".into(),
+                },
+                "pair-hash-second",
+            )
+            .await
+            .unwrap();
+        let second_records = vec![
+            HistoryRecord {
+                thread: Some(ThreadSummary {
+                    id: "thr_history_second".into(),
+                    device_id: second_device.clone(),
+                    project_id: "unknown-second-project".into(),
+                    app_server_thread_id: Some("app_history".into()),
+                    title: "Second imported thread".into(),
+                    status: "idle".into(),
+                    archived: false,
+                    history_completeness: HistoryCompleteness::Complete,
+                    last_synced_at: Some(now()),
+                    last_activity_at: Some(now()),
+                }),
+                turn: None,
+                item: None,
+            },
+            HistoryRecord {
+                thread: None,
+                turn: Some(HistoryTurnView {
+                    id: "trn_history_second".into(),
+                    thread_id: "thr_history_second".into(),
+                    ordinal: 1,
+                    status: "completed".into(),
+                    started_at: Some(now()),
+                    completed_at: Some(now()),
+                }),
+                item: None,
+            },
+            HistoryRecord {
+                thread: None,
+                turn: None,
+                item: Some(HistoryItemView {
+                    id: "itm_history_second".into(),
+                    turn_id: "trn_history_second".into(),
+                    ordinal: 1,
+                    kind: "user_message".into(),
+                    status: "completed".into(),
+                    revision: 1,
+                    content_text: Some("from second device".into()),
+                    structured_detail: None,
+                    is_truncated: false,
+                    occurred_at: now(),
+                    completed_at: Some(now()),
+                }),
+            },
+        ];
+        let second_batch = HistoryBatch {
+            batch_id: "hbatch_second".into(),
+            device_id: second_device.clone(),
+            thread_id: "thr_history_second".into(),
+            from_cursor: None,
+            to_cursor: "cursor_second".into(),
+            inventory_revision: 1,
+            payload_hash: hex::encode(Sha256::digest(serde_json::to_vec(&second_records).unwrap())),
+            complete: true,
+            records: second_records,
+        };
+        store
+            .ingest_history_batch(&user.id, &second_batch)
+            .await
+            .unwrap();
+        let all_devices = store
+            .list_threads(&user.id, None, None, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(all_devices.len(), 2);
+        assert!(
+            all_devices
+                .iter()
+                .any(|thread| thread.device_id == second_device)
         );
         let mut corrupt_batch = history_batch.clone();
         corrupt_batch.batch_id = "hbatch_corrupt".into();

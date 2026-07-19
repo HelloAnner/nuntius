@@ -306,6 +306,17 @@ async fn handle_frame(
             result,
             error_code,
         } => {
+            if stage == "completed"
+                && let Some(thread) = result
+                    .as_ref()
+                    .and_then(|value| value.get("thread"))
+                    .and_then(|value| serde_json::from_value::<ThreadSummary>(value.clone()).ok())
+            {
+                if thread.device_id != device_id {
+                    return Err(anyhow!("created thread device mismatch"));
+                }
+                state.store.upsert_created_thread(user_id, &thread).await?;
+            }
             let status = state
                 .store
                 .update_command_ack(

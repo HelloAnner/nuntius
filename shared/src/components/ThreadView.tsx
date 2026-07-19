@@ -12,7 +12,7 @@ import {
 import type { CommandStatus } from "../types";
 import type { LiveItem, LiveTurn, ThreadLive } from "../stream";
 import { clockTime, statusLabel } from "../format";
-import { AgentMessage, ApprovalCard, UserBubble, WorkItemView, type ApprovalView } from "./items";
+import { AgentMessage, ApprovalCard, UserBubble, type ApprovalView } from "./items";
 import { Composer } from "./Composer";
 import { IconArrowDown } from "./icons";
 import { Spinner } from "./ui";
@@ -37,34 +37,6 @@ export interface HistoryGroup {
 }
 
 const SEND_ERROR: CommandStatus[] = ["failed", "rejected", "unknown", "expired"];
-
-const HISTORY_KIND_LABELS: Record<string, string> = {
-  user_message: "用户消息",
-  agent_message: "Agent 消息",
-  command_execution: "命令执行",
-  file_change: "文件变更",
-  reasoning: "思考过程",
-  tool_call: "工具调用",
-  mcp_tool_call: "MCP 工具",
-  plan: "计划",
-  error: "错误",
-};
-
-function historyItemToLive(item: RenderItem): LiveItem {
-  return {
-    key: item.id,
-    kind: "other",
-    title: HISTORY_KIND_LABELS[item.kind] ?? item.kind,
-    text: item.text,
-    status:
-      item.status === "failed"
-        ? "failed"
-        : item.status === "running"
-          ? "running"
-          : "completed",
-    files: [],
-  };
-}
 
 export function ThreadView({
   history,
@@ -113,12 +85,18 @@ export function ThreadView({
     [history],
   );
 
-  /** live work-items attached to a turn that history already renders */
-  const liveExtrasFor = (turnId: string, historyHasAgent: boolean): LiveItem[] => {
+  /** Only正文消息 overlay history; tool/reasoning activity stays out of the transcript. */
+  const liveExtrasFor = (
+    turnId: string,
+    historyHasAgent: boolean,
+    historyUsers: Set<string>,
+  ): LiveItem[] => {
     const turn = live.byId[turnId];
     if (!turn) return [];
-    return turn.items.filter((it) =>
-      it.kind === "agent" ? !historyHasAgent : true,
+    return turn.items.filter(
+      (item) =>
+        (item.kind === "user" && !historyUsers.has(item.text)) ||
+        (item.kind === "agent" && !historyHasAgent),
     );
   };
 
@@ -217,7 +195,7 @@ export function ThreadView({
             stateError={Boolean(stateErr)}
           />
         ) : null}
-        {turn.items.map((item) =>
+        {turn.items.filter((item) => item.kind === "agent" || item.kind === "user").map((item) =>
           item.kind === "agent" ? (
             <AgentMessage
               key={item.key}
@@ -226,9 +204,7 @@ export function ThreadView({
             />
           ) : item.kind === "user" ? (
             <UserBubble key={item.key} text={item.text} />
-          ) : (
-            <WorkItemView key={item.key} item={item} />
-          ),
+          ) : null,
         )}
       </section>
     );
@@ -254,7 +230,10 @@ export function ThreadView({
 
           {history.map((group) => {
             const hasAgent = group.items.some((i) => i.kind === "agent_message");
-            const extras = liveExtrasFor(group.turn.id, hasAgent);
+            const groupUsers = new Set(
+              group.items.filter((item) => item.kind === "user_message").map((item) => item.text),
+            );
+            const extras = liveExtrasFor(group.turn.id, hasAgent, groupUsers);
             return (
               <section key={group.turn.id}>
                 <div className="turn-meta num">
@@ -268,7 +247,7 @@ export function ThreadView({
                   if (item.kind === "agent_message") {
                     return <AgentMessage key={item.id} text={item.text} />;
                   }
-                  return <WorkItemView key={item.id} item={historyItemToLive(item)} />;
+                  return null;
                 })}
                 {extras.map((item) =>
                   item.kind === "agent" ? (
@@ -277,9 +256,9 @@ export function ThreadView({
                       text={item.text}
                       streaming={item.status === "running"}
                     />
-                  ) : (
-                    <WorkItemView key={item.key} item={item} />
-                  ),
+                  ) : item.kind === "user" ? (
+                    <UserBubble key={item.key} text={item.text} />
+                  ) : null,
                 )}
               </section>
             );

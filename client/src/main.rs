@@ -5,6 +5,7 @@ mod config;
 mod directory;
 mod error;
 mod executor;
+mod history_monitor;
 mod pairing;
 mod protocol;
 mod store;
@@ -153,6 +154,7 @@ async fn run() -> Result<()> {
         app: app.clone(),
         device_id,
         events,
+        history_import_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     let maintenance_store = executor.store.clone();
     let maintenance_task = tokio::spawn(async move {
@@ -166,6 +168,7 @@ async fn run() -> Result<()> {
         }
     });
     let app_events_task = tokio::spawn(executor::process_app_events(executor.clone()));
+    let history_monitor_task = tokio::spawn(history_monitor::run(executor.clone()));
     let discovery = executor.clone();
     let discovery_task = tokio::spawn(async move {
         match discovery.discover_all().await {
@@ -241,6 +244,7 @@ async fn run() -> Result<()> {
     }
     app.shutdown().await?;
     discovery_task.abort();
+    history_monitor_task.abort();
     app_events_task.abort();
     maintenance_task.abort();
     if let Some(update) = prepared_update {

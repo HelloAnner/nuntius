@@ -7,6 +7,7 @@ import {
   ThreadView,
   newIdemKey,
   statusLabel,
+  turnOptionsForAccess,
   useConfirmAction,
   useToast,
   type ApprovalView,
@@ -16,7 +17,7 @@ import {
 import { api, ApiError } from "../api";
 import { trackCommand } from "../events";
 import { useMedia, useNavigate } from "../hooks";
-import { liveStore, useApprovals, useRoute, useThreadLive } from "../stores";
+import { liveStore, useAccessMode, useApprovals, useRoute, useThreadLive } from "../stores";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 import { ThreadSwitcher } from "../sheets/ThreadSwitcher";
 
@@ -43,11 +44,13 @@ export function ThreadPage({
 }) {
   const toast = useToast();
   const qc = useQueryClient();
+  const accessMode = useAccessMode((state) => state.mode);
   const navigate = useNavigate();
   const back = useRoute((s) => s.back);
   const wide = useMedia("(min-width: 768px)");
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [turnCount, setTurnCount] = useState(12);
+  const [routeGraceElapsed, setRouteGraceElapsed] = useState(false);
   const { confirm, node: confirmNode } = useConfirmAction();
   const [actionBusy, setActionBusy] = useState(false);
 
@@ -59,8 +62,19 @@ export function ThreadPage({
   const projectThreads = useQuery({
     queryKey: ["projectThreads", deviceId, projectId],
     queryFn: () => api.projectThreads(deviceId, projectId),
+    refetchInterval: (query) =>
+      (query.state.data as { id: string }[] | undefined)?.some((item) => item.id === threadId)
+        ? false
+        : 700,
   });
-  const allThreads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
+  const allThreads = useQuery({
+    queryKey: ["allThreads"],
+    queryFn: () => api.allThreads(),
+    refetchInterval: (query) =>
+      (query.state.data as { id: string }[] | undefined)?.some((item) => item.id === threadId)
+        ? false
+        : 700,
+  });
 
   const history = useQuery({
     queryKey: ["threadHistory", threadId, turnCount],
@@ -91,9 +105,16 @@ export function ThreadPage({
     allThreads.data?.find((t) => t.id === threadId);
 
   useEffect(() => {
+    setRouteGraceElapsed(false);
+    const timer = window.setTimeout(() => setRouteGraceElapsed(true), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [threadId]);
+
+  useEffect(() => {
     const missingDevice = devices.isSuccess && !device;
     const missingProject = projects.isSuccess && !project;
     const missingThread =
+      routeGraceElapsed &&
       projectThreads.isSuccess &&
       allThreads.isSuccess &&
       !projectThreads.isFetching &&
@@ -114,6 +135,7 @@ export function ThreadPage({
     projectThreads.isSuccess,
     projects.isError,
     projects.isSuccess,
+    routeGraceElapsed,
     thread,
   ]);
 
@@ -153,7 +175,12 @@ export function ThreadPage({
   const send = async (text: string) => {
     const idemKey = newIdemKey();
     try {
-      const receipt = await api.startTurn(threadId, text, idemKey);
+      const receipt = await api.startTurn(
+        threadId,
+        text,
+        turnOptionsForAccess(accessMode),
+        idemKey,
+      );
       liveStore.addOptimistic(threadId, receipt.commandId, text);
       trackCommand(qc, receipt.commandId, threadId, "turn.start");
     } catch (e) {

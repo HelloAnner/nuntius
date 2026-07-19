@@ -1,5 +1,6 @@
 export * from "./types";
 export * from "./format";
+export * from "./access";
 export * from "./stream";
 export * from "./components/icons";
 export * from "./components/ui";
@@ -7,3 +8,4 @@ export * from "./components/Markdown";
 export * from "./components/items";
 export * from "./components/Composer";
 export * from "./components/ThreadView";
+export * from "./components/DirectoryBrowser";

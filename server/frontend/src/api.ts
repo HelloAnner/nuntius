@@ -107,11 +107,11 @@ export const api = {
 
   projectThreads: (deviceId: string, projectId: string) =>
     req<ThreadSummary[]>("GET", `/devices/${deviceId}/projects/${projectId}/threads`),
-  createThread: (deviceId: string, projectId: string, title: string | null, firstMessage: string | null, idemKey: string) =>
+  createThread: (deviceId: string, projectId: string, title: string | null, firstMessage: string | null, options: Record<string, unknown>, idemKey: string) =>
     req<CommandReceipt>(
       "POST",
       `/devices/${deviceId}/projects/${projectId}/threads`,
-      { title, firstMessage, options: {} },
+      { title, firstMessage, options },
       { idemKey },
     ),
 
@@ -121,8 +121,8 @@ export const api = {
   historyItems: (turnId: string, limit = 500) =>
     req<HistoryItemView[]>("GET", `/turns/${turnId}/items?limit=${limit}`),
 
-  startTurn: (threadId: string, text: string, idemKey: string) =>
-    req<CommandReceipt>("POST", `/threads/${threadId}/turns`, { text, options: {} }, { idemKey }),
+  startTurn: (threadId: string, text: string, options: Record<string, unknown>, idemKey: string) =>
+    req<CommandReceipt>("POST", `/threads/${threadId}/turns`, { text, options }, { idemKey }),
   steerTurn: (threadId: string, text: string, idemKey: string) =>
     req<CommandReceipt>("POST", `/threads/${threadId}/steer`, { text }, { idemKey }),
   interruptTurn: (threadId: string) =>

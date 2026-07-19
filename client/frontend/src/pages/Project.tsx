@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Empty, IconChat, IconPlus, Sheet, Spinner, useToast } from "@nuntius/shared";
 import { api } from "../api";
 import { useNavigate } from "../hooks";
-import { useRoute } from "../stores";
+import { liveStore, useRoute } from "../stores";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 
 export function ProjectPage({ projectId }: { projectId: string }) {
@@ -41,12 +41,29 @@ export function ProjectPage({ projectId }: { projectId: string }) {
     if (busy) return;
     setBusy(true);
     try {
-      const result = await api.createThread(projectId, text || null);
+      const result = await api.createThread(
+        projectId,
+        text ? Array.from(text).slice(0, 48).join("") : null,
+      );
       setCreating(false);
       setFirstMessage("");
       void qc.invalidateQueries({ queryKey: ["projectThreads", projectId] });
       void qc.invalidateQueries({ queryKey: ["threads"] });
       navigate({ name: "thread", projectId, threadId: result.threadId });
+      if (text) {
+        const optimisticKey = `initial:${Date.now()}`;
+        liveStore.addOptimistic(result.threadId, optimisticKey, text);
+        void api
+          .startTurn(result.threadId, text)
+          .then(() => {
+            liveStore.applyCommandStatus(optimisticKey, "completed");
+            void qc.invalidateQueries({ queryKey: ["projectThreads", projectId] });
+          })
+          .catch(() => {
+            liveStore.applyCommandStatus(optimisticKey, "failed");
+            toast("会话已创建，但第一条消息发送失败，请重试", { error: true });
+          });
+      }
     } catch (e) {
       toast(e instanceof Error ? e.message : "创建失败", { error: true });
     } finally {
@@ -123,8 +140,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
             />
           </div>
           <button className="btn primary block" onClick={create} disabled={busy}>
-            {busy ? <Spinner sm /> : null}
-            创建会话
+            开始对话
           </button>
         </div>
       </Sheet>

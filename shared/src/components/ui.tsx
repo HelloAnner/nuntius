@@ -84,12 +84,14 @@ export function Sheet({
   title,
   children,
   trailing,
+  className,
 }: {
   open: boolean;
   onClose: () => void;
   title?: ReactNode;
   trailing?: ReactNode;
   children: ReactNode;
+  className?: string;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -107,7 +109,7 @@ export function Sheet({
   return createPortal(
     <>
       <div className="sheet-backdrop" onClick={onClose} />
-      <div className="sheet" role="dialog" aria-modal="true">
+      <div className={`sheet${className ? ` ${className}` : ""}`} role="dialog" aria-modal="true">
         <div className="grabber" />
         <div className="sheet-head">
           <div style={{ flex: 1, minWidth: 0, fontWeight: 600, fontSize: 16 }}>

@@ -8,31 +8,48 @@ import {
   Sheet,
   Spinner,
   newIdemKey,
+  threadOptionsForAccess,
+  turnOptionsForAccess,
   useToast,
+  type ThreadSummary,
 } from "@nuntius/shared";
 import { api, ApiError } from "../api";
 import { useNavigate } from "../hooks";
-import { useRoute } from "../stores";
+import { liveStore, useAccessMode, useRoute } from "../stores";
 import { trackCommand } from "../events";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 
 const TERMINAL_COMMANDS = new Set(["completed", "failed", "rejected", "unknown", "expired"]);
 
-function threadIdFromResult(result: unknown): string | null {
-  if (!result || typeof result !== "object" || !("threadId" in result)) return null;
-  const threadId = (result as { threadId?: unknown }).threadId;
-  return typeof threadId === "string" && threadId.length > 0 ? threadId : null;
+interface CreatedThread {
+  threadId: string;
+  thread: ThreadSummary | null;
 }
 
-async function waitForCreatedThread(commandId: string): Promise<string> {
+function createdThreadFromResult(result: unknown): CreatedThread | null {
+  if (!result || typeof result !== "object" || !("threadId" in result)) return null;
+  const value = result as { threadId?: unknown; thread?: unknown };
+  if (typeof value.threadId !== "string" || value.threadId.length === 0) return null;
+  const candidate = value.thread;
+  const thread =
+    candidate &&
+    typeof candidate === "object" &&
+    "id" in candidate &&
+    (candidate as { id?: unknown }).id === value.threadId
+      ? (candidate as ThreadSummary)
+      : null;
+  return { threadId: value.threadId, thread };
+}
+
+async function waitForCreatedThread(commandId: string): Promise<CreatedThread> {
   const deadline = Date.now() + 90_000;
   let delay = 180;
   while (Date.now() < deadline) {
     try {
       const command = await api.command(commandId);
       if (command.status === "completed") {
-        const threadId = threadIdFromResult(command.result);
-        if (threadId) return threadId;
+        const created = createdThreadFromResult(command.result);
+        if (created) return created;
         throw new Error("会话已创建，但没有返回会话编号");
       }
       if (TERMINAL_COMMANDS.has(command.status)) {
@@ -54,6 +71,7 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
   const back = useRoute((s) => s.back);
   const toast = useToast();
   const qc = useQueryClient();
+  const accessMode = useAccessMode((state) => state.mode);
   const [creating, setCreating] = useState(false);
   const [firstMessage, setFirstMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -91,14 +109,48 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
     setBusy(true);
     const idemKey = newIdemKey();
     try {
-      const receipt = await api.createThread(deviceId, projectId, null, text || null, idemKey);
+      const receipt = await api.createThread(
+        deviceId,
+        projectId,
+        text ? Array.from(text).slice(0, 48).join("") : null,
+        null,
+        threadOptionsForAccess(accessMode),
+        idemKey,
+      );
       trackCommand(qc, receipt.commandId, undefined, "thread.create");
-      const threadId = await waitForCreatedThread(receipt.commandId);
+      const created = await waitForCreatedThread(receipt.commandId);
+      if (created.thread) {
+        const upsert = (items: ThreadSummary[] | undefined) => [
+          created.thread!,
+          ...(items ?? []).filter((item) => item.id !== created.threadId),
+        ];
+        qc.setQueryData<ThreadSummary[]>(["projectThreads", deviceId, projectId], upsert);
+        qc.setQueryData<ThreadSummary[]>(["allThreads"], upsert);
+      }
       setCreating(false);
       setFirstMessage("");
       void qc.invalidateQueries({ queryKey: ["projectThreads", deviceId, projectId] });
       void qc.invalidateQueries({ queryKey: ["allThreads"] });
-      navigate({ name: "thread", deviceId, projectId, threadId });
+      navigate({ name: "thread", deviceId, projectId, threadId: created.threadId });
+      if (text) {
+        const firstTurnKey = newIdemKey();
+        liveStore.addOptimistic(created.threadId, firstTurnKey, text);
+        void api
+          .startTurn(
+            created.threadId,
+            text,
+            turnOptionsForAccess(accessMode),
+            firstTurnKey,
+          )
+          .then((turnReceipt) => {
+            liveStore.applyCommandStatus(firstTurnKey, "completed");
+            trackCommand(qc, turnReceipt.commandId, created.threadId, "turn.start");
+          })
+          .catch(() => {
+            liveStore.applyCommandStatus(firstTurnKey, "failed");
+            toast("会话已创建，但第一条消息发送失败，请重试", { error: true });
+          });
+      }
     } catch (e) {
       toast(
         e instanceof ApiError && e.code === "device_offline"
@@ -184,8 +236,7 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
             />
           </div>
           <button className="btn primary block" onClick={create} disabled={busy}>
-            {busy ? <Spinner sm /> : null}
-            创建会话
+            开始对话
           </button>
         </div>
       </Sheet>

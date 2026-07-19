@@ -125,7 +125,11 @@ async fn run_connection(executor: CommandExecutor) -> Result<()> {
     let mut events = executor.events.subscribe();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut flush = tokio::time::interval(Duration::from_secs(5));
+    // History is already durable in the local outbox. Flush it quickly so a
+    // browser watching the public server sees external terminal activity with
+    // sub-second-to-low-second latency, without coupling delivery to browser state.
+    let mut flush = tokio::time::interval(Duration::from_secs(1));
+    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_server_activity = tokio::time::Instant::now();
     send_pending(&executor, &mut socket).await?;
     executor.emit_inventory().await?;

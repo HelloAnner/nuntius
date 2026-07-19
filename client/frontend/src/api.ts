@@ -7,6 +7,7 @@ import type {
   ProjectSummary,
   ThreadSummary,
 } from "@nuntius/shared";
+import { threadOptionsForAccess, turnOptionsForAccess } from "@nuntius/shared";
 
 export class ApiError extends Error {
   code: string;
@@ -59,16 +60,19 @@ export const api = {
     req<ProjectSummary>("POST", "/projects", { directoryRef, displayName, defaults: {} }),
   projectThreads: (projectId: string) =>
     req<ThreadSummary[]>("GET", `/projects/${projectId}/threads`),
-  createThread: (projectId: string, firstMessage: string | null) =>
+  createThread: (projectId: string, title: string | null) =>
     req<{ threadId: string; appServerThreadId: string }>(
       "POST",
       `/projects/${projectId}/threads`,
-      { title: null, firstMessage, options: {} },
+      { title, firstMessage: null, options: threadOptionsForAccess("full") },
     ),
   threads: () => req<ThreadSummary[]>("GET", "/threads"),
   history: (threadId: string) => req<HistoryRecord[]>("GET", `/threads/${threadId}/history`),
   startTurn: (threadId: string, text: string) =>
-    req<{ turnId: string }>("POST", `/threads/${threadId}/turns`, { text, options: {} }),
+    req<{ turnId: string }>("POST", `/threads/${threadId}/turns`, {
+      text,
+      options: turnOptionsForAccess("full"),
+    }),
   steerTurn: (threadId: string, text: string) =>
     req<unknown>("POST", `/threads/${threadId}/steer`, { text }),
   interruptTurn: (threadId: string) => req<unknown>("POST", `/threads/${threadId}/interrupt`),

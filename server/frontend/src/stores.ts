@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { useSyncExternalStore } from "react";
 import {
   ThreadLiveStore,
+  type ConversationAccessMode,
   type ApprovalState,
   type ApprovalView,
   type CommandStatus,
@@ -37,6 +38,20 @@ export const useThemeStore = create<ThemeState>((set) => ({
   setTheme: (theme) => {
     localStorage.setItem("nuntius:theme", theme);
     set({ theme });
+  },
+}));
+
+/* ---------- conversation access ---------- */
+const ACCESS_MODE_KEY = "nuntius:conversation-access";
+interface AccessModeState {
+  mode: ConversationAccessMode;
+  setMode: (mode: ConversationAccessMode) => void;
+}
+export const useAccessMode = create<AccessModeState>((set) => ({
+  mode: localStorage.getItem(ACCESS_MODE_KEY) === "ask" ? "ask" : "full",
+  setMode: (mode) => {
+    localStorage.setItem(ACCESS_MODE_KEY, mode);
+    set({ mode });
   },
 }));
 

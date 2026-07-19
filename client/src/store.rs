@@ -243,7 +243,8 @@ impl ClientStore {
     }
     pub async fn set_thread_archived(&self, id: &str, archived: bool) -> Result<()> {
         sqlx::query("UPDATE threads SET archived=?,updated_at=? WHERE id=?")
-            .bind(archived)            .bind(now())
+            .bind(archived)
+            .bind(now())
             .bind(id)
             .execute(&self.pool)
             .await?;
@@ -511,8 +512,8 @@ impl ClientStore {
                 // items (user/agent messages) already occupy ordinals, and the (turn_id, ordinal)
                 // unique index must never abort the whole history import. Existing rows keep their
                 // ordinal so re-imports cannot reshuffle what the live path already persisted.
-                sqlx::query("INSERT INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,revision,content_text,structured_detail,occurred_at,completed_at) VALUES(?,?,NULLIF(?,''),COALESCE((SELECT MAX(ordinal)+1 FROM items WHERE turn_id=?),1),?,'completed',1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET app_server_item_id=COALESCE(excluded.app_server_item_id,items.app_server_item_id),kind=excluded.kind,content_text=excluded.content_text,structured_detail=excluded.structured_detail,completed_at=excluded.completed_at,revision=items.revision+1")
-                    .bind(&item_id).bind(&turn_id).bind(app_item).bind(&turn_id).bind(kind).bind(text).bind(serde_json::to_string(item)?).bind(&stamp).bind(&stamp).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,revision,content_text,structured_detail,occurred_at,completed_at) VALUES(?,?,NULLIF(?,''),COALESCE((SELECT MAX(ordinal)+1 FROM items WHERE turn_id=?),1),?,'completed',1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET app_server_item_id=COALESCE(excluded.app_server_item_id,items.app_server_item_id),kind=excluded.kind,content_text=excluded.content_text,structured_detail=excluded.structured_detail,completed_at=COALESCE(excluded.completed_at,items.completed_at),revision=CASE WHEN items.app_server_item_id IS NOT COALESCE(excluded.app_server_item_id,items.app_server_item_id) OR items.kind IS NOT excluded.kind OR items.content_text IS NOT excluded.content_text OR items.structured_detail IS NOT excluded.structured_detail OR (excluded.completed_at IS NOT NULL AND items.completed_at IS NOT excluded.completed_at) THEN items.revision+1 ELSE items.revision END")
+                    .bind(&item_id).bind(&turn_id).bind(app_item).bind(&turn_id).bind(kind).bind(text).bind(serde_json::to_string(item)?).bind(&stamp).bind(&completed).execute(&mut *tx).await?;
             }
             tx.commit().await?;
         }
@@ -961,6 +962,28 @@ mod tests {
                 .count(),
             2
         );
+        let revisions_before = history
+            .iter()
+            .filter_map(|record| record.item.as_ref().map(|item| item.revision))
+            .collect::<Vec<_>>();
+        store
+            .import_app_history(
+                "thr_test",
+                &json!({"turns":[{"id":"app_turn","status":"completed","items":[
+                    {"id":"app_user","type":"userMessage","content":[{"type":"text","text":"hello"}]},
+                    {"id":"app_item","type":"agentMessage","text":"world"}
+                ]}]}),
+            )
+            .await
+            .unwrap();
+        let revisions_after = store
+            .history_records("thr_test", "dev_test")
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|record| record.item.map(|item| item.revision))
+            .collect::<Vec<_>>();
+        assert_eq!(revisions_after, revisions_before);
 
         let command = DeviceCommand {
             command_id: "cmd_test".into(),

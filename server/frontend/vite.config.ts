@@ -2,7 +2,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
-  base: "./",
+  // The SPA is served from arbitrary deep routes. Asset URLs must stay rooted
+  // at the origin or a hard refresh would request /d/.../assets/*.
+  base: "/",
   plugins: [react()],
   build: {
     outDir: "dist",

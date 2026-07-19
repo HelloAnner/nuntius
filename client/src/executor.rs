@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{Mutex, broadcast};
 
 #[derive(Clone)]
 pub struct CommandExecutor {
@@ -14,6 +14,7 @@ pub struct CommandExecutor {
     pub app: AppServerRuntime,
     pub device_id: String,
     pub events: broadcast::Sender<NuntiusEvent>,
+    pub history_import_lock: Arc<Mutex<()>>,
 }
 
 impl CommandExecutor {
@@ -214,7 +215,8 @@ impl CommandExecutor {
             };
             let _ = self.start_turn(&id, &start).await?;
         }
-        Ok(json!({"threadId":id,"appServerThreadId":app_id}))
+        let thread = self.thread(&id).await?;
+        Ok(json!({"threadId":id,"appServerThreadId":app_id,"thread":thread}))
     }
 
     async fn start_turn(&self, thread_id: &str, request: &StartTurnRequest) -> Result<Value> {
@@ -309,6 +311,7 @@ impl CommandExecutor {
         Ok(())
     }
     pub async fn refresh_thread_history(&self, thread_id: &str) -> Result<()> {
+        let _guard = self.history_import_lock.lock().await;
         let thread = self.thread(thread_id).await?;
         let app_thread_id = thread
             .app_server_thread_id
@@ -316,14 +319,121 @@ impl CommandExecutor {
             .context("thread has no App Server id")?;
         let response = self
             .app
-            .call(
+            .call_with_timeout(
                 "thread/read",
                 json!({"threadId":app_thread_id,"includeTurns":true}),
+                std::time::Duration::from_secs(180),
             )
             .await?;
         let app_thread = response.get("thread").unwrap_or(&response);
         self.store.import_app_history(thread_id, app_thread).await?;
-        self.sync_thread(thread_id).await
+        self.sync_thread(thread_id).await?;
+        self.store
+            .state_set(
+                &thread_fingerprint_key(app_thread_id),
+                &thread_fingerprint(app_thread)?,
+            )
+            .await
+    }
+
+    /// Reconcile the most recently changed Codex sessions, including sessions
+    /// created by a different CLI/App Server process on this workstation.
+    pub async fn reconcile_recent(&self, archived: bool) -> Result<usize> {
+        let response = self
+            .app
+            .call(
+                "thread/list",
+                json!({
+                    "limit": 100,
+                    "archived": archived,
+                    "cursor": null,
+                    "sortKey": "updated_at",
+                    "sortDirection": "desc",
+                    "useStateDbOnly": true,
+                    "sourceKinds": [
+                        "cli", "vscode", "exec", "appServer", "subAgent",
+                        "subAgentReview", "subAgentCompact", "subAgentThreadSpawn",
+                        "subAgentOther", "unknown"
+                    ]
+                }),
+            )
+            .await?;
+        let mut refreshed = 0;
+        for app_thread in response
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(app_id) = app_thread.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let fingerprint = thread_fingerprint(app_thread)?;
+            let key = thread_fingerprint_key(app_id);
+            let missing = self.store.local_thread_id(app_id).await?.is_none();
+            let active = app_thread_status(app_thread) == "active";
+            if !missing
+                && !active
+                && self.store.state_get(&key).await?.as_deref() == Some(&fingerprint)
+            {
+                continue;
+            }
+            match self.reconcile_app_thread(app_id).await {
+                Ok(()) => refreshed += 1,
+                Err(error) => {
+                    tracing::warn!(%app_id,error=?error,"recent Codex thread reconciliation failed")
+                }
+            }
+        }
+        Ok(refreshed)
+    }
+
+    /// Force a single App Server thread into the local durable history outbox.
+    /// Used by the rollout-file monitor so external terminal activity does not
+    /// depend on this App Server instance receiving runtime notifications.
+    pub async fn reconcile_app_thread(&self, app_id: &str) -> Result<()> {
+        let _guard = self.history_import_lock.lock().await;
+        let response = self
+            .app
+            .call_with_timeout(
+                "thread/read",
+                json!({"threadId":app_id,"includeTurns":true}),
+                std::time::Duration::from_secs(180),
+            )
+            .await
+            .with_context(|| format!("cannot read changed Codex thread {app_id}"))?;
+        let app_thread = response.get("thread").unwrap_or(&response);
+        let project_id = if let Some(local_id) = self.store.local_thread_id(app_id).await? {
+            self.thread(&local_id).await?.project_id
+        } else {
+            self.project_for_app_thread(None, app_thread).await?
+        };
+        let local_thread = self
+            .store
+            .import_app_thread(&project_id, app_thread)
+            .await?;
+        self.store
+            .import_app_history(&local_thread, app_thread)
+            .await?;
+        self.sync_thread(&local_thread).await?;
+        self.store
+            .state_set(
+                &thread_fingerprint_key(app_id),
+                &thread_fingerprint(app_thread)?,
+            )
+            .await?;
+        if let Some(project) = self.store.project(&project_id, &self.device_id).await? {
+            self.emit(
+                "project.summary",
+                Some(&project_id),
+                Some(&local_thread),
+                None,
+                serde_json::to_value(&project.summary)?,
+                true,
+            )
+            .await?;
+        }
+        Ok(())
     }
     pub async fn discover_project(&self, project_id: &str) -> Result<usize> {
         let project = self
@@ -405,52 +515,45 @@ impl CommandExecutor {
                 .cloned()
                 .unwrap_or_default();
             for app_thread in threads {
-                let project_id = match fixed_project_id {
-                    Some(id) => id.to_string(),
+                let project_id = self
+                    .project_for_app_thread_with_unassigned(
+                        fixed_project_id,
+                        &app_thread,
+                        &unassigned_project,
+                    )
+                    .await?;
+                let app_id = match app_thread.get("id").and_then(Value::as_str) {
+                    Some(id) => id,
                     None => {
-                        let Some(path) =
-                            app_thread
-                                .get("cwd")
-                                .and_then(Value::as_str)
-                                .and_then(|raw_cwd| {
-                                    directory::validate_project_path(
-                                        &self.config,
-                                        std::path::Path::new(raw_cwd),
-                                    )
-                                    .ok()
-                                })
-                        else {
-                            let local_thread = self
-                                .store
-                                .import_app_thread(&unassigned_project, &app_thread)
-                                .await?;
-                            self.import_and_sync_thread(&local_thread, &app_thread)
-                                .await?;
-                            imported += 1;
-                            continue;
-                        };
-                        if let Some(id) = self.store.project_by_path(&path).await? {
-                            id
-                        } else {
-                            let id = new_id("prj");
-                            let name = path
-                                .file_name()
-                                .map(|value| value.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| "导入项目".into());
-                            self.store
-                                .create_project(&id, &name, &path, &json!({}))
-                                .await?;
-                            id
-                        }
+                        tracing::warn!("thread/list returned a thread without an id");
+                        continue;
                     }
                 };
+                let was_missing = self.store.local_thread_id(app_id).await?.is_none();
                 let local_thread = self
                     .store
                     .import_app_thread(&project_id, &app_thread)
                     .await?;
-                self.import_and_sync_thread(&local_thread, &app_thread)
-                    .await?;
-                imported += 1;
+                let fingerprint = thread_fingerprint(&app_thread)?;
+                let key = thread_fingerprint_key(app_id);
+                let active = app_thread_status(&app_thread) == "active";
+                if was_missing
+                    || active
+                    || self.store.state_get(&key).await?.as_deref() != Some(&fingerprint)
+                {
+                    match self
+                        .import_and_sync_thread(&local_thread, &app_thread)
+                        .await
+                    {
+                        Ok(()) => {
+                            self.store.state_set(&key, &fingerprint).await?;
+                            imported += 1;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%app_id,error=?error,"historical Codex thread import failed; continuing discovery");
+                        }
+                    }
+                }
             }
             cursor = response
                 .get("nextCursor")
@@ -482,16 +585,65 @@ impl CommandExecutor {
         Ok(imported)
     }
 
+    async fn project_for_app_thread(
+        &self,
+        fixed_project_id: Option<&str>,
+        app_thread: &Value,
+    ) -> Result<String> {
+        let unassigned = self
+            .store
+            .ensure_unassigned_project(&self.device_id)
+            .await?;
+        self.project_for_app_thread_with_unassigned(fixed_project_id, app_thread, &unassigned)
+            .await
+    }
+
+    async fn project_for_app_thread_with_unassigned(
+        &self,
+        fixed_project_id: Option<&str>,
+        app_thread: &Value,
+        unassigned_project: &str,
+    ) -> Result<String> {
+        if let Some(id) = fixed_project_id {
+            return Ok(id.to_string());
+        }
+        let Some(raw_cwd) = app_thread.get("cwd").and_then(Value::as_str) else {
+            return Ok(unassigned_project.to_string());
+        };
+        let raw_path = std::path::Path::new(raw_cwd);
+        let canonical = directory::canonical_project_path(raw_path).ok();
+        if let Some(id) = match canonical.as_deref() {
+            Some(path) => self.store.project_by_path(path).await?,
+            None => None,
+        } {
+            return Ok(id);
+        }
+        let Some(path) = directory::validate_project_path(&self.config, raw_path).ok() else {
+            return Ok(unassigned_project.to_string());
+        };
+        let id = new_id("prj");
+        let name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "导入项目".into());
+        self.store
+            .create_project(&id, &name, &path, &json!({}))
+            .await?;
+        Ok(id)
+    }
+
     async fn import_and_sync_thread(&self, local_thread: &str, app_thread: &Value) -> Result<()> {
+        let _guard = self.history_import_lock.lock().await;
         let app_id = app_thread
             .get("id")
             .and_then(Value::as_str)
             .context("listed thread has no id")?;
         let detail = self
             .app
-            .call(
+            .call_with_timeout(
                 "thread/read",
                 json!({"threadId":app_id,"includeTurns":true}),
+                std::time::Duration::from_secs(180),
             )
             .await
             .with_context(|| format!("cannot read historical thread {app_id}"))?;
@@ -676,6 +828,32 @@ fn object(value: Value) -> Map<String, Value> {
 }
 fn derive_title(text: &str) -> String {
     text.chars().take(40).collect()
+}
+fn app_thread_status(thread: &Value) -> &str {
+    thread
+        .get("status")
+        .and_then(|status| {
+            status
+                .as_str()
+                .or_else(|| status.get("type").and_then(Value::as_str))
+        })
+        .unwrap_or("idle")
+}
+fn thread_fingerprint_key(app_thread_id: &str) -> String {
+    format!("app_thread_fingerprint:{app_thread_id}")
+}
+fn thread_fingerprint(thread: &Value) -> Result<String> {
+    let identity = json!({
+        "id": thread.get("id"),
+        "updatedAt": thread.get("updatedAt"),
+        "recencyAt": thread.get("recencyAt"),
+        "status": thread.get("status"),
+        "name": thread.get("name"),
+        "preview": thread.get("preview"),
+        "cwd": thread.get("cwd"),
+        "archived": thread.get("archived"),
+    });
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&identity)?)))
 }
 fn extract_id(value: &Value, paths: &[&str]) -> Option<String> {
     find_string(value, paths)
