@@ -1974,7 +1974,7 @@ mod tests {
         for thread_id in candidates {
             assert_eq!(
                 store
-                    .thread(thread_id, "dev_test")
+                    .thread(&thread_id, "dev_test")
                     .await
                     .unwrap()
                     .unwrap()
