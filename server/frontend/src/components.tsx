@@ -88,6 +88,7 @@ function tabActive(route: Route, tab: Route): boolean {
   if (tab.name === "devices") {
     return route.name === "devices" || route.name === "device" || route.name === "project" || route.name === "thread";
   }
+  if (tab.name === "recents") return route.name === "recents" || route.name === "recentThread";
   return route.name === tab.name;
 }
 
@@ -229,10 +230,12 @@ export function ProjectRow({
 export function ThreadRow({
   thread,
   context,
+  selected = false,
   onClick,
 }: {
   thread: ThreadSummary;
   context?: string;
+  selected?: boolean;
   onClick: () => void;
 }) {
   const active = thread.status === "active";
@@ -242,7 +245,11 @@ export function ThreadRow({
       : null;
   const details = [context, thread.archived ? "已归档" : secondaryStatus].filter(Boolean) as string[];
   return (
-    <button className="list-row" onClick={onClick}>
+    <button
+      className={`list-row${selected ? " selected" : ""}`}
+      onClick={onClick}
+      aria-current={selected ? "page" : undefined}
+    >
       <span className={`row-glyph thread${thread.archived ? " muted" : ""}`}>
         <IconChat size={16} />
       </span>

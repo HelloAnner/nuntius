@@ -63,6 +63,7 @@ export type Route =
   | { name: "settings" }
   | { name: "device"; deviceId: string }
   | { name: "project"; deviceId: string; projectId: string }
+  | { name: "recentThread"; threadId: string }
   | { name: "thread"; deviceId: string; projectId: string; threadId: string };
 
 export function routeToPath(r: Route): string {
@@ -79,6 +80,8 @@ export function routeToPath(r: Route): string {
       return `/d/${r.deviceId}`;
     case "project":
       return `/d/${r.deviceId}/p/${r.projectId}`;
+    case "recentThread":
+      return `/recents/t/${r.threadId}`;
     case "thread":
       return `/d/${r.deviceId}/p/${r.projectId}/t/${r.threadId}`;
   }
@@ -95,6 +98,9 @@ export function pathToRoute(path: string): Route {
   }
   if (seg.length === 4 && seg[0] === "d" && seg[2] === "p") {
     return { name: "project", deviceId: seg[1], projectId: seg[3] };
+  }
+  if (seg.length === 3 && seg[0] === "recents" && seg[1] === "t") {
+    return { name: "recentThread", threadId: seg[2] };
   }
   if (seg.length === 6 && seg[0] === "d" && seg[2] === "p" && seg[4] === "t") {
     return { name: "thread", deviceId: seg[1], projectId: seg[3], threadId: seg[5] };

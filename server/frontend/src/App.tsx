@@ -82,6 +82,8 @@ function RouterView() {
       return <DevicesPage />;
     case "recents":
       return <RecentsPage />;
+    case "recentThread":
+      return <RecentThreadRoute threadId={route.threadId} />;
     case "approvals":
       return <ApprovalsPage />;
     case "settings":
@@ -102,6 +104,33 @@ function RouterView() {
         />
       );
   }
+}
+
+function RecentThreadRoute({ threadId }: { threadId: string }) {
+  const navigate = useRoute((state) => state.navigate);
+  const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
+  const thread = threads.data?.find((item) => item.id === threadId);
+
+  useEffect(() => {
+    if (threads.isSuccess && !thread) navigate({ name: "recents" }, { replace: true });
+  }, [navigate, thread, threads.isSuccess]);
+
+  if (!thread) {
+    return (
+      <div className="page" style={{ display: "grid", placeItems: "center" }}>
+        <Spinner />
+      </div>
+    );
+  }
+
+  return (
+    <ThreadPage
+      navigationContext="recents"
+      deviceId={thread.deviceId}
+      projectId={thread.projectId}
+      threadId={thread.id}
+    />
+  );
 }
 
 export function App() {

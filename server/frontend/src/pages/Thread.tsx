@@ -2,7 +2,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Empty,
   IconArchive,
+  IconClock,
+  IconPlus,
+  Segmented,
   Spinner,
   SwipeActionRow,
   ThreadView,
@@ -20,6 +24,7 @@ import { trackCommand } from "../events";
 import { useArchiveThreadAction, useMedia, useNavigate } from "../hooks";
 import { liveStore, useAccessMode, useApprovals, useRoute, useThreadLive } from "../stores";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
+import { NewThreadSheet } from "../sheets/NewThreadSheet";
 import { ThreadSwitcher } from "../sheets/ThreadSwitcher";
 
 function mapHistoryItem(item: HistoryItemView) {
@@ -38,10 +43,12 @@ export function ThreadPage({
   deviceId,
   projectId,
   threadId,
+  navigationContext = "project",
 }: {
   deviceId: string;
   projectId: string;
   threadId: string;
+  navigationContext?: "project" | "recents";
 }) {
   const toast = useToast();
   const qc = useQueryClient();
@@ -50,7 +57,10 @@ export function ThreadPage({
   const { archive: archiveThread, busyIds } = useArchiveThreadAction();
   const back = useRoute((s) => s.back);
   const wide = useMedia("(min-width: 768px)");
+  const fromRecents = navigationContext === "recents";
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [recentFilter, setRecentFilter] = useState("all");
   const [turnCount, setTurnCount] = useState(12);
   const [routeGraceElapsed, setRouteGraceElapsed] = useState(false);
   const { confirm, node: confirmNode } = useConfirmAction();
@@ -106,6 +116,7 @@ export function ThreadPage({
     allThreads.data?.find((t) => t.id === threadId);
 
   useEffect(() => {
+    setTurnCount(12);
     setRouteGraceElapsed(false);
     const timer = window.setTimeout(() => setRouteGraceElapsed(true), 10_000);
     return () => window.clearTimeout(timer);
@@ -122,7 +133,7 @@ export function ThreadPage({
       !allThreads.isFetching &&
       !thread;
     if (devices.isError || projects.isError || missingDevice || missingProject || missingThread) {
-      navigate({ name: "devices" }, { replace: true });
+      navigate(fromRecents ? { name: "recents" } : { name: "devices" }, { replace: true });
     }
   }, [
     allThreads.isFetching,
@@ -130,6 +141,7 @@ export function ThreadPage({
     device,
     devices.isError,
     devices.isSuccess,
+    fromRecents,
     navigate,
     project,
     projectThreads.isFetching,
@@ -247,7 +259,12 @@ export function ThreadPage({
       confirmLabel: "归档",
       action: async () => {
         if (await archiveThread(threadId)) {
-          navigate({ name: "project", deviceId, projectId }, { replace: true });
+          navigate(
+            fromRecents
+              ? { name: "recents" }
+              : { name: "project", deviceId, projectId },
+            { replace: true },
+          );
         }
       },
     });
@@ -285,7 +302,11 @@ export function ThreadPage({
       subtitle={device && project
         ? `${online ? device.displayName : statusLabel(device.status)} · ${project.displayName}`
         : undefined}
-      onBack={() => back({ name: "project", deviceId, projectId })}
+      onBack={() =>
+        fromRecents
+          ? navigate({ name: "recents" })
+          : back({ name: "project", deviceId, projectId })
+      }
       onTitleClick={() => setSwitcherOpen(true)}
       trailing={
         <>
@@ -313,46 +334,94 @@ export function ThreadPage({
           open={switcherOpen}
           onClose={() => setSwitcherOpen(false)}
           currentThreadId={threadId}
+          navigationContext={navigationContext}
         />
         {confirmNode}
       </div>
     );
   }
 
-  const sortedThreads = [...(projectThreads.data ?? [])].sort(
+  const recentOptions = [
+    { value: "all", label: "全部" },
+    ...(devices.data ?? []).map((item) => ({ value: item.id, label: item.displayName })),
+  ];
+  const sortedThreads = [...(fromRecents ? (allThreads.data ?? []) : (projectThreads.data ?? []))].sort(
     (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
   );
+  const sidebarThreads =
+    fromRecents && recentFilter !== "all"
+      ? sortedThreads.filter((item) => item.deviceId === recentFilter)
+      : sortedThreads;
+  const deviceName = (id: string) =>
+    devices.data?.find((item) => item.id === id)?.displayName ?? "设备";
 
   return (
     <div className="page">
       <div className="detail-grid">
         <aside className="detail-side">
           <TopBar
-            title={project?.displayName ?? "项目"}
-            subtitle={device?.displayName}
-            onBack={() => back({ name: "device", deviceId })}
+            title={fromRecents ? "最近会话" : (project?.displayName ?? "项目")}
+            subtitle={fromRecents ? `${sidebarThreads.length} 个会话` : device?.displayName}
+            onBack={fromRecents ? undefined : () => back({ name: "device", deviceId })}
+            trailing={
+              !fromRecents && !unassigned ? (
+                <button
+                  className="icon-btn"
+                  onClick={() => setCreating(true)}
+                  disabled={!online}
+                  aria-label={online ? "新建会话" : "设备离线，无法新建会话"}
+                  title={online ? "新建会话" : "设备离线，无法新建会话"}
+                >
+                  <IconPlus size={19} />
+                </button>
+              ) : undefined
+            }
           />
           <div className="page-scroll">
             <div className="page-col">
-              <div className="list-group" style={{ border: "none", background: "transparent" }}>
-                {sortedThreads.map((t) => (
-                  <SwipeActionRow
-                    key={t.id}
-                    icon={<IconArchive size={18} />}
-                    label="归档"
-                    busy={busyIds.has(t.id)}
-                    disabled={!online || unassigned}
-                    onAction={() => archiveThread(t.id)}
-                  >
-                    <ThreadRow
-                      thread={t}
-                      onClick={() =>
-                        navigate({ name: "thread", deviceId, projectId, threadId: t.id })
-                      }
-                    />
-                  </SwipeActionRow>
-                ))}
-              </div>
+              {fromRecents && recentOptions.length > 2 ? (
+                <div className="detail-filter">
+                  <Segmented
+                    options={recentOptions}
+                    value={recentFilter}
+                    onChange={setRecentFilter}
+                  />
+                </div>
+              ) : null}
+              {fromRecents && allThreads.isLoading ? (
+                <div className="detail-list-state"><Spinner /></div>
+              ) : sidebarThreads.length === 0 ? (
+                <Empty
+                  icon={<IconClock size={22} />}
+                  headline={fromRecents ? "没有符合条件的会话" : "还没有会话"}
+                />
+              ) : (
+                <div className="list-group" style={{ border: "none", background: "transparent" }}>
+                  {sidebarThreads.map((item) => (
+                    <SwipeActionRow
+                      key={item.id}
+                      icon={<IconArchive size={18} />}
+                      label="归档"
+                      busy={busyIds.has(item.id)}
+                      disabled={fromRecents ? false : !online || unassigned}
+                      onAction={() => archiveThread(item.id)}
+                    >
+                      <ThreadRow
+                        thread={item}
+                        context={fromRecents ? deviceName(item.deviceId) : undefined}
+                        selected={item.id === threadId}
+                        onClick={() =>
+                          navigate(
+                            fromRecents
+                              ? { name: "recentThread", threadId: item.id }
+                              : { name: "thread", deviceId, projectId, threadId: item.id },
+                          )
+                        }
+                      />
+                    </SwipeActionRow>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </aside>
@@ -365,7 +434,19 @@ export function ThreadPage({
         open={switcherOpen}
         onClose={() => setSwitcherOpen(false)}
         currentThreadId={threadId}
+        navigationContext={navigationContext}
       />
+      {!fromRecents ? (
+        <NewThreadSheet
+          deviceId={deviceId}
+          projectId={projectId}
+          open={creating}
+          onClose={() => setCreating(false)}
+          onCreated={(createdThreadId) =>
+            navigate({ name: "thread", deviceId, projectId, threadId: createdThreadId })
+          }
+        />
+      ) : null}
       {confirmNode}
     </div>
   );

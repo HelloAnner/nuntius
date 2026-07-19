@@ -17,10 +17,12 @@ export function ThreadSwitcher({
   open,
   onClose,
   currentThreadId,
+  navigationContext = "project",
 }: {
   open: boolean;
   onClose: () => void;
   currentThreadId?: string;
+  navigationContext?: "project" | "recents";
 }) {
   const navigate = useNavigate();
   const { archive, busyIds } = useArchiveThreadAction();
@@ -83,12 +85,16 @@ export function ThreadSwitcher({
                   className="list-row"
                   style={t.id === currentThreadId ? { background: "var(--accent-soft)" } : undefined}
                   onClick={() => {
-                    navigate({
-                      name: "thread",
-                      deviceId: t.deviceId,
-                      projectId: t.projectId,
-                      threadId: t.id,
-                    });
+                    navigate(
+                      navigationContext === "recents"
+                        ? { name: "recentThread", threadId: t.id }
+                        : {
+                            name: "thread",
+                            deviceId: t.deviceId,
+                            projectId: t.projectId,
+                            threadId: t.id,
+                          },
+                    );
                     onClose();
                   }}
                 >

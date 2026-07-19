@@ -71,9 +71,7 @@ export function RecentsPage() {
                     context={deviceName(t.deviceId)}
                     onClick={() =>
                       navigate({
-                        name: "thread",
-                        deviceId: t.deviceId,
-                        projectId: t.projectId,
+                        name: "recentThread",
                         threadId: t.id,
                       })
                     }

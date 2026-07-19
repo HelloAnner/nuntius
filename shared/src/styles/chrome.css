@@ -243,6 +243,18 @@
     max-width: none;
     padding: 12px 10px 24px;
   }
+  .detail-side .icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+  .detail-filter {
+    margin-bottom: 12px;
+  }
+  .detail-list-state {
+    display: grid;
+    place-items: center;
+    padding: 44px 0;
+  }
   .detail-main {
     flex: 1;
     min-width: 0;
