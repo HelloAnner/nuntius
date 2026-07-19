@@ -248,8 +248,11 @@ export function startEvents(qc: QueryClient): () => void {
     es = new EventSource("/api/v1/events");
     es.onopen = () => {
       useSse.getState().set("live");
-      if (everLive) resync();
       everLive = true;
+      // The server starts a fresh browser at the event-log head. Refreshing
+      // after the subscription opens makes the REST snapshot and subsequent
+      // event stream a gap-free pair.
+      resync();
     };
     es.addEventListener("nuntius", (e) => {
       try {

@@ -33,6 +33,8 @@ export interface LiveItem {
   text: string;
   status: LiveStatus;
   files: LiveFile[];
+  occurredAt: string;
+  sequence: number;
 }
 
 export type LiveTurnStatus =
@@ -45,6 +47,8 @@ export type LiveTurnStatus =
 
 export interface LiveTurn {
   id: string;
+  /** Preserve React identity when an optimistic id adopts the durable id. */
+  renderKey?: string;
   status: LiveTurnStatus;
   userText: string | null;
   sendState: CommandStatus | null;
@@ -53,6 +57,7 @@ export interface LiveTurn {
   items: LiveItem[];
   itemIndex: Record<string, number>;
   startedAt: string;
+  startedSequence: number;
 }
 
 export interface ThreadLive {
@@ -71,6 +76,8 @@ export class ThreadLiveStore {
   private notifyScheduled = false;
   /** commandId -> optimistic echo location */
   private pending = new Map<string, { threadId: string; turnId: string }>();
+  private seenEvents = new Set<string>();
+  private seenEventOrder: string[] = [];
 
   subscribe = (fn: Listener): (() => void) => {
     this.listeners.add(fn);
@@ -113,21 +120,38 @@ export class ThreadLiveStore {
   /** optimistic user echo registered right after a 202 receipt */
   addOptimistic(threadId: string, commandId: string, text: string): string {
     const live = this.get(threadId);
-    // adopt a race: the authoritative turn.started event may have arrived first
-    for (const t of live.turns) {
-      if (t.userText === text && Date.now() - Date.parse(t.startedAt) < 120_000) {
-        this.pending.set(commandId, { threadId, turnId: t.id });
-        t.sendState = "accepted";
-        t.sendErrorCode = null;
-        t.sendErrorMessage = null;
-        this.bump();
-        return t.id;
-      }
+    // The SSE turn can beat the HTTP 202 response. Adopt only a recent,
+    // unclaimed authoritative turn with the same prompt so that race does not
+    // create a second user bubble.
+    const claimed = new Set(
+      [...this.pending.values()]
+        .filter((location) => location.threadId === threadId)
+        .map((location) => location.turnId),
+    );
+    const now = Date.now();
+    const authoritative = live.turns
+      .filter(
+        (turn) =>
+          !turn.id.startsWith("local:") &&
+          !claimed.has(turn.id) &&
+          turn.userText === text &&
+          Number.isFinite(Date.parse(turn.startedAt)) &&
+          Math.abs(now - Date.parse(turn.startedAt)) < 120_000,
+      )
+      .sort((left, right) =>
+        Math.abs(now - Date.parse(left.startedAt)) -
+        Math.abs(now - Date.parse(right.startedAt)),
+      )[0];
+    if (authoritative) {
+      this.pending.set(commandId, { threadId, turnId: authoritative.id });
+      this.bump();
+      return authoritative.id;
     }
     const turnId = `local:${commandId}`;
     if (!live.byId[turnId]) {
       const turn: LiveTurn = {
         id: turnId,
+        renderKey: turnId,
         status: "running",
         userText: text,
         sendState: "accepted",
@@ -136,6 +160,7 @@ export class ThreadLiveStore {
         items: [],
         itemIndex: {},
         startedAt: new Date().toISOString(),
+        startedSequence: Number.MAX_SAFE_INTEGER,
       };
       live.byId[turnId] = turn;
       live.turns.push(turn);
@@ -188,33 +213,68 @@ export class ThreadLiveStore {
 
   /** optimistic echo for a steer sent mid-turn; rendered inline in order */
   appendSteerEcho(threadId: string, text: string) {
-    const turn = this.currentTurn(threadId, null) ?? this.ensureTurn(threadId, null);
+    const occurredAt = new Date().toISOString();
+    const turn =
+      this.currentTurn(threadId, null) ?? this.ensureTurn(threadId, null, occurredAt, 0);
     const key = `steer:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-    const item = this.ensureItem(turn, key, "user");
+    const item = this.ensureItem(turn, key, "user", occurredAt, Number.MAX_SAFE_INTEGER);
     item.text = text;
     item.status = "completed";
     this.bump();
   }
 
   /** drop optimistic echoes once the authoritative turn event arrives */
-  private adoptOptimistic(threadId: string, realTurnId: string, text: string | null): LiveTurn {
+  private adoptOptimistic(
+    threadId: string,
+    realTurnId: string,
+    text: string | null,
+    occurredAt: string,
+    sequence: number,
+  ): LiveTurn {
     const live = this.get(threadId);
     if (text) {
-      for (const t of live.turns) {
-        if (t.id.startsWith("local:") && t.userText === text) {
-          const optimisticId = t.id;
-          delete live.byId[optimisticId];
-          const idx = live.turns.indexOf(t);
-          t.id = realTurnId;
-          live.byId[realTurnId] = t;
-          if (idx >= 0) live.turns[idx] = t;
-          for (const loc of this.pending.values()) {
-            if (loc.threadId === threadId && loc.turnId === optimisticId) {
-              loc.turnId = realTurnId;
-            }
+      const pendingIds = new Set(
+        [...this.pending.values()]
+          .filter((location) => location.threadId === threadId)
+          .map((location) => location.turnId),
+      );
+      const candidates = live.turns
+        .filter(
+          (turn) =>
+            turn.id.startsWith("local:") &&
+            turn.userText === text &&
+            turn.items.length === 0 &&
+            !["failed", "rejected", "unknown", "expired"].includes(turn.sendState ?? ""),
+        )
+        .filter((turn) => {
+          const distance = Math.abs(Date.parse(turn.startedAt) - Date.parse(occurredAt));
+          return !Number.isFinite(distance) || distance < 120_000;
+        })
+        .sort((left, right) => {
+          const pendingDelta = Number(pendingIds.has(right.id)) - Number(pendingIds.has(left.id));
+          if (pendingDelta !== 0) return pendingDelta;
+          const leftDistance = Math.abs(Date.parse(left.startedAt) - Date.parse(occurredAt));
+          const rightDistance = Math.abs(Date.parse(right.startedAt) - Date.parse(occurredAt));
+          if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+          return compareLiveTurns(left, right);
+        });
+      const candidate = candidates[0];
+      if (candidate) {
+        const optimisticId = candidate.id;
+        delete live.byId[optimisticId];
+        const idx = live.turns.indexOf(candidate);
+        candidate.id = realTurnId;
+        candidate.renderKey ??= optimisticId;
+        candidate.startedAt = occurredAt;
+        candidate.startedSequence = sequence;
+        live.byId[realTurnId] = candidate;
+        if (idx >= 0) live.turns[idx] = candidate;
+        for (const loc of this.pending.values()) {
+          if (loc.threadId === threadId && loc.turnId === optimisticId) {
+            loc.turnId = realTurnId;
           }
-          return t;
         }
+        return candidate;
       }
     }
     let turn = live.byId[realTurnId];
@@ -228,7 +288,8 @@ export class ThreadLiveStore {
         sendErrorMessage: null,
         items: [],
         itemIndex: {},
-        startedAt: new Date().toISOString(),
+        startedAt: occurredAt,
+        startedSequence: sequence,
       };
       live.byId[realTurnId] = turn;
       live.turns.push(turn);
@@ -237,6 +298,15 @@ export class ThreadLiveStore {
   }
 
   apply(event: NuntiusEvent) {
+    // Both the journal/live overlap and transport retries can deliver the same
+    // event more than once. Delta events are not idempotent, so dedupe before
+    // looking at the payload.
+    if (this.seenEvents.has(event.eventId)) return;
+    this.seenEvents.add(event.eventId);
+    this.seenEventOrder.push(event.eventId);
+    if (this.seenEventOrder.length > 5_000) {
+      for (const id of this.seenEventOrder.splice(0, 1_000)) this.seenEvents.delete(id);
+    }
     const threadId = event.threadId;
     if (!threadId) return;
     const type = event.eventType;
@@ -245,9 +315,17 @@ export class ThreadLiveStore {
     if (type === "turn.started") {
       const p = event.payload as TurnStartedPayload;
       const turnId = event.turnId ?? `anon:${event.eventId}`;
-      const turn = this.adoptOptimistic(threadId, turnId, p?.text ?? null);
+      const turn = this.adoptOptimistic(
+        threadId,
+        turnId,
+        p?.text ?? null,
+        event.occurredAt,
+        event.seq,
+      );
       turn.status = "running";
       if (p?.text) turn.userText = p.text;
+      turn.startedAt = event.occurredAt;
+      turn.startedSequence = event.seq;
       turn.sendState = "completed";
       this.bump();
       return;
@@ -265,7 +343,12 @@ export class ThreadLiveStore {
     const method = type.slice("app_server.".length).toLowerCase();
 
     if (method.startsWith("turn.")) {
-      const turn = this.ensureTurn(threadId, event.turnId ?? str(payload.turnId) ?? str(payload, "turn", "id"));
+      const turn = this.ensureTurn(
+        threadId,
+        event.turnId ?? str(payload.turnId) ?? str(payload, "turn", "id"),
+        event.occurredAt,
+        event.seq,
+      );
       if (method === "turn.started") {
         turn.status = "running";
       } else if (method === "turn.completed") {
@@ -309,11 +392,16 @@ export class ThreadLiveStore {
       const delta =
         str(payload.delta) ?? str(payload.text) ?? str(payload.output) ?? "";
       if (!delta) return;
-      const turn = this.ensureTurn(threadId, event.turnId ?? str(payload.turnId));
+      const turn = this.ensureTurn(
+        threadId,
+        event.turnId ?? str(payload.turnId),
+        event.occurredAt,
+        event.seq,
+      );
       const key =
         str(payload.itemId) ?? str(payload, "item", "id") ?? `delta:${method}`;
       const kind = kindForDelta(method);
-      const item = this.ensureItem(turn, key, kind);
+      const item = this.ensureItem(turn, key, kind, event.occurredAt, event.seq);
       item.text += delta;
       item.status = "running";
       this.scheduleBump();
@@ -325,10 +413,12 @@ export class ThreadLiveStore {
       const turn = this.ensureTurn(
         threadId,
         event.turnId ?? str(payload.turnId) ?? str(rawItem.turnId),
+        event.occurredAt,
+        event.seq,
       );
       const key = str(rawItem.id) ?? `item:${event.eventId}`;
       const kind = kindOfItem(rawItem, method);
-      const item = this.ensureItem(turn, key, kind);
+      const item = this.ensureItem(turn, key, kind, event.occurredAt, event.seq);
       const finalText = textOfItem(rawItem);
       if (finalText) item.text = finalText;
       const title = titleOfItem(rawItem, kind);
@@ -349,8 +439,11 @@ export class ThreadLiveStore {
   private currentTurn(threadId: string, hint: string | null): LiveTurn | null {
     const live = this.get(threadId);
     if (hint && live.byId[hint]) return live.byId[hint];
-    for (let i = live.turns.length - 1; i >= 0; i--) {
-      const t = live.turns[i];
+    const open = live.turns
+      .filter((turn) => !TERMINAL.has(turn.status))
+      .sort(compareLiveTurns);
+    for (let i = open.length - 1; i >= 0; i--) {
+      const t = open[i];
       if (!TERMINAL.has(t.status)) {
         // Alias app-server turn ids onto the open turn: events carry either the
         // local turn id (turn.started) or the app id (item/turn notifications),
@@ -362,18 +455,39 @@ export class ThreadLiveStore {
     return null;
   }
 
-  private ensureTurn(threadId: string, hint: string | null): LiveTurn {
+  private ensureTurn(
+    threadId: string,
+    hint: string | null,
+    occurredAt: string,
+    sequence: number,
+  ): LiveTurn {
     const existing = this.currentTurn(threadId, hint);
     if (existing) return existing;
-    return this.adoptOptimistic(threadId, hint ?? `anon:${Date.now()}`, null);
+    return this.adoptOptimistic(
+      threadId,
+      hint ?? `anon:${Date.now()}`,
+      null,
+      occurredAt,
+      sequence,
+    );
   }
 
-  private ensureItem(turn: LiveTurn, key: string, kind: LiveKind): LiveItem {
+  private ensureItem(
+    turn: LiveTurn,
+    key: string,
+    kind: LiveKind,
+    occurredAt: string,
+    sequence: number,
+  ): LiveItem {
     const idx = turn.itemIndex[key];
     if (idx !== undefined) {
       const item = turn.items[idx];
       // a real item may replace a delta-created placeholder kind
       if (item.kind === "other" && kind !== "other") item.kind = kind;
+      if (compareChronology(occurredAt, sequence, key, item.occurredAt, item.sequence, item.key) < 0) {
+        item.occurredAt = occurredAt;
+        item.sequence = sequence;
+      }
       return item;
     }
     const item: LiveItem = {
@@ -383,6 +497,8 @@ export class ThreadLiveStore {
       text: "",
       status: "running",
       files: [],
+      occurredAt,
+      sequence,
     };
     turn.itemIndex[key] = turn.items.length;
     turn.items.push(item);
@@ -401,6 +517,50 @@ export class ThreadLiveStore {
   isTerminal(turn: LiveTurn): boolean {
     return TERMINAL.has(turn.status);
   }
+}
+
+export function compareChronology(
+  leftAt: string | null,
+  leftSequence: number,
+  leftId: string,
+  rightAt: string | null,
+  rightSequence: number,
+  rightId: string,
+): number {
+  const leftTime = leftAt ? Date.parse(leftAt) : Number.NaN;
+  const rightTime = rightAt ? Date.parse(rightAt) : Number.NaN;
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return leftTime - rightTime;
+  }
+  if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) {
+    return Number.isFinite(leftTime) ? 1 : -1;
+  }
+  if (leftSequence !== rightSequence) return leftSequence - rightSequence;
+  return leftId.localeCompare(rightId);
+}
+
+export function compareLiveTurns(left: LiveTurn, right: LiveTurn): number {
+  return compareChronology(
+    left.startedAt,
+    left.startedSequence,
+    left.id,
+    right.startedAt,
+    right.startedSequence,
+    right.id,
+  );
+}
+
+export function orderedLiveItems(turn: LiveTurn): LiveItem[] {
+  return [...turn.items].sort((left, right) =>
+    compareChronology(
+      left.occurredAt,
+      left.sequence,
+      left.key,
+      right.occurredAt,
+      right.sequence,
+      right.key,
+    ),
+  );
 }
 
 /* ---------- payload extraction helpers ---------- */

@@ -599,6 +599,26 @@
   flex-direction: column;
   gap: 4px;
 }
+.thread-loading {
+  min-height: 220px;
+  padding: 24px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.thread-loading-user {
+  width: min(58%, 320px);
+  height: 44px;
+  align-self: flex-end;
+  border-radius: 18px 18px 5px 18px;
+}
+.thread-loading-agent {
+  width: min(82%, 560px);
+  height: 16px;
+}
+.thread-loading-agent.short {
+  width: min(52%, 360px);
+}
 @media (max-width: 559px) {
   .thread-col {
     padding: 12px 12px 20px;

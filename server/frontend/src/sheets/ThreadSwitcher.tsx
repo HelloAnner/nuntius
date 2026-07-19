@@ -7,6 +7,7 @@ import {
   IconSearch,
   Sheet,
   SwipeActionRow,
+  compareThreadActivity,
   relTime,
   statusLabel,
 } from "@nuntius/shared";
@@ -34,9 +35,7 @@ export function ThreadSwitcher({
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const list = [...(threads.data ?? [])].sort(
-      (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
-    );
+    const list = [...(threads.data ?? [])].sort(compareThreadActivity);
     if (!q) return list.slice(0, 60);
     return list.filter((t) => t.title.toLowerCase().includes(q)).slice(0, 60);
   }, [threads.data, query]);

@@ -10,6 +10,7 @@ import {
   Spinner,
   SwipeActionRow,
   ThreadView,
+  compareThreadActivity,
   newIdemKey,
   statusLabel,
   turnOptionsForAccess,
@@ -30,11 +31,13 @@ import { ThreadSwitcher } from "../sheets/ThreadSwitcher";
 function mapHistoryItem(item: HistoryItemView) {
   return {
     id: item.id,
+    ordinal: item.ordinal,
     kind: item.kind,
     text:
       item.contentText ??
       (item.structuredDetail ? JSON.stringify(item.structuredDetail, null, 2) : ""),
     status: item.status,
+    occurredAt: item.occurredAt,
     truncated: item.isTruncated,
   };
 }
@@ -269,12 +272,9 @@ export function ThreadPage({
       },
     });
 
-  const threadView = history.isLoading ? (
-    <div style={{ flex: 1, display: "grid", placeItems: "center" }}>
-      <Spinner />
-    </div>
-  ) : (
+  const threadView = (
     <ThreadView
+      loading={history.isLoading}
       history={history.data?.groups ?? []}
       live={live}
       approvals={threadApprovals}
@@ -345,9 +345,9 @@ export function ThreadPage({
     { value: "all", label: "全部" },
     ...(devices.data ?? []).map((item) => ({ value: item.id, label: item.displayName })),
   ];
-  const sortedThreads = [...(fromRecents ? (allThreads.data ?? []) : (projectThreads.data ?? []))].sort(
-    (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
-  );
+  const sortedThreads = [
+    ...(fromRecents ? (allThreads.data ?? []) : (projectThreads.data ?? [])),
+  ].sort(compareThreadActivity);
   const sidebarThreads =
     fromRecents && recentFilter !== "all"
       ? sortedThreads.filter((item) => item.deviceId === recentFilter)

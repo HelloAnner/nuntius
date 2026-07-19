@@ -562,7 +562,7 @@ impl ServerStore {
         user_id: &str,
         device_id: &str,
     ) -> Result<Vec<ProjectSummary>> {
-        let rows = sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id AND t.archived=0) thread_count FROM projects p WHERE p.user_id=? AND p.device_id=? AND p.removed_at IS NULL ORDER BY p.kind='system_unassigned' DESC,COALESCE(p.last_activity_at,'') DESC,p.display_name")
+        let rows = sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id AND t.archived=0) thread_count FROM projects p WHERE p.user_id=? AND p.device_id=? AND p.removed_at IS NULL ORDER BY p.kind='system_unassigned' DESC,julianday(p.last_activity_at) DESC,p.display_name")
             .bind(user_id).bind(device_id).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(project_from_row).collect())
     }
@@ -605,11 +605,11 @@ impl ServerStore {
         offset: i64,
     ) -> Result<Vec<ThreadSummary>> {
         let rows = match (device_id, project_id) {
-            (_, Some(project)) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND project_id=? AND archived=0 ORDER BY COALESCE(last_activity_at,'') DESC,id DESC LIMIT ? OFFSET ?")
+            (_, Some(project)) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND project_id=? AND archived=0 ORDER BY julianday(last_activity_at) DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(user_id).bind(project).bind(limit).bind(offset).fetch_all(&self.pool).await?,
-            (Some(device), None) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND device_id=? AND archived=0 ORDER BY COALESCE(last_activity_at,'') DESC,id DESC LIMIT ? OFFSET ?")
+            (Some(device), None) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND device_id=? AND archived=0 ORDER BY julianday(last_activity_at) DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(user_id).bind(device).bind(limit).bind(offset).fetch_all(&self.pool).await?,
-            (None, None) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND archived=0 ORDER BY COALESCE(last_activity_at,'') DESC,id DESC LIMIT ? OFFSET ?")
+            (None, None) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND archived=0 ORDER BY julianday(last_activity_at) DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(user_id).bind(limit).bind(offset).fetch_all(&self.pool).await?,
         };
         Ok(rows.into_iter().map(thread_from_row).collect())
@@ -696,7 +696,7 @@ impl ServerStore {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<HistoryTurnView>> {
-        let rows = sqlx::query("SELECT t.* FROM turns t JOIN threads h ON h.id=t.thread_id WHERE h.user_id=? AND t.thread_id=? ORDER BY t.ordinal LIMIT ? OFFSET ?")
+        let rows = sqlx::query("SELECT t.* FROM turns t JOIN threads h ON h.id=t.thread_id WHERE h.user_id=? AND t.thread_id=? ORDER BY COALESCE(julianday(t.started_at),julianday(t.completed_at)),t.ordinal,t.id LIMIT ? OFFSET ?")
             .bind(user_id).bind(thread_id).bind(limit).bind(offset).fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
@@ -718,7 +718,7 @@ impl ServerStore {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<HistoryItemView>> {
-        let rows = sqlx::query("SELECT i.* FROM items i JOIN turns t ON t.id=i.turn_id JOIN threads h ON h.id=t.thread_id WHERE h.user_id=? AND i.turn_id=? ORDER BY i.ordinal LIMIT ? OFFSET ?")
+        let rows = sqlx::query("SELECT i.* FROM items i JOIN turns t ON t.id=i.turn_id JOIN threads h ON h.id=t.thread_id WHERE h.user_id=? AND i.turn_id=? ORDER BY julianday(i.occurred_at),i.ordinal,i.id LIMIT ? OFFSET ?")
             .bind(user_id).bind(turn_id).bind(limit).bind(offset).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(item_from_row).collect())
     }
@@ -1191,8 +1191,8 @@ impl ServerStore {
                     bail!("history turn ownership conflict");
                 }
                 if !stale {
-                    sqlx::query("INSERT INTO turns(id,thread_id,ordinal,status,started_at,completed_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,started_at=COALESCE(excluded.started_at,turns.started_at),completed_at=COALESCE(excluded.completed_at,turns.completed_at),revision=turns.revision+1")
-                        .bind(&turn.id).bind(&turn.thread_id).bind(turn.ordinal).bind(&turn.status).bind(&turn.started_at).bind(&turn.completed_at).execute(&mut *tx).await?;
+                    sqlx::query("INSERT INTO turns(id,thread_id,ordinal,status,started_at,completed_at,snapshot_revision) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ordinal=excluded.ordinal,status=excluded.status,started_at=COALESCE(excluded.started_at,turns.started_at),completed_at=COALESCE(excluded.completed_at,turns.completed_at),snapshot_revision=excluded.snapshot_revision,revision=turns.revision+1")
+                        .bind(&turn.id).bind(&turn.thread_id).bind(turn.ordinal).bind(&turn.status).bind(&turn.started_at).bind(&turn.completed_at).bind(batch.inventory_revision).execute(&mut *tx).await?;
                 }
             }
         }
@@ -1237,9 +1237,18 @@ impl ServerStore {
                         .fetch_optional(&mut *tx)
                         .await?;
                 if current.map(|v| v.0).unwrap_or(-1) <= item.revision {
-                    sqlx::query("INSERT INTO items(id,turn_id,ordinal,kind,status,revision,content_hash,content_text,structured_detail,is_truncated,occurred_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,revision=excluded.revision,content_hash=excluded.content_hash,content_text=excluded.content_text,structured_detail=excluded.structured_detail,is_truncated=excluded.is_truncated,completed_at=excluded.completed_at WHERE excluded.revision>=items.revision")
+                    sqlx::query("INSERT INTO items(id,turn_id,ordinal,kind,status,revision,content_hash,content_text,structured_detail,is_truncated,occurred_at,completed_at,snapshot_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ordinal=excluded.ordinal,kind=excluded.kind,status=excluded.status,revision=excluded.revision,content_hash=excluded.content_hash,content_text=excluded.content_text,structured_detail=excluded.structured_detail,is_truncated=excluded.is_truncated,occurred_at=excluded.occurred_at,completed_at=excluded.completed_at,snapshot_revision=excluded.snapshot_revision WHERE excluded.revision>=items.revision")
                         .bind(&item.id).bind(&item.turn_id).bind(item.ordinal).bind(&item.kind).bind(&item.status).bind(item.revision)
-                        .bind(content_hash).bind(&item.content_text).bind(detail).bind(item.is_truncated).bind(&item.occurred_at).bind(&item.completed_at).execute(&mut *tx).await?;
+                        .bind(content_hash).bind(&item.content_text).bind(detail).bind(item.is_truncated).bind(&item.occurred_at).bind(&item.completed_at).bind(batch.inventory_revision).execute(&mut *tx).await?;
+                } else {
+                    // Presence in the authoritative snapshot is independent of
+                    // content revision. Keep the newer server copy, but mark it
+                    // seen so final-chunk cleanup cannot delete a valid item.
+                    sqlx::query("UPDATE items SET snapshot_revision=? WHERE id=?")
+                        .bind(batch.inventory_revision)
+                        .bind(&item.id)
+                        .execute(&mut *tx)
+                        .await?;
                 }
             }
         }
@@ -1274,6 +1283,21 @@ impl ServerStore {
         } else {
             false
         };
+        if chain_complete {
+            // The device batch chain describes the complete SQLite snapshot.
+            // Removing rows not marked by this revision prevents stale or
+            // formerly duplicated messages from surviving forever remotely.
+            sqlx::query("DELETE FROM items WHERE turn_id IN (SELECT id FROM turns WHERE thread_id=?) AND snapshot_revision<?")
+                .bind(&batch.thread_id)
+                .bind(batch.inventory_revision)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM turns WHERE thread_id=? AND snapshot_revision<?")
+                .bind(&batch.thread_id)
+                .bind(batch.inventory_revision)
+                .execute(&mut *tx)
+                .await?;
+        }
         if !stale {
             sqlx::query("UPDATE threads SET history_cursor=?,last_synced_at=?,history_completeness=?,history_revision=? WHERE id=? AND history_revision<=?")
                 .bind(&batch.to_cursor).bind(now()).bind(if chain_complete { "complete" } else { "backfilling" }).bind(batch.inventory_revision)
@@ -1881,6 +1905,41 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(stored_messages, vec!["question", "done"]);
+
+        let pruned_records = history_batch
+            .records
+            .iter()
+            .filter(|record| {
+                record
+                    .item
+                    .as_ref()
+                    .is_none_or(|item| item.id != "itm_history_agent")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let pruned_batch = HistoryBatch {
+            batch_id: "hbatch_pruned".into(),
+            device_id: device_id.clone(),
+            thread_id: "thr_history".into(),
+            from_cursor: None,
+            to_cursor: "cursor_pruned".into(),
+            inventory_revision: 2,
+            payload_hash: hex::encode(Sha256::digest(serde_json::to_vec(&pruned_records).unwrap())),
+            complete: true,
+            records: pruned_records,
+        };
+        store
+            .ingest_history_batch(&user.id, &pruned_batch)
+            .await
+            .unwrap();
+        let stored_messages = sqlx::query_scalar::<_, String>(
+            "SELECT i.content_text FROM items i JOIN turns t ON t.id=i.turn_id WHERE t.thread_id=? ORDER BY i.ordinal",
+        )
+        .bind("thr_history")
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(stored_messages, vec!["question"]);
 
         store
             .create_pairing_code(&user.id, "pair-hash-second", 10)

@@ -4,13 +4,19 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
 import type { CommandStatus } from "../types";
-import type { LiveItem, LiveTurn, ThreadLive } from "../stream";
+import {
+  compareChronology,
+  compareLiveTurns,
+  orderedLiveItems,
+  type LiveItem,
+  type LiveTurn,
+  type ThreadLive,
+} from "../stream";
 import { clockTime, statusLabel } from "../format";
 import { AgentMessage, ApprovalCard, UserBubble, type ApprovalView } from "./items";
 import { Composer } from "./Composer";
@@ -19,9 +25,11 @@ import { Spinner } from "./ui";
 
 export interface RenderItem {
   id: string;
+  ordinal: number;
   kind: string;
   text: string;
   status: string;
+  occurredAt: string;
   truncated?: boolean;
 }
 
@@ -37,7 +45,7 @@ export interface HistoryGroup {
 }
 
 const SEND_ERROR: CommandStatus[] = ["failed", "rejected", "unknown", "expired"];
-const EMPTY_TEXTS = new Set<string>();
+const EMPTY_COUNTS = new Map<string, number>();
 
 /**
  * Keep the live transcript stable while App Server events and persisted history
@@ -47,13 +55,29 @@ const EMPTY_TEXTS = new Set<string>();
  */
 export function visibleLiveItems(
   turn: LiveTurn,
-  historyHasAgent = false,
-  historyUsers: ReadonlySet<string> = EMPTY_TEXTS,
+  historyAgents: ReadonlyMap<string, number> = EMPTY_COUNTS,
+  historyUsers: ReadonlyMap<string, number> = EMPTY_COUNTS,
 ): LiveItem[] {
   let skippedInitialEcho = false;
-  return turn.items.filter((item) => {
-    if (item.kind === "agent") return !historyHasAgent;
-    if (item.kind !== "user" || !item.text || historyUsers.has(item.text)) return false;
+  const remainingAgents = new Map(historyAgents);
+  const remainingUsers = new Map(historyUsers);
+  return orderedLiveItems(turn).filter((item) => {
+    if (item.kind === "agent") {
+      const signature = normalizedMessage(item.text);
+      if (!signature) return false;
+      const persisted = remainingAgents.get(signature) ?? 0;
+      if (persisted > 0) {
+        remainingAgents.set(signature, persisted - 1);
+        return false;
+      }
+      return true;
+    }
+    if (item.kind !== "user" || !item.text) return false;
+    const persisted = remainingUsers.get(item.text) ?? 0;
+    if (persisted > 0) {
+      remainingUsers.set(item.text, persisted - 1);
+      return false;
+    }
     if (
       !skippedInitialEcho &&
       !item.key.startsWith("steer:") &&
@@ -90,16 +114,55 @@ function normalizedMessage(text: string): string {
   return text.replace(/\r\n/g, "\n").trim();
 }
 
-/** Hide duplicate persisted assistant rows without changing the durable history. */
+/** Keep durable items in their recorded chronology and never collapse two
+ * legitimate identical replies merely because their text happens to match. */
 export function visibleHistoryItems(items: RenderItem[]): RenderItem[] {
-  const seenAgentMessages = new Set<string>();
-  return items.filter((item) => {
-    if (item.kind !== "agent_message") return true;
-    const signature = normalizedMessage(item.text);
-    if (!signature || seenAgentMessages.has(signature)) return false;
-    seenAgentMessages.add(signature);
-    return true;
-  });
+  const seenIds = new Set<string>();
+  return [...items]
+    .sort((left, right) =>
+      compareChronology(
+        left.occurredAt,
+        left.ordinal,
+        left.id,
+        right.occurredAt,
+        right.ordinal,
+        right.id,
+      ),
+    )
+    .filter((item) => {
+      if (seenIds.has(item.id)) return false;
+      seenIds.add(item.id);
+      return true;
+    });
+}
+
+function historyGroupAt(group: HistoryGroup): string | null {
+  return (
+    group.turn.startedAt ??
+    visibleHistoryItems(group.items)[0]?.occurredAt ??
+    group.turn.completedAt
+  );
+}
+
+export function orderedHistory(history: HistoryGroup[]): HistoryGroup[] {
+  const seen = new Set<string>();
+  return history
+    .filter((group) => {
+      if (seen.has(group.turn.id)) return false;
+      seen.add(group.turn.id);
+      return true;
+    })
+    .map((group) => ({ ...group, items: visibleHistoryItems(group.items) }))
+    .sort((left, right) =>
+      compareChronology(
+        historyGroupAt(left),
+        left.turn.ordinal,
+        left.turn.id,
+        historyGroupAt(right),
+        right.turn.ordinal,
+        right.turn.id,
+      ),
+    );
 }
 
 /**
@@ -149,8 +212,57 @@ export function liveTurnIsInHistory(turn: LiveTurn, history: HistoryGroup[]): bo
   });
 }
 
+/** Reconcile the two layers one-to-one. The previous per-turn `some()` check
+ * let one persisted prompt hide multiple identical optimistic sends. */
+export function freshLiveTurnsForHistory(
+  history: HistoryGroup[],
+  turns: LiveTurn[],
+): LiveTurn[] {
+  const durable = orderedHistory(history);
+  const claimed = new Set<number>();
+  const fresh: LiveTurn[] = [];
+
+  for (const turn of [...turns].sort(compareLiveTurns)) {
+    const exact = durable.findIndex((group) => group.turn.id === turn.id);
+    if (exact >= 0) {
+      claimed.add(exact);
+      continue;
+    }
+    const candidates = durable
+      .map((group, index) => ({ group, index }))
+      .filter(({ group, index }) =>
+        !claimed.has(index) &&
+        (optimisticEchoIsInHistory(turn, [group]) || liveTurnIsInHistory(turn, [group])),
+      );
+    if (candidates.length === 0) {
+      fresh.push(turn);
+      continue;
+    }
+    const liveTime = Date.parse(turn.startedAt);
+    candidates.sort((left, right) => {
+      const leftTime = Date.parse(historyGroupAt(left.group) ?? "");
+      const rightTime = Date.parse(historyGroupAt(right.group) ?? "");
+      const leftDistance = Number.isFinite(liveTime) && Number.isFinite(leftTime)
+        ? Math.abs(liveTime - leftTime)
+        : Number.POSITIVE_INFINITY;
+      const rightDistance = Number.isFinite(liveTime) && Number.isFinite(rightTime)
+        ? Math.abs(liveTime - rightTime)
+        : Number.POSITIVE_INFINITY;
+      if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+      return right.index - left.index;
+    });
+    claimed.add(candidates[0].index);
+  }
+  return fresh;
+}
+
+export function liveTurnHasTranscript(turn: LiveTurn): boolean {
+  return Boolean(turn.userText || visibleLiveItems(turn).length > 0);
+}
+
 export function ThreadView({
   history,
+  loading,
   live,
   approvals,
   onDecide,
@@ -171,6 +283,7 @@ export function ThreadView({
   onInterrupt,
 }: {
   history: HistoryGroup[];
+  loading?: boolean;
   live: ThreadLive;
   approvals: ApprovalView[];
   onDecide: (id: string, decision: string) => void;
@@ -193,38 +306,100 @@ export function ThreadView({
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
+  const prependAnchorRef = useRef<{
+    firstTurnId: string | null;
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
   const [stick, setStick] = useState(true);
 
-  const historyTurnIds = useMemo(
-    () => new Set(history.map((g) => g.turn.id)),
-    [history],
+  const durableHistory = orderedHistory(history);
+  const unmatchedLiveTurns = freshLiveTurnsForHistory(durableHistory, live.turns);
+  const latestActiveHistory = [...durableHistory]
+    .reverse()
+    .find((group) => ["active", "running", "inProgress"].includes(group.turn.status));
+  // App Server item events do not always carry the local turn id. An unbound
+  // live turn without its own prompt is an overlay for the durable active turn,
+  // not a new conversation turn with another divider.
+  const activeOrphans = latestActiveHistory
+    ? unmatchedLiveTurns.filter((turn) => turn.userText === null && turn.items.length > 0)
+    : [];
+  const activeOrphanIds = new Set(activeOrphans.map((turn) => turn.id));
+  const freshLiveTurns = unmatchedLiveTurns.filter(
+    (turn) =>
+      !activeOrphanIds.has(turn.id) &&
+      liveTurnHasTranscript(turn),
   );
 
   /** Only正文消息 overlay history; tool/reasoning activity stays out of the transcript. */
   const liveExtrasFor = (
     turnId: string,
-    historyHasAgent: boolean,
-    historyUsers: Set<string>,
+    historyAgents: Map<string, number>,
+    historyUsers: Map<string, number>,
   ): LiveItem[] => {
-    const turn = live.byId[turnId];
-    if (!turn) return [];
-    return visibleLiveItems(turn, historyHasAgent, historyUsers);
+    const turns = [
+      live.byId[turnId],
+      ...(latestActiveHistory?.turn.id === turnId ? activeOrphans : []),
+    ].filter((turn): turn is LiveTurn => Boolean(turn));
+    const seen = new Set<string>();
+    return turns
+      .flatMap((turn) => visibleLiveItems(turn, historyAgents, historyUsers))
+      .filter((item) => {
+        const signature = `${item.kind}:${normalizedMessage(item.text)}:${item.key}`;
+        if (seen.has(signature)) return false;
+        seen.add(signature);
+        return true;
+      })
+      .sort((left, right) =>
+        compareChronology(
+          left.occurredAt,
+          left.sequence,
+          left.key,
+          right.occurredAt,
+          right.sequence,
+          right.key,
+        ),
+      );
   };
-
-  const freshLiveTurns = live.turns.filter((t) => {
-    if (historyTurnIds.has(t.id)) return false;
-    // orphan optimistic echo: history already persisted this user message
-    // under the authoritative turn id (e.g. the live event was missed)
-    if (optimisticEchoIsInHistory(t, history)) return false;
-    if (liveTurnIsInHistory(t, history)) return false;
-    return true;
+  const transcript: Array<
+    | { source: "history"; group: HistoryGroup }
+    | { source: "live"; turn: LiveTurn }
+  > = [
+    ...durableHistory.map((group) => ({ source: "history" as const, group })),
+    ...freshLiveTurns.map((turn) => ({ source: "live" as const, turn })),
+  ];
+  transcript.sort((left, right) => {
+    const leftAt = left.source === "history" ? historyGroupAt(left.group) : left.turn.startedAt;
+    const rightAt = right.source === "history" ? historyGroupAt(right.group) : right.turn.startedAt;
+    const leftSequence = left.source === "history"
+      ? left.group.turn.ordinal
+      : left.turn.startedSequence;
+    const rightSequence = right.source === "history"
+      ? right.group.turn.ordinal
+      : right.turn.startedSequence;
+    const leftId = left.source === "history" ? left.group.turn.id : left.turn.id;
+    const rightId = right.source === "history" ? right.group.turn.id : right.turn.id;
+    return compareChronology(
+      leftAt,
+      leftSequence,
+      leftId,
+      rightAt,
+      rightSequence,
+      rightId,
+    );
   });
 
   /* ---- scroll management ---- */
   const scrollToBottom = useCallback((smooth = false) => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+    const reducedMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: smooth && !reducedMotion ? "smooth" : "auto",
+    });
   }, []);
 
   const setFollowing = useCallback((following: boolean) => {
@@ -242,6 +417,27 @@ export function ThreadView({
     if (!el) return;
     setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight < 140);
   }, [setFollowing]);
+
+  const loadOlder = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) {
+      prependAnchorRef.current = {
+        firstTurnId: durableHistory[0]?.turn.id ?? null,
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+      };
+    }
+    onLoadOlder?.();
+  }, [durableHistory, onLoadOlder]);
+
+  useLayoutEffect(() => {
+    const anchor = prependAnchorRef.current;
+    const el = scrollRef.current;
+    if (!anchor || !el || durableHistory[0]?.turn.id === anchor.firstTurnId) return;
+    el.scrollTop = anchor.scrollTop + (el.scrollHeight - anchor.scrollHeight);
+    prependAnchorRef.current = null;
+    setFollowing(false);
+  }, [durableHistory, setFollowing]);
 
   // Streaming Markdown, tool cards, syntax highlighting and approvals can all
   // change height without changing the number of rendered items. Observing the
@@ -261,8 +457,9 @@ export function ThreadView({
   }, [draftKey, scrollToBottom]);
 
   useLayoutEffect(() => {
+    if (loading) return;
     followLatest(false);
-  }, [draftKey, followLatest]);
+  }, [draftKey, followLatest, loading]);
 
   const sendAndFollow = useCallback((text: string) => {
     followLatest(false);
@@ -272,7 +469,7 @@ export function ThreadView({
   const renderLiveTurn = (turn: LiveTurn) => {
     const stateErr = turn.sendState && SEND_ERROR.includes(turn.sendState);
     return (
-      <section key={turn.id}>
+      <section key={turn.renderKey ?? turn.id}>
         <TurnMeta status={turn.status} startedAt={turn.startedAt} />
         {turn.userText ? (
           <UserBubble
@@ -312,11 +509,18 @@ export function ThreadView({
       <div className="thread-scroll" ref={scrollRef} onScroll={onScroll}>
         <div className="thread-col" ref={contentRef}>
           {headerOverlay}
+          {loading ? (
+            <div className="thread-loading" role="status" aria-label="正在加载会话记录">
+              <div className="skeleton thread-loading-user" />
+              <div className="skeleton thread-loading-agent" />
+              <div className="skeleton thread-loading-agent short" />
+            </div>
+          ) : null}
           {hasMoreHistory || loadingMore ? (
             <div style={{ display: "flex", justifyContent: "center", padding: "6px 0 14px" }}>
               <button
                 className="btn ghost sm"
-                onClick={onLoadOlder}
+                onClick={loadOlder}
                 disabled={loadingMore}
               >
                 {loadingMore ? <Spinner sm /> : null}
@@ -325,18 +529,26 @@ export function ThreadView({
             </div>
           ) : null}
 
-          {history.map((group) => {
-            const items = visibleHistoryItems(group.items);
-            const hasAgent = items.some((i) => i.kind === "agent_message");
-            const groupUsers = new Set(
-              items.filter((item) => item.kind === "user_message").map((item) => item.text),
-            );
-            const extras = liveExtrasFor(group.turn.id, hasAgent, groupUsers);
+          {transcript.map((entry) => {
+            if (entry.source === "live") return renderLiveTurn(entry.turn);
+            const { group } = entry;
+            const items = group.items;
+            const groupAgents = new Map<string, number>();
+            const groupUsers = new Map<string, number>();
+            for (const item of items) {
+              if (item.kind === "agent_message") {
+                const signature = normalizedMessage(item.text);
+                if (signature) groupAgents.set(signature, (groupAgents.get(signature) ?? 0) + 1);
+              } else if (item.kind === "user_message") {
+                groupUsers.set(item.text, (groupUsers.get(item.text) ?? 0) + 1);
+              }
+            }
+            const extras = liveExtrasFor(group.turn.id, groupAgents, groupUsers);
             return (
-              <section key={group.turn.id}>
+              <section key={live.byId[group.turn.id]?.renderKey ?? group.turn.id}>
                 <TurnMeta
                   status={group.turn.status}
-                  startedAt={group.turn.startedAt}
+                  startedAt={group.turn.startedAt ?? historyGroupAt(group)}
                   ordinal={group.turn.ordinal}
                 />
                 {items.map((item) => {
@@ -363,8 +575,6 @@ export function ThreadView({
             );
           })}
 
-          {freshLiveTurns.map(renderLiveTurn)}
-
           {approvals.map((a) => (
             <ApprovalCard
               key={a.id}
@@ -374,7 +584,7 @@ export function ThreadView({
             />
           ))}
 
-          {history.length === 0 && live.turns.length === 0 ? (
+          {!loading && durableHistory.length === 0 && live.turns.length === 0 ? (
             <div
               style={{
                 textAlign: "center",
