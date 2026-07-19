@@ -177,15 +177,6 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
 
   const groups = useMemo(() => groupHistory(history.data ?? []), [history.data]);
 
-  const headerOverlay = (
-    <>
-      {!appRunning && !info.isLoading ? (
-        <div className="notice-banner warn">Codex App Server 未运行</div>
-      ) : null}
-      {archived ? <div className="notice-banner">已归档</div> : null}
-    </>
-  );
-
   const threadView = history.isLoading ? (
     <div style={{ flex: 1, display: "grid", placeItems: "center" }}>
       <Spinner />
@@ -197,7 +188,6 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
       approvals={threadApprovals}
       onDecide={decide}
       approvalsLocked={!appRunning}
-      headerOverlay={headerOverlay}
       draftKey={threadId}
       canSend={canSend}
       lockedReason={lockedReason}

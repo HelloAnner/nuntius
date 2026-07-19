@@ -2,19 +2,13 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Avatar,
   Empty,
   IconFolder,
   IconPlus,
-  Pill,
   Spinner,
-  completenessLabel,
-  deviceTone,
-  fullTime,
-  initials,
   osLabel,
+  relTime,
   statusLabel,
-  tintIndex,
 } from "@nuntius/shared";
 import { api } from "../api";
 import { useNavigate } from "../hooks";
@@ -45,7 +39,11 @@ export function DevicePage({ deviceId }: { deviceId: string }) {
     <div className="page">
       <TopBar
         title={device?.displayName ?? "设备"}
-        subtitle={device ? statusLabel(device.status) : undefined}
+        subtitle={device
+          ? device.status === "online"
+            ? osLabel(device.osFamily, device.architecture)
+            : `${statusLabel(device.status)}${device.lastSeenAt ? ` · ${relTime(device.lastSeenAt)}在线` : ""}`
+          : undefined}
         onBack={() => back({ name: "devices" })}
         trailing={<ConnIndicator />}
       />
@@ -53,30 +51,11 @@ export function DevicePage({ deviceId }: { deviceId: string }) {
         <div className="page-col">
           {device ? (
             <>
-              <div className="hero">
-                <Avatar text={initials(device.displayName)} tint={tintIndex(device.id)} online={online} />
-                <div className="meta">
-                  <div className="name display">{device.displayName}</div>
-                  <div className="facts">
-                    <span>{osLabel(device.osFamily, device.architecture)}</span>
-                    {device.codexVersion ? <span>Codex {device.codexVersion}</span> : null}
-                    {device.agentVersion ? <span>CLI {device.agentVersion}</span> : null}
-                  </div>
-                </div>
-                <Pill tone={deviceTone(device.status)} pulse={device.status === "syncing"}>
-                  {statusLabel(device.status)}
-                </Pill>
-              </div>
-
-              {!online ? (
-                <div className="notice-banner warn">
-                  设备当前{statusLabel(device.status)}
-                  {device.lastSeenAt ? `，最后在线 ${fullTime(device.lastSeenAt)}` : ""}
-                  。已同步的会话历史仍可阅读，但不能发起新的执行。
-                </div>
-              ) : null}
               {device.historyCompleteness === "backfilling" ? (
-                <div className="notice-banner info">历史记录正在回填中（{completenessLabel(device.historyCompleteness)}），旧会话会逐步完整。</div>
+                <div className="sync-note" role="status">
+                  <span className="row-state-spinner" aria-hidden="true" />
+                  历史同步中
+                </div>
               ) : null}
 
               <div className="section-label micro">

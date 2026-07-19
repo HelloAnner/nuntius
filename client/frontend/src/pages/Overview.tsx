@@ -2,9 +2,9 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   Avatar,
-  IconCheck,
+  Empty,
+  IconDevice,
   IconX,
-  Pill,
   Spinner,
   initials,
   tintIndex,
@@ -21,10 +21,14 @@ export function OverviewPage() {
   });
   const down = info.isError;
   const data = info.data;
+  const queueBusy = Boolean(data && (data.pendingCommands > 0 || data.pendingEvents > 0));
+  const issueCount = data
+    ? Number(!data.appServerRunning) + Number(!data.paired) + Number(queueBusy)
+    : 0;
 
   return (
     <div className="page">
-      <TopBar title={<span className="wordmark">本机控制台</span>} trailing={<ConnIndicator />} />
+      <TopBar title={<span className="wordmark">本机</span>} trailing={<ConnIndicator />} />
       <div className="page-scroll">
         <div className="page-col" style={{ maxWidth: 640 }}>
           {info.isLoading ? (
@@ -32,23 +36,16 @@ export function OverviewPage() {
               <Spinner />
             </div>
           ) : down ? (
-            <>
-              <div className="hero">
-                <Avatar text="?" tint={1} />
-                <div className="meta">
-                  <div className="name display">服务未运行</div>
-                  <div className="facts">无法连接本地 Nuntius 服务</div>
-                </div>
-                <Pill tone="danger">离线</Pill>
-              </div>
-              <div className="notice-banner warn">
-                本地服务没有响应。在终端运行 <span className="mono">nuntius-client start</span>{" "}
-                启动后台服务，或使用 <span className="mono">nuntius-client run</span> 前台调试。
-              </div>
-              <button className="btn ghost block" onClick={() => void info.refetch()}>
-                重新检测
-              </button>
-            </>
+            <Empty
+              icon={<IconDevice size={24} />}
+              headline="本地服务未运行"
+              hint="启动 nuntius-client 后重新检测"
+              action={
+                <button className="btn ghost" onClick={() => void info.refetch()}>
+                  重新检测
+                </button>
+              }
+            />
           ) : data ? (
             <>
               <div className="hero">
@@ -56,72 +53,41 @@ export function OverviewPage() {
                 <div className="meta">
                   <div className="name display">{hostnameOf(data.deviceId)}</div>
                   <div className="facts">
-                    <span className="mono" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {data.deviceId.length > 20 ? `${data.deviceId.slice(0, 12)}…${data.deviceId.slice(-6)}` : data.deviceId}
-                    </span>
-                    <span>·</span>
                     <span>CLI {data.clientVersion}</span>
-                    <span>·</span>
                     <span className="mono">{data.localBind}</span>
                   </div>
                 </div>
-                <Pill tone="ok" pulse>
-                  运行中
-                </Pill>
               </div>
 
-              <div className="section-label micro">运行状态</div>
-              <div className="list-group">
-                <StatusRow
-                  ok
-                  title="本地服务"
-                />
-                <StatusRow
-                  ok={data.appServerRunning}
-                  title="Codex App Server"
-                  detail={
-                    data.appServerRunning
-                      ? undefined
-                      : "未运行。确认已安装 Codex，并用 nuntius-client run 查看原因"
-                  }
-                />
-                <StatusRow
-                  ok={data.paired}
-                  title="公网连接"
-                  detail={
-                    data.paired
-                      ? undefined
-                      : "未配对。在服务器「设置」页生成配对码后运行 nuntius-client pair <CODE>"
-                  }
-                />
-                <StatusRow
-                  ok={data.pendingCommands === 0 && data.pendingEvents === 0}
-                  title="同步队列"
-                  detail={
-                    data.pendingCommands === 0 && data.pendingEvents === 0
-                      ? undefined
-                      : `待处理命令 ${data.pendingCommands} · 待同步事件 ${data.pendingEvents}`
-                  }
-                />
-              </div>
+              {issueCount > 0 ? (
+                <>
+                  <div className="section-label micro">需要处理 · {issueCount}</div>
+                  <div className="list-group">
+                    {!data.appServerRunning ? (
+                      <IssueRow title="Codex App Server 未运行" detail="请确认已安装 Codex" />
+                    ) : null}
+                    {!data.paired ? (
+                      <IssueRow title="尚未配对" detail="可在远程控制台的设置页获取配对码" />
+                    ) : null}
+                    {queueBusy ? (
+                      <IssueRow
+                        title="等待同步"
+                        detail={`${data.pendingCommands} 个命令 · ${data.pendingEvents} 个事件`}
+                      />
+                    ) : null}
+                  </div>
+                </>
+              ) : null}
 
-              <div className="section-label micro">本机概况</div>
+              <div className="section-label micro">概况</div>
               <div className="fact-grid">
                 <div className="fact">
                   <div className="k">项目</div>
                   <div className="v num">{data.projects}</div>
                 </div>
                 <div className="fact">
-                  <div className="k">活跃 Turn</div>
+                  <div className="k">运行中</div>
                   <div className="v num">{data.activeTurns}</div>
-                </div>
-                <div className="fact">
-                  <div className="k">待处理命令</div>
-                  <div className="v num">{data.pendingCommands}</div>
-                </div>
-                <div className="fact">
-                  <div className="k">待同步事件</div>
-                  <div className="v num">{data.pendingEvents}</div>
                 </div>
               </div>
             </>
@@ -132,17 +98,16 @@ export function OverviewPage() {
   );
 }
 
-function StatusRow({ ok, title, detail }: { ok: boolean; title: string; detail?: string }) {
+function IssueRow({ title, detail }: { title: string; detail?: string }) {
   return (
     <div className="list-row">
-      <span className={`row-glyph${ok ? "" : " muted"}`} style={ok ? {} : { background: "var(--warn-soft)", color: "var(--warn)" }}>
-        {ok ? <IconCheck size={16} /> : <IconX size={16} />}
+      <span className="row-glyph muted" style={{ background: "var(--warn-soft)", color: "var(--warn)" }}>
+        <IconX size={16} />
       </span>
       <div className="grow">
         <div className="title">{title}</div>
         {detail ? <div className="sub"><span className="ellipsis">{detail}</span></div> : null}
       </div>
-      <Pill tone={ok ? "ok" : "warn"}>{ok ? "正常" : "待处理"}</Pill>
     </div>
   );
 }

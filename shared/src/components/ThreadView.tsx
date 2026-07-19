@@ -273,10 +273,7 @@ export function ThreadView({
     const stateErr = turn.sendState && SEND_ERROR.includes(turn.sendState);
     return (
       <section key={turn.id}>
-        <div className="turn-meta num">
-          {statusLabel(turn.status)}
-          {turn.startedAt ? ` · ${clockTime(turn.startedAt)}` : ""}
-        </div>
+        <TurnMeta status={turn.status} startedAt={turn.startedAt} />
         {turn.userText ? (
           <UserBubble
             text={turn.userText}
@@ -337,10 +334,11 @@ export function ThreadView({
             const extras = liveExtrasFor(group.turn.id, hasAgent, groupUsers);
             return (
               <section key={group.turn.id}>
-                <div className="turn-meta num">
-                  第 {group.turn.ordinal} 轮 · {statusLabel(group.turn.status)}
-                  {group.turn.startedAt ? ` · ${clockTime(group.turn.startedAt)}` : ""}
-                </div>
+                <TurnMeta
+                  status={group.turn.status}
+                  startedAt={group.turn.startedAt}
+                  ordinal={group.turn.ordinal}
+                />
                 {items.map((item) => {
                   if (item.kind === "user_message") {
                     return <UserBubble key={item.id} text={item.text} />;
@@ -411,6 +409,30 @@ export function ThreadView({
         onSend={sendAndFollow}
         onInterrupt={onInterrupt}
       />
+    </div>
+  );
+}
+
+function TurnMeta({
+  status,
+  startedAt,
+  ordinal,
+}: {
+  status: string;
+  startedAt: string | null;
+  ordinal?: number;
+}) {
+  const active = status === "active" || status === "running";
+  const quiet = status === "completed" || status === "idle";
+  const time = clockTime(startedAt);
+  const spoken = [ordinal ? `第 ${ordinal} 轮` : null, statusLabel(status), time]
+    .filter(Boolean)
+    .join("，");
+  return (
+    <div className={`turn-meta num${active ? " active" : ""}`} aria-label={spoken}>
+      {active ? <span className="live-dot" aria-hidden="true" /> : null}
+      {!quiet && !active ? <span>{statusLabel(status)}</span> : null}
+      {time ? <span>{time}</span> : <span aria-hidden="true">·</span>}
     </div>
   );
 }

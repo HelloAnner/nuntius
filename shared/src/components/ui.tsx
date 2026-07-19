@@ -159,7 +159,12 @@ export function Avatar({
     >
       {text}
       {online !== undefined ? (
-        <span className={`presence${online ? " online" : ""}`} />
+        <span
+          className={`presence${online ? " online" : ""}`}
+          role="img"
+          aria-label={online ? "在线" : "离线"}
+          title={online ? "在线" : "离线"}
+        />
       ) : null}
     </span>
   );
@@ -278,9 +283,9 @@ export function Segmented<T extends string>({
 export type ConnState = "live" | "busy" | "down";
 export function ConnPill({ state, label }: { state: ConnState; label: string }) {
   return (
-    <span className={`conn-pill ${state}`}>
-      <span className="dot" />
-      {label}
+    <span className={`conn-pill ${state}`} role="status" aria-label={label} title={label}>
+      <span className="dot" aria-hidden="true" />
+      <span className="conn-label">{label}</span>
     </span>
   );
 }

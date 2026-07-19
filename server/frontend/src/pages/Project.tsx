@@ -10,6 +10,7 @@ import {
   Spinner,
   SwipeActionRow,
   newIdemKey,
+  statusLabel,
   threadOptionsForAccess,
   turnOptionsForAccess,
   useConfirmAction,
@@ -216,7 +217,9 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
     <div className="page">
       <TopBar
         title={project?.displayName ?? "项目"}
-        subtitle={device ? `${device.displayName}${project?.branch ? ` · ${project.branch}${project.isDirty ? "*" : ""}` : ""}` : undefined}
+        subtitle={device
+          ? `${device.displayName}${device.status === "online" ? "" : ` · ${statusLabel(device.status)}`}${project?.branch ? ` · ${project.branch}${project.isDirty ? "*" : ""}` : ""}`
+          : undefined}
         onBack={() => back({ name: "device", deviceId })}
         trailing={
           canCreate ? (
@@ -231,9 +234,7 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
       <div className="page-scroll">
         <div className="page-col">
           {unassigned ? (
-            <div className="notice-banner info">
-              这里是「未归类」会话：无法安全映射到工作目录的历史会话。可以阅读记录；回到这台电脑的本地控制台把它关联到真实项目后，才能继续对话。
-            </div>
+            <div className="notice-banner info compact">未归类 · 仅可查看历史</div>
           ) : null}
           {threads.isLoading ? (
             <div style={{ display: "grid", placeItems: "center", padding: 48 }}>

@@ -31,18 +31,17 @@ export const UserBubble = memo(function UserBubble({
   errorMessage?: string | null;
   onRetry?: () => void;
 }) {
+  const pending = state === "applying" || state === "accepted" || state === "waiting_device";
   return (
     <div className="msg-user">
       <div className="bubble">{text}</div>
       {stateLabel ? (
-        <div className={`send-state${stateError ? " err" : ""}`}>
-          {state === "applying" || state === "accepted" || state === "waiting_device" ? (
-            <Spinner sm />
-          ) : null}
-          <span className="send-state-label">{stateLabel}</span>
-          {stateError && errorMessage ? (
-            <span className="send-state-error">· {errorMessage}</span>
-          ) : null}
+        <div
+          className={`send-state${stateError ? " err" : ""}`}
+          role="status"
+          aria-label={errorMessage ?? stateLabel}
+        >
+          {pending ? <Spinner sm /> : <span className="send-state-label">{errorMessage ?? stateLabel}</span>}
           {stateError && onRetry ? (
             <button className="send-retry" onClick={onRetry}>重试</button>
           ) : null}
@@ -69,10 +68,11 @@ export const AgentMessage = memo(function AgentMessage({
         {text ? (
           <Markdown text={text} />
         ) : streaming ? (
-          <span style={{ color: "var(--ink-3)", fontStyle: "italic" }}>正在思考…</span>
+          <span className="thinking-indicator" role="status" aria-label="正在思考">
+            <span aria-hidden="true" />
+          </span>
         ) : null}
         {streaming && text ? <span className="caret" /> : null}
-        {!text && streaming ? <span className="caret" /> : null}
       </div>
     </div>
   );

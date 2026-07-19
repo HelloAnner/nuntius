@@ -4,8 +4,6 @@ import { useNavigate } from "./hooks";
 import {
   Avatar,
   ConnPill,
-  Pill,
-  deviceTone,
   initials,
   osLabel,
   relTime,
@@ -150,30 +148,43 @@ export function NavRail() {
 export function DeviceRow({ device }: { device: DeviceSummary }) {
   const navigate = useNavigate();
   const online = device.status === "online";
+  const transient = device.status === "syncing" || device.status === "pairing";
   return (
     <button
       className="list-row"
       onClick={() => navigate({ name: "device", deviceId: device.id })}
     >
-      <Avatar text={initials(device.displayName)} tint={tintIndex(device.id)} online={online} />
+      <Avatar
+        text={initials(device.displayName)}
+        tint={tintIndex(device.id)}
+        online={device.status === "online" ? true : device.status === "offline" ? false : undefined}
+      />
       <div className="grow">
         <div className="title">{device.displayName}</div>
         <div className="sub">
           <span>{osLabel(device.osFamily, device.architecture)}</span>
           <span className="sep">·</span>
-          <span>{online ? `${device.projectCount} 个项目` : `${relTime(device.lastSeenAt)}在线`}</span>
+          <span>{online || transient ? `${device.projectCount} 个项目` : `${relTime(device.lastSeenAt)}在线`}</span>
         </div>
       </div>
       <div className="trailing">
         {device.pendingApprovalCount > 0 ? (
-          <Pill tone="warn" pulse>
-            {device.pendingApprovalCount} 待审批
-          </Pill>
+          <span className="row-signal approval" role="img" aria-label={`${device.pendingApprovalCount} 个待审批`} title={`${device.pendingApprovalCount} 个待审批`}>
+            <IconShield size={16} />
+            <span className="signal-count num">{device.pendingApprovalCount}</span>
+          </span>
         ) : null}
-        {device.activeTurnCount > 0 ? <Pill tone="info" pulse>{device.activeTurnCount} 运行中</Pill> : null}
-        <Pill tone={deviceTone(device.status)} pulse={device.status === "syncing"}>
-          {statusLabel(device.status)}
-        </Pill>
+        {device.activeTurnCount > 0 ? (
+          <span className="row-signal activity" role="img" aria-label={`${device.activeTurnCount} 个会话运行中`} title={`${device.activeTurnCount} 个会话运行中`}>
+            <span className="live-dot" />
+            {device.activeTurnCount > 1 ? <span className="signal-count num">{device.activeTurnCount}</span> : null}
+          </span>
+        ) : null}
+        {transient ? (
+          <span className="row-state-spinner" role="status" aria-label={statusLabel(device.status)} title={statusLabel(device.status)} />
+        ) : device.status === "degraded" || device.status === "revoked" ? (
+          <span className={`row-state-dot ${device.status}`} role="img" aria-label={statusLabel(device.status)} title={statusLabel(device.status)} />
+        ) : null}
         <IconChevronRight size={16} />
       </div>
     </button>
@@ -225,20 +236,25 @@ export function ThreadRow({
   onClick: () => void;
 }) {
   const active = thread.status === "active";
+  const secondaryStatus =
+    !thread.archived && !["active", "completed", "idle"].includes(thread.status)
+      ? statusLabel(thread.status)
+      : null;
+  const details = [context, thread.archived ? "已归档" : secondaryStatus].filter(Boolean) as string[];
   return (
     <button className="list-row" onClick={onClick}>
-      <span className={`row-glyph thread${active ? " live" : ""}${thread.archived ? " muted" : ""}`}>
+      <span className={`row-glyph thread${thread.archived ? " muted" : ""}`}>
         <IconChat size={16} />
       </span>
       <div className="grow">
         <div className="title" style={thread.archived ? { color: "var(--ink-3)" } : undefined}>
           {thread.title || "未命名会话"}
         </div>
-        <div className="sub">
-          {context ? <span className="ellipsis">{context}</span> : null}
-          <span>{statusLabel(thread.status)}</span>
-          {thread.archived ? <span>· 已归档</span> : null}
-        </div>
+        {details.length ? (
+          <div className="sub">
+            {details.map((detail) => <span className="ellipsis" key={detail}>{detail}</span>)}
+          </div>
+        ) : null}
       </div>
       <div className="trailing">
         {active ? <span className="live-dot" aria-label="进行中" /> : null}
@@ -246,14 +262,5 @@ export function ThreadRow({
         <IconChevronRight size={16} />
       </div>
     </button>
-  );
-}
-
-/* ---------- insecure transport banner ---------- */
-export function InsecureBanner() {
-  return (
-    <div className="insecure-banner" role="alert">
-      当前为 HTTP 不安全传输：登录凭证与会话内容可能被窃听，请仅在可信网络中使用
-    </div>
   );
 }

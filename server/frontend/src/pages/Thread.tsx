@@ -252,18 +252,6 @@ export function ThreadPage({
       },
     });
 
-  const headerOverlay = (
-    <>
-      {!online && device ? (
-        <div className="notice-banner warn">设备{statusLabel(device.status)}</div>
-      ) : null}
-      {archived ? <div className="notice-banner">已归档</div> : null}
-      {unassigned ? (
-        <div className="notice-banner info">未归类，只读</div>
-      ) : null}
-    </>
-  );
-
   const threadView = history.isLoading ? (
     <div style={{ flex: 1, display: "grid", placeItems: "center" }}>
       <Spinner />
@@ -278,7 +266,6 @@ export function ThreadPage({
       hasMoreHistory={history.data?.hasMore}
       loadingMore={history.isFetching && !history.isLoading}
       onLoadOlder={() => setTurnCount((n) => n + 12)}
-      headerOverlay={headerOverlay}
       draftKey={threadId}
       canSend={canSend}
       lockedReason={lockedReason}
@@ -295,7 +282,9 @@ export function ThreadPage({
   const topbar = (
     <TopBar
       title={thread?.title ?? "会话"}
-      subtitle={device && project ? `${device.displayName} · ${project.displayName}` : undefined}
+      subtitle={device && project
+        ? `${online ? device.displayName : statusLabel(device.status)} · ${project.displayName}`
+        : undefined}
       onBack={() => back({ name: "project", deviceId, projectId })}
       onTitleClick={() => setSwitcherOpen(true)}
       trailing={

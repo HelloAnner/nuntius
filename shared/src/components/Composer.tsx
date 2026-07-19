@@ -96,39 +96,22 @@ export function Composer({
 }
 
 function RuntimeStatus({ status, connected }: { status: string | null; connected: boolean }) {
-  let tone = "idle";
-  let label = "当前空闲";
-  let detail = "数据库已确认";
-  let proof = "已同步";
-
-  if (!status) {
-    tone = "unknown";
+  let tone: "running" | "syncing" | "warning";
+  let label: string;
+  if (!connected) {
+    tone = "warning";
+    label = "连接已中断";
+  } else if (!status) {
+    tone = "syncing";
     label = "正在确认状态";
-    detail = "等待数据库快照";
-    proof = "待同步";
-  } else if (!connected) {
-    tone = "unknown";
-    label = "状态待确认";
-    detail = status === "active" ? "连接中断，上次记录为运行中" : "设备连接已中断";
-    proof = "非实时";
   } else if (status === "active") {
     tone = "running";
     label = "正在运行";
-    detail = "设备数据库实时状态";
-    proof = "实时";
   } else if (status === "unknown" || status === "systemError") {
-    tone = "unknown";
-    label = "状态待确认";
-    detail = status === "systemError" ? "运行服务状态异常" : "数据库没有可靠终态";
-    proof = "待核对";
-  } else if (status === "failed") {
-    tone = "failed";
-    label = "执行失败";
-    detail = "数据库已记录终态";
-    proof = "已同步";
-  } else if (status === "interrupted") {
-    label = "已中断";
-    detail = "数据库已记录终态";
+    tone = "warning";
+    label = status === "systemError" ? "运行服务异常" : "状态待确认";
+  } else {
+    return null;
   }
 
   return (
@@ -136,12 +119,10 @@ function RuntimeStatus({ status, connected }: { status: string | null; connected
       className={`thread-runtime ${tone}`}
       role="status"
       aria-live="polite"
-      title="状态直接来自设备 SQLite；实时事件仅用于触发数据库刷新"
+      aria-label={label}
+      title={label}
     >
       <span className="thread-runtime-dot" aria-hidden="true" />
-      <strong>{label}</strong>
-      <span className="thread-runtime-detail">{detail}</span>
-      <span className="thread-runtime-proof">{proof}</span>
     </div>
   );
 }

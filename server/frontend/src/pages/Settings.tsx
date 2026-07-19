@@ -3,12 +3,9 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Avatar,
-  IconBolt,
   IconKey,
-  IconShield,
   Segmented,
   Spinner,
-  deviceTone,
   fullTime,
   initials,
   osLabel,
@@ -17,7 +14,6 @@ import {
   tintIndex,
   useConfirmAction,
   useToast,
-  Pill,
   type PairingCodeView,
   type ConversationAccessMode,
   type Theme,
@@ -102,36 +98,20 @@ export function SettingsPage() {
 
           <div className="section-label micro">对话访问级别</div>
           <div className="card access-settings">
-            <div className="access-settings-head">
-              <span className={`row-glyph${accessMode === "full" ? " access-full" : ""}`}>
-                {accessMode === "full" ? <IconBolt size={17} /> : <IconShield size={17} />}
-              </span>
-              <div>
-                <div className="access-settings-title">
-                  {accessMode === "full" ? "完全访问" : "操作前询问"}
-                </div>
-              </div>
-            </div>
             <Segmented
               options={
                 [
-                  { value: "full", label: "完全访问（默认）" },
-                  { value: "ask", label: "需要询问" },
+                  { value: "full", label: "完全访问" },
+                  { value: "ask", label: "操作前询问" },
                 ] satisfies { value: ConversationAccessMode; label: string }[]
               }
               value={accessMode}
               onChange={setAccessMode}
             />
             <div className={`access-settings-note ${accessMode}`}>
-              {accessMode === "full" ? (
-                <>
-                  <strong>无需批准，完整系统与网络访问。</strong>
-                </>
-              ) : (
-                <>
-                  <strong>越过工作区或访问受限资源时询问。</strong>
-                </>
-              )}
+              {accessMode === "full"
+                ? "无需批准，可访问系统与网络。"
+                : "越过工作区或访问受限资源时询问。"}
             </div>
           </div>
 
@@ -163,27 +143,40 @@ export function SettingsPage() {
 
           <div className="section-label micro">已配对设备</div>
           <div className="list-group">
-            {(devices.data ?? []).map((d) => (
-              <div key={d.id} className="list-row">
-                <Avatar sm text={initials(d.displayName)} tint={tintIndex(d.id)} online={d.status === "online"} />
-                <div className="grow">
-                  <div className="title" style={{ fontSize: 14.5 }}>{d.displayName}</div>
-                  <div className="sub">
-                    <span>{osLabel(d.osFamily, d.architecture)}</span>
-                    <span>·</span>
-                    <span className="num">{relTime(d.lastSeenAt)}在线</span>
+            {(devices.data ?? []).map((d) => {
+              const transient = d.status === "syncing" || d.status === "pairing";
+              return (
+                <div key={d.id} className="list-row">
+                  <Avatar
+                    sm
+                    text={initials(d.displayName)}
+                    tint={tintIndex(d.id)}
+                    online={d.status === "online" ? true : d.status === "offline" ? false : undefined}
+                  />
+                  <div className="grow">
+                    <div className="title" style={{ fontSize: 14.5 }}>{d.displayName}</div>
+                    <div className="sub">
+                      <span>{osLabel(d.osFamily, d.architecture)}</span>
+                      {d.status === "online" || transient ? null : (
+                        <span className="num">{relTime(d.lastSeenAt)}在线</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="trailing">
+                    {transient ? (
+                      <span className="row-state-spinner" role="status" aria-label={statusLabel(d.status)} title={statusLabel(d.status)} />
+                    ) : d.status === "degraded" || d.status === "revoked" ? (
+                      <span className={`row-state-dot ${d.status}`} role="img" aria-label={statusLabel(d.status)} title={statusLabel(d.status)} />
+                    ) : null}
+                    {d.status !== "revoked" ? (
+                      <button className="btn danger sm" onClick={() => revoke(d.id, d.displayName)}>
+                        撤销
+                      </button>
+                    ) : null}
                   </div>
                 </div>
-                <div className="trailing">
-                  <Pill tone={deviceTone(d.status)}>{statusLabel(d.status)}</Pill>
-                  {d.status !== "revoked" ? (
-                    <button className="btn danger sm" onClick={() => revoke(d.id, d.displayName)}>
-                      撤销
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="section-label micro">外观</div>
@@ -222,9 +215,6 @@ export function SettingsPage() {
               <div className="v num">{info.data?.apiVersion ?? "—"}</div>
             </div>
           </div>
-          <p style={{ margin: "26px 0 10px", textAlign: "center", fontSize: 12, color: "var(--ink-4)" }}>
-            Nuntius · 你的多设备 Codex 控制平面
-          </p>
         </div>
       </div>
       {confirmNode}

@@ -135,9 +135,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
       <div className="page-scroll">
         <div className="page-col">
           {!canCreate && !info.isLoading ? (
-            <div className="notice-banner warn">
-              Codex App Server 未运行，暂时不能创建或继续会话。
-            </div>
+            <div className="notice-banner warn compact">Codex App Server 未运行</div>
           ) : null}
           {threads.isLoading ? (
             <div style={{ display: "grid", placeItems: "center", padding: 48 }}>

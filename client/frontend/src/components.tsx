@@ -181,20 +181,25 @@ export function ThreadRow({
   onClick: () => void;
 }) {
   const active = thread.status === "active";
+  const secondaryStatus =
+    !thread.archived && !["active", "completed", "idle"].includes(thread.status)
+      ? statusLabel(thread.status)
+      : null;
+  const details = [context, thread.archived ? "已归档" : secondaryStatus].filter(Boolean) as string[];
   return (
     <button className="list-row" onClick={onClick}>
-      <span className={`row-glyph thread${active ? " live" : ""}${thread.archived ? " muted" : ""}`}>
+      <span className={`row-glyph thread${thread.archived ? " muted" : ""}`}>
         <IconChat size={16} />
       </span>
       <div className="grow">
         <div className="title" style={thread.archived ? { color: "var(--ink-3)" } : undefined}>
           {thread.title || "未命名会话"}
         </div>
-        <div className="sub">
-          {context ? <span className="ellipsis">{context}</span> : null}
-          <span>{statusLabel(thread.status)}</span>
-          {thread.archived ? <span>· 已归档</span> : null}
-        </div>
+        {details.length ? (
+          <div className="sub">
+            {details.map((detail) => <span className="ellipsis" key={detail}>{detail}</span>)}
+          </div>
+        ) : null}
       </div>
       <div className="trailing">
         {active ? <span className="live-dot" aria-label="进行中" /> : null}

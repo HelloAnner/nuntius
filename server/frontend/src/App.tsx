@@ -5,7 +5,7 @@ import { Spinner, ToastHost, useTheme } from "@nuntius/shared";
 import { api, setCsrfProvider, ApiError } from "./api";
 import { startEvents } from "./events";
 import { useRoute, useSession, useThemeStore } from "./stores";
-import { InsecureBanner, NavRail, TabBar } from "./components";
+import { NavRail, TabBar } from "./components";
 import { AuthPage } from "./pages/Auth";
 import { DevicesPage } from "./pages/Devices";
 import { DevicePage } from "./pages/Device";
@@ -68,7 +68,6 @@ function Boot() {
     <div className="app-shell">
       <NavRail />
       <div className="app-main">
-        {info.data?.transportSecurity === "insecure" ? <InsecureBanner /> : null}
         <RouterView />
         <TabBar />
       </div>
