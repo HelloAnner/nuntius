@@ -1,5 +1,5 @@
 /* Thread page (local console): conversation with the on-device Codex. */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   IconArchive,
@@ -71,6 +71,29 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
   const thread =
     projectThreads.data?.find((t) => t.id === threadId) ??
     allThreads.data?.find((t) => t.id === threadId);
+
+  useEffect(() => {
+    const missingProject = projects.isSuccess && !project;
+    const missingThread =
+      projectThreads.isSuccess &&
+      allThreads.isSuccess &&
+      !projectThreads.isFetching &&
+      !allThreads.isFetching &&
+      !thread;
+    if (projects.isError || missingProject || missingThread) {
+      navigate({ name: "overview" }, { replace: true });
+    }
+  }, [
+    allThreads.isFetching,
+    allThreads.isSuccess,
+    navigate,
+    project,
+    projectThreads.isFetching,
+    projectThreads.isSuccess,
+    projects.isError,
+    projects.isSuccess,
+    thread,
+  ]);
 
   const live = useThreadLive(threadId);
   const approvals = useApprovals((s) => s.items);

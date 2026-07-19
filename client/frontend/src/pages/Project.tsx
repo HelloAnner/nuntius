@@ -1,5 +1,5 @@
 /* Project page: threads of one local project + new-thread entry. */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Empty, IconChat, IconPlus, Sheet, Spinner, useToast } from "@nuntius/shared";
 import { api } from "../api";
@@ -24,6 +24,13 @@ export function ProjectPage({ projectId }: { projectId: string }) {
   });
 
   const project = projects.data?.find((p) => p.id === projectId);
+
+  useEffect(() => {
+    if (projects.isError || (projects.isSuccess && !project)) {
+      navigate({ name: "overview" }, { replace: true });
+    }
+  }, [navigate, project, projects.isError, projects.isSuccess]);
+
   const canCreate = info.data?.appServerRunning ?? false;
   const sorted = [...(threads.data ?? [])].sort(
     (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
@@ -35,11 +42,10 @@ export function ProjectPage({ projectId }: { projectId: string }) {
     setBusy(true);
     try {
       const result = await api.createThread(projectId, text || null);
-      toast("会话已创建");
       setCreating(false);
       setFirstMessage("");
-      await qc.invalidateQueries({ queryKey: ["projectThreads", projectId] });
-      await qc.invalidateQueries({ queryKey: ["threads"] });
+      void qc.invalidateQueries({ queryKey: ["projectThreads", projectId] });
+      void qc.invalidateQueries({ queryKey: ["threads"] });
       navigate({ name: "thread", projectId, threadId: result.threadId });
     } catch (e) {
       toast(e instanceof Error ? e.message : "创建失败", { error: true });

@@ -4,7 +4,10 @@ import { useRoute, type Route } from "./stores";
 
 export function useNavigate() {
   const navigate = useRoute((s) => s.navigate);
-  return useCallback((r: Route) => navigate(r), [navigate]);
+  return useCallback(
+    (r: Route, opts?: { replace?: boolean }) => navigate(r, opts),
+    [navigate],
+  );
 }
 
 export function useMedia(query: string): boolean {

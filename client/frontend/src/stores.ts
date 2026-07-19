@@ -56,16 +56,26 @@ export function routeToPath(r: Route): string {
 
 export function pathToRoute(path: string): Route {
   const seg = path.split("/").filter(Boolean);
-  if (seg[0] === "projects") return { name: "projects" };
-  if (seg[0] === "threads") return { name: "threads" };
-  if (seg[0] === "approvals") return { name: "approvals" };
-  if (seg[0] === "p" && seg[1]) {
-    if (seg[2] === "t" && seg[3]) {
-      return { name: "thread", projectId: seg[1], threadId: seg[3] };
-    }
+  if (seg.length === 0) return { name: "overview" };
+  if (seg.length === 1 && seg[0] === "projects") return { name: "projects" };
+  if (seg.length === 1 && seg[0] === "threads") return { name: "threads" };
+  if (seg.length === 1 && seg[0] === "approvals") return { name: "approvals" };
+  if (seg.length === 2 && seg[0] === "p") {
     return { name: "project", projectId: seg[1] };
   }
+  if (seg.length === 4 && seg[0] === "p" && seg[2] === "t") {
+    return { name: "thread", projectId: seg[1], threadId: seg[3] };
+  }
   return { name: "overview" };
+}
+
+function routeFromLocation(): Route {
+  const route = pathToRoute(window.location.pathname);
+  const canonicalPath = routeToPath(route);
+  if (window.location.pathname !== canonicalPath) {
+    window.history.replaceState(route, "", canonicalPath);
+  }
+  return route;
 }
 
 interface RouteState {
@@ -74,7 +84,7 @@ interface RouteState {
   back: (fallback: Route) => void;
 }
 export const useRoute = create<RouteState>((set) => ({
-  route: pathToRoute(window.location.pathname),
+  route: routeFromLocation(),
   navigate: (route, opts) => {
     const path = routeToPath(route);
     if (opts?.replace) window.history.replaceState(route, "", path);
@@ -90,7 +100,7 @@ export const useRoute = create<RouteState>((set) => ({
   },
 }));
 window.addEventListener("popstate", () => {
-  useRoute.setState({ route: pathToRoute(window.location.pathname) });
+  useRoute.setState({ route: routeFromLocation() });
 });
 
 /* ---------- approvals ---------- */

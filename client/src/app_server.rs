@@ -27,6 +27,7 @@ struct AppSession {
     writer: mpsc::Sender<Value>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
     next_id: Arc<AtomicU64>,
+    reader_alive: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -57,10 +58,16 @@ impl AppServerRuntime {
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
         let mut guard = self.session.lock().await;
         let must_start = match guard.as_mut() {
-            Some(session) => session.child.try_wait()?.is_some(),
+            Some(session) => {
+                session.child.try_wait()?.is_some()
+                    || !session.reader_alive.load(Ordering::Relaxed)
+            }
             None => true,
         };
         if must_start {
+            if let Some(mut old) = guard.take() {
+                let _ = old.child.kill().await;
+            }
             *guard = Some(AppSession::spawn(&self.config, self.notifications.clone()).await?);
         }
         let handle = guard.as_mut().expect("session initialized").handle();
@@ -133,37 +140,46 @@ impl AppSession {
         });
         let pending = Arc::new(Mutex::new(HashMap::<String, oneshot::Sender<Value>>::new()));
         let reader_pending = pending.clone();
+        let reader_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let reader_alive_exit = reader_alive.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             loop {
                 match lines.next_line().await {
-                    Ok(Some(line)) if line.len() > 2 * 1024 * 1024 => {
-                        tracing::error!(
-                            bytes = line.len(),
-                            "App Server JSONL message exceeds limit"
-                        );
-                        break;
-                    }
-                    Ok(Some(line)) => match serde_json::from_str::<Value>(&line) {
-                        Ok(value) => {
-                            let response_id = value
-                                .get("id")
-                                .filter(|_| {
-                                    value.get("result").is_some() || value.get("error").is_some()
-                                })
-                                .map(id_key);
-                            if let Some(id) = response_id {
-                                if let Some(sender) = reader_pending.lock().await.remove(&id) {
-                                    let _ = sender.send(value);
+                    Ok(Some(line)) => {
+                        // Oversized frames are dropped, never fatal: the reader must keep
+                        // consuming stdout or every subsequent request silently wedges.
+                        if line.len() > 16 * 1024 * 1024 {
+                            tracing::error!(
+                                bytes = line.len(),
+                                "App Server JSONL message exceeds limit; dropping frame"
+                            );
+                            continue;
+                        }
+                        if line.len() > 2 * 1024 * 1024 {
+                            tracing::warn!(bytes = line.len(), "large App Server JSONL message");
+                        }
+                        match serde_json::from_str::<Value>(&line) {
+                            Ok(value) => {
+                                let response_id = value
+                                    .get("id")
+                                    .filter(|_| {
+                                        value.get("result").is_some() || value.get("error").is_some()
+                                    })
+                                    .map(id_key);
+                                if let Some(id) = response_id {
+                                    if let Some(sender) = reader_pending.lock().await.remove(&id) {
+                                        let _ = sender.send(value);
+                                    }
+                                } else {
+                                    let _ = notifications.send(value);
                                 }
-                            } else {
-                                let _ = notifications.send(value);
+                            }
+                            Err(error) => {
+                                tracing::warn!(error=?error,bytes=line.len(),"invalid App Server JSONL")
                             }
                         }
-                        Err(error) => {
-                            tracing::warn!(error=?error,bytes=line.len(),"invalid App Server JSONL")
-                        }
-                    },
+                    }
                     Ok(None) => break,
                     Err(error) => {
                         tracing::warn!(error=?error,"App Server stdout failed");
@@ -171,6 +187,7 @@ impl AppSession {
                     }
                 }
             }
+            reader_alive_exit.store(false, Ordering::Relaxed);
             let mut pending = reader_pending.lock().await;
             for (_, sender) in pending.drain() {
                 let _ = sender.send(json!({"error":{"code":-32000,"message":"App Server exited before responding"}}));
@@ -181,6 +198,7 @@ impl AppSession {
             writer: writer_tx,
             pending,
             next_id: Arc::new(AtomicU64::new(1)),
+            reader_alive,
         };
         let initialized = session
             .handle()

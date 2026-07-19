@@ -1,5 +1,5 @@
 /* Thread page: the focused conversation surface. */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   IconArchive,
@@ -89,6 +89,33 @@ export function ThreadPage({
   const thread =
     projectThreads.data?.find((t) => t.id === threadId) ??
     allThreads.data?.find((t) => t.id === threadId);
+
+  useEffect(() => {
+    const missingDevice = devices.isSuccess && !device;
+    const missingProject = projects.isSuccess && !project;
+    const missingThread =
+      projectThreads.isSuccess &&
+      allThreads.isSuccess &&
+      !projectThreads.isFetching &&
+      !allThreads.isFetching &&
+      !thread;
+    if (devices.isError || projects.isError || missingDevice || missingProject || missingThread) {
+      navigate({ name: "devices" }, { replace: true });
+    }
+  }, [
+    allThreads.isFetching,
+    allThreads.isSuccess,
+    device,
+    devices.isError,
+    devices.isSuccess,
+    navigate,
+    project,
+    projectThreads.isFetching,
+    projectThreads.isSuccess,
+    projects.isError,
+    projects.isSuccess,
+    thread,
+  ]);
 
   const live = useThreadLive(threadId);
   const approvals = useApprovals((s) => s.items);

@@ -513,14 +513,26 @@
 }
 
 /* ============ conversation ============ */
+.thread-view {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
 .thread-scroll {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+  touch-action: pan-y;
+  scrollbar-gutter: stable;
 }
 .thread-col {
   max-width: 760px;
+  min-height: 100%;
   margin: 0 auto;
   padding: 20px 16px 24px;
   display: flex;
@@ -867,6 +879,8 @@
 /* composer */
 .composer {
   flex: none;
+  position: relative;
+  z-index: 10;
   padding: 8px 12px calc(10px + var(--sab));
   background: linear-gradient(
     180deg,

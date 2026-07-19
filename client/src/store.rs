@@ -38,7 +38,7 @@ impl ClientStore {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Full)
             .foreign_keys(true)
-            .busy_timeout(std::time::Duration::from_secs(5))
+            .busy_timeout(std::time::Duration::from_secs(15))
             .disable_statement_logging();
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
@@ -282,7 +282,7 @@ impl ClientStore {
         app_turn_id: Option<&str>,
         text: &str,
     ) -> Result<String> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let ordinal: i64 =
             sqlx::query_scalar("SELECT COALESCE(MAX(ordinal),0)+1 FROM turns WHERE thread_id=?")
                 .bind(thread_id)
@@ -312,7 +312,7 @@ impl ClientStore {
         text: &str,
         detail: &Value,
     ) -> Result<String> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let existing = if let Some(app_turn) = app_turn_id {
             sqlx::query_scalar::<_, String>(
                 "SELECT id FROM turns WHERE thread_id=? AND app_server_turn_id=?",
@@ -379,7 +379,7 @@ impl ClientStore {
         status: &str,
     ) -> Result<()> {
         let stamp = now();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(app_turn_id) = app_turn_id {
             sqlx::query("UPDATE turns SET status=?,completed_at=? WHERE thread_id=? AND app_server_turn_id=?")
                 .bind(status).bind(&stamp).bind(thread_id).bind(app_turn_id).execute(&mut *tx).await?;
@@ -431,7 +431,6 @@ impl ClientStore {
         Ok(())
     }
     pub async fn import_app_history(&self, thread_id: &str, thread: &Value) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
         for (turn_index, turn) in thread
             .get("turns")
             .and_then(Value::as_array)
@@ -439,6 +438,9 @@ impl ClientStore {
             .flatten()
             .enumerate()
         {
+            // Commit per turn: a whole-thread transaction can hold the WAL write lock
+            // for seconds on large histories and starve interactive writes.
+            let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
             let app_turn = turn
                 .get("id")
                 .and_then(Value::as_str)
@@ -512,13 +514,13 @@ impl ClientStore {
                 sqlx::query("INSERT INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,revision,content_text,structured_detail,occurred_at,completed_at) VALUES(?,?,NULLIF(?,''),COALESCE((SELECT MAX(ordinal)+1 FROM items WHERE turn_id=?),1),?,'completed',1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET app_server_item_id=COALESCE(excluded.app_server_item_id,items.app_server_item_id),kind=excluded.kind,content_text=excluded.content_text,structured_detail=excluded.structured_detail,completed_at=excluded.completed_at,revision=items.revision+1")
                     .bind(&item_id).bind(&turn_id).bind(app_item).bind(&turn_id).bind(kind).bind(text).bind(serde_json::to_string(item)?).bind(&stamp).bind(&stamp).execute(&mut *tx).await?;
             }
+            tx.commit().await?;
         }
         sqlx::query("UPDATE threads SET updated_at=? WHERE id=?")
             .bind(now())
             .bind(thread_id)
-            .execute(&mut *tx)
+            .execute(&self.pool)
             .await?;
-        tx.commit().await?;
         Ok(())
     }
     pub async fn history_records(
@@ -653,7 +655,7 @@ impl ClientStore {
         if !matches!(status, "completed" | "failed" | "unknown" | "expired") {
             anyhow::bail!("invalid terminal command status")
         }
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("UPDATE command_inbox SET status=?,completed_at=?,result=?,error_code=? WHERE command_id=?").bind(status).bind(now()).bind(result.map(serde_json::to_string).transpose()?).bind(error).bind(id).execute(&mut *tx).await?;
         sqlx::query("INSERT INTO runtime_state(key,value,updated_at) VALUES('last_server_sequence',?,?) ON CONFLICT(key) DO UPDATE SET value=CASE WHEN CAST(value AS INTEGER) < ? THEN excluded.value ELSE value END,updated_at=excluded.updated_at").bind(sequence.to_string()).bind(now()).bind(sequence).execute(&mut *tx).await?;
         tx.commit().await?;
@@ -681,7 +683,7 @@ impl ClientStore {
         Ok(())
     }
     pub async fn next_stream_sequence(&self, stream: &str) -> Result<i64> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("INSERT OR IGNORE INTO stream_sequences(stream_id,next_sequence) VALUES(?,1)")
             .bind(stream)
             .execute(&mut *tx)
@@ -756,7 +758,7 @@ impl ClientStore {
         Ok(())
     }
     pub async fn claim_app_request(&self, approval_id: &str) -> Result<Option<(Value, String)>> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let claimed = sqlx::query("UPDATE pending_app_requests SET status='responding' WHERE approval_id=? AND status='pending'")
             .bind(approval_id).execute(&mut *tx).await?.rows_affected();
         if claimed != 1 {

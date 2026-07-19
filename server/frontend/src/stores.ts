@@ -71,19 +71,29 @@ export function routeToPath(r: Route): string {
 
 export function pathToRoute(path: string): Route {
   const seg = path.split("/").filter(Boolean);
-  if (seg[0] === "recents") return { name: "recents" };
-  if (seg[0] === "approvals") return { name: "approvals" };
-  if (seg[0] === "settings") return { name: "settings" };
-  if (seg[0] === "d" && seg[1]) {
-    if (seg[2] === "p" && seg[3]) {
-      if (seg[4] === "t" && seg[5]) {
-        return { name: "thread", deviceId: seg[1], projectId: seg[3], threadId: seg[5] };
-      }
-      return { name: "project", deviceId: seg[1], projectId: seg[3] };
-    }
+  if (seg.length === 0) return { name: "devices" };
+  if (seg.length === 1 && seg[0] === "recents") return { name: "recents" };
+  if (seg.length === 1 && seg[0] === "approvals") return { name: "approvals" };
+  if (seg.length === 1 && seg[0] === "settings") return { name: "settings" };
+  if (seg.length === 2 && seg[0] === "d") {
     return { name: "device", deviceId: seg[1] };
   }
+  if (seg.length === 4 && seg[0] === "d" && seg[2] === "p") {
+    return { name: "project", deviceId: seg[1], projectId: seg[3] };
+  }
+  if (seg.length === 6 && seg[0] === "d" && seg[2] === "p" && seg[4] === "t") {
+    return { name: "thread", deviceId: seg[1], projectId: seg[3], threadId: seg[5] };
+  }
   return { name: "devices" };
+}
+
+function routeFromLocation(): Route {
+  const route = pathToRoute(window.location.pathname);
+  const canonicalPath = routeToPath(route);
+  if (window.location.pathname !== canonicalPath) {
+    window.history.replaceState(route, "", canonicalPath);
+  }
+  return route;
 }
 
 interface RouteState {
@@ -92,7 +102,7 @@ interface RouteState {
   back: (fallback: Route) => void;
 }
 export const useRoute = create<RouteState>((set) => ({
-  route: pathToRoute(window.location.pathname),
+  route: routeFromLocation(),
   navigate: (route, opts) => {
     const path = routeToPath(route);
     if (opts?.replace) window.history.replaceState(route, "", path);
@@ -108,7 +118,7 @@ export const useRoute = create<RouteState>((set) => ({
   },
 }));
 window.addEventListener("popstate", () => {
-  useRoute.setState({ route: pathToRoute(window.location.pathname) });
+  useRoute.setState({ route: routeFromLocation() });
 });
 
 /* ---------- approvals ---------- */

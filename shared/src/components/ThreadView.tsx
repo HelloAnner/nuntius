@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -103,6 +104,8 @@ export function ThreadView({
   onInterrupt: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const stickRef = useRef(true);
   const [stick, setStick] = useState(true);
 
   const historyTurnIds = useMemo(
@@ -151,25 +154,48 @@ export function ThreadView({
     el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   }, []);
 
-  const onScroll = () => {
+  const setFollowing = useCallback((following: boolean) => {
+    stickRef.current = following;
+    setStick((current) => (current === following ? current : following));
+  }, []);
+
+  const followLatest = useCallback((smooth = false) => {
+    setFollowing(true);
+    scrollToBottom(smooth);
+  }, [scrollToBottom, setFollowing]);
+
+  const onScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    setStick(el.scrollHeight - el.scrollTop - el.clientHeight < 140);
-  };
+    setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight < 140);
+  }, [setFollowing]);
 
-  const contentKey = `${history.length}:${live.turns.length}:${live.turns
-    .map((t) => t.items.reduce((n, i) => n + i.text.length, 0))
-    .join(",")}:${approvals.length}`;
-
+  // Streaming Markdown, tool cards, syntax highlighting and approvals can all
+  // change height without changing the number of rendered items. Observing the
+  // actual content box keeps the latest response visible in every case.
   useEffect(() => {
-    if (stick) scrollToBottom(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contentKey]);
+    const content = contentRef.current;
+    if (!content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (stickRef.current) scrollToBottom(false);
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [draftKey, scrollToBottom]);
 
-  useEffect(() => {
-    scrollToBottom(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draftKey]);
+  useLayoutEffect(() => {
+    followLatest(false);
+  }, [draftKey, followLatest]);
+
+  const sendAndFollow = useCallback((text: string) => {
+    followLatest(false);
+    onSend(text);
+  }, [followLatest, onSend]);
+
+  const steerAndFollow = useCallback((text: string) => {
+    followLatest(false);
+    onSteer(text);
+  }, [followLatest, onSteer]);
 
   const renderLiveTurn = (turn: LiveTurn) => {
     const stateErr = turn.sendState && SEND_ERROR.includes(turn.sendState);
@@ -209,9 +235,9 @@ export function ThreadView({
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, position: "relative" }}>
+    <div className="thread-view">
       <div className="thread-scroll" ref={scrollRef} onScroll={onScroll}>
-        <div className="thread-col">
+        <div className="thread-col" ref={contentRef}>
           {headerOverlay}
           {hasMoreHistory || loadingMore ? (
             <div style={{ display: "flex", justifyContent: "center", padding: "6px 0 14px" }}>
@@ -288,7 +314,7 @@ export function ThreadView({
       </div>
 
       {!stick ? (
-        <button className="to-bottom" onClick={() => scrollToBottom(true)}>
+        <button className="to-bottom" onClick={() => followLatest(true)}>
           <IconArrowDown size={14} />
           回到底部
         </button>
@@ -300,8 +326,8 @@ export function ThreadView({
         lockedReason={lockedReason}
         running={running}
         busy={busy}
-        onSend={onSend}
-        onSteer={onSteer}
+        onSend={sendAndFollow}
+        onSteer={steerAndFollow}
         onInterrupt={onInterrupt}
       />
     </div>

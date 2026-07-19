@@ -1,5 +1,5 @@
 /* Project page: its threads, newest first, plus new-thread composer entry. */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Empty,
@@ -15,6 +15,39 @@ import { useNavigate } from "../hooks";
 import { useRoute } from "../stores";
 import { trackCommand } from "../events";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
+
+const TERMINAL_COMMANDS = new Set(["completed", "failed", "rejected", "unknown", "expired"]);
+
+function threadIdFromResult(result: unknown): string | null {
+  if (!result || typeof result !== "object" || !("threadId" in result)) return null;
+  const threadId = (result as { threadId?: unknown }).threadId;
+  return typeof threadId === "string" && threadId.length > 0 ? threadId : null;
+}
+
+async function waitForCreatedThread(commandId: string): Promise<string> {
+  const deadline = Date.now() + 90_000;
+  let delay = 180;
+  while (Date.now() < deadline) {
+    try {
+      const command = await api.command(commandId);
+      if (command.status === "completed") {
+        const threadId = threadIdFromResult(command.result);
+        if (threadId) return threadId;
+        throw new Error("会话已创建，但没有返回会话编号");
+      }
+      if (TERMINAL_COMMANDS.has(command.status)) {
+        throw new Error("创建失败，请重试");
+      }
+    } catch (error) {
+      if (!(error instanceof ApiError && (error.retryable || error.code === "not_found"))) {
+        throw error;
+      }
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, delay));
+    delay = Math.min(1_000, Math.round(delay * 1.5));
+  }
+  throw new Error("创建超时，请重试");
+}
 
 export function ProjectPage({ deviceId, projectId }: { deviceId: string; projectId: string }) {
   const navigate = useNavigate();
@@ -37,6 +70,15 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
 
   const device = devices.data?.find((d) => d.id === deviceId);
   const project = projects.data?.find((p) => p.id === projectId);
+
+  useEffect(() => {
+    const missingDevice = devices.isSuccess && !device;
+    const missingProject = projects.isSuccess && !project;
+    if (devices.isError || projects.isError || missingDevice || missingProject) {
+      navigate({ name: "devices" }, { replace: true });
+    }
+  }, [device, devices.isError, devices.isSuccess, navigate, project, projects.isError, projects.isSuccess]);
+
   const unassigned = project?.kind === "system_unassigned";
   const canCreate = device?.status === "online" && !unassigned;
   const sorted = [...(threads.data ?? [])].sort(
@@ -51,13 +93,19 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
     try {
       const receipt = await api.createThread(deviceId, projectId, null, text || null, idemKey);
       trackCommand(qc, receipt.commandId, undefined, "thread.create");
-      toast("新会话创建中");
+      const threadId = await waitForCreatedThread(receipt.commandId);
       setCreating(false);
       setFirstMessage("");
-      await qc.invalidateQueries({ queryKey: ["projectThreads", deviceId, projectId] });
+      void qc.invalidateQueries({ queryKey: ["projectThreads", deviceId, projectId] });
+      void qc.invalidateQueries({ queryKey: ["allThreads"] });
+      navigate({ name: "thread", deviceId, projectId, threadId });
     } catch (e) {
       toast(
-        e instanceof ApiError && e.code === "device_offline" ? "设备离线，无法创建会话" : "创建失败，请重试",
+        e instanceof ApiError && e.code === "device_offline"
+          ? "设备离线，无法创建会话"
+          : e instanceof Error
+            ? e.message
+            : "创建失败，请重试",
         { error: true },
       );
     } finally {

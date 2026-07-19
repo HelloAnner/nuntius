@@ -1,5 +1,5 @@
 /* Device detail: status hero + project list + remote directory picker. */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Avatar,
@@ -32,6 +32,13 @@ export function DevicePage({ deviceId }: { deviceId: string }) {
     queryFn: () => api.projects(deviceId),
   });
   const device = devices.data?.find((d) => d.id === deviceId);
+
+  useEffect(() => {
+    if (devices.isError || (devices.isSuccess && !device)) {
+      navigate({ name: "devices" }, { replace: true });
+    }
+  }, [device, devices.isError, devices.isSuccess, navigate]);
+
   const online = device?.status === "online";
 
   return (
