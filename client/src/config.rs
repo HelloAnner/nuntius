@@ -53,7 +53,7 @@ impl Default for ClientConfig {
             codex_args: vec!["app-server".into()],
             log_format: "pretty".into(),
             auto_update: true,
-            update_interval_seconds: 300,
+            update_interval_seconds: 60,
             server_update_relay: false,
             server_update_ssh_command: vec!["ssh".into()],
             server_update_ssh_timeout_seconds: 900,

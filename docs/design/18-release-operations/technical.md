@@ -45,6 +45,13 @@ Manifest 包含：
 9. self-check 成功后删除旧版本或保留一个窗口。
 10. 失败则回滚并记录诊断。
 
+滚动通道采用 latest-wins desired state，而不是逐 commit FIFO 部署：
+
+- CI 只允许 `main` 当前 HEAD 更新通道指针，过时构建直接跳过发布。
+- Server/Client 资产按 commit 和 CI 发布序号使用不可变文件名；manifest 最后发布。
+- `releaseSequence` 单调递增，已运行新版更新器的设备拒绝更小或相等序号的不同 commit。
+- Server 必须先达到目标 commit，Client 才能安装同一 commit；中继完成后主动触发 Client 检查，周期轮询作为兜底。
+
 下载文件不能直接执行；所有路径必须明确且不使用宽泛临时目录清理。
 
 ## 4. 系统服务

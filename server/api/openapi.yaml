@@ -18,6 +18,26 @@ paths:
       operationId: getServerInfo
       responses:
         '200': {description: 服务能力与传输安全档位, content: {application/json: {schema: {$ref: '#/components/schemas/ServerInfo'}}}}
+  /update-notices:
+    post:
+      security: []
+      operationId: notifyUpdateAvailable
+      description: 使用 Server 数据目录中 `secrets/update-notice-token` 的 Bearer token 唤醒已连接设备；设备仍会从固定可信 manifest 自行校验更新。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [commitSha, releaseSequence]
+              properties:
+                commitSha: {type: string, minLength: 40, maxLength: 40}
+                releaseSequence: {type: integer, format: int64, minimum: 1}
+      responses:
+        '200': {description: 通知已接受}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {description: 更新通知接收器未配置}
   /sync:
     get:
       operationId: getSyncSnapshot
@@ -282,11 +302,12 @@ components:
   schemas:
     ServerInfo:
       type: object
-      required: [apiVersion, serverVersion, buildSha, transportSecurity, initialized, capabilities]
+      required: [apiVersion, serverVersion, buildSha, releaseSequence, transportSecurity, initialized, capabilities]
       properties:
         apiVersion: {type: string}
         serverVersion: {type: string}
         buildSha: {type: string}
+        releaseSequence: {type: integer, format: int64, minimum: 0}
         transportSecurity: {enum: [secure, insecure, local]}
         initialized: {type: boolean}
         capabilities: {type: array, items: {type: string}}

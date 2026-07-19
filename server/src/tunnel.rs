@@ -93,6 +93,23 @@ impl TunnelRegistry {
             .map_err(|_| anyhow!("device connection closed"))
     }
 
+    pub async fn broadcast(&self, frame: TunnelFrame) -> usize {
+        let senders: Vec<_> = self
+            .connections
+            .read()
+            .await
+            .values()
+            .map(|connection| connection.sender.clone())
+            .collect();
+        let mut delivered = 0;
+        for sender in senders {
+            if sender.try_send(frame.clone()).is_ok() {
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
     pub async fn query(&self, device_id: &str, query: DeviceQuery) -> Result<Value, String> {
         let correlation_id = new_id("qry");
         let (tx, rx) = oneshot::channel();

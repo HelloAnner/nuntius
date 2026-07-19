@@ -47,6 +47,8 @@ enum Command {
     ReceiveUpdate {
         #[arg(long)]
         commit_sha: String,
+        #[arg(long, default_value_t = 0)]
+        release_sequence: u64,
         #[arg(long)]
         archive_sha256: String,
         #[arg(long)]
@@ -109,11 +111,19 @@ async fn main() -> Result<()> {
         }
         Command::ReceiveUpdate {
             commit_sha,
+            release_sequence,
             archive_sha256,
             source_device_id,
         } => {
             let data_dir = required_data_dir(cli.data_dir)?;
-            update_relay::receive(&data_dir, commit_sha, archive_sha256, source_device_id).await
+            update_relay::receive(
+                &data_dir,
+                commit_sha,
+                release_sequence,
+                archive_sha256,
+                source_device_id,
+            )
+            .await
         }
     }
 }

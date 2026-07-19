@@ -17,6 +17,8 @@ const ARCHIVE_FILE: &str = "relayed-server-update.tar.gz";
 #[serde(rename_all = "camelCase")]
 struct RelayMetadata {
     commit_sha: String,
+    #[serde(default)]
+    release_sequence: u64,
     archive_sha256: String,
     source_device_id: String,
 }
@@ -24,6 +26,7 @@ struct RelayMetadata {
 pub async fn receive(
     data_dir: &Path,
     commit_sha: String,
+    release_sequence: u64,
     archive_sha256: String,
     source_device_id: String,
 ) -> Result<()> {
@@ -59,6 +62,7 @@ pub async fn receive(
 
     let metadata = serde_json::to_vec(&RelayMetadata {
         commit_sha: commit_sha.clone(),
+        release_sequence,
         archive_sha256,
         source_device_id: source_device_id.clone(),
     })?;
@@ -145,6 +149,7 @@ async fn prepare_from_inbox(
     let update = nuntius_updater::prepare_relayed_update(
         &config,
         &metadata.commit_sha,
+        metadata.release_sequence,
         &metadata.archive_sha256,
         &archive,
     )

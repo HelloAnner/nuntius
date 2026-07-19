@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::{
     process::Command,
-    sync::{Mutex, OwnedMutexGuard, mpsc},
+    sync::{Mutex, Notify, OwnedMutexGuard, mpsc},
 };
 
 pub const DEFAULT_MANIFEST_URL: &str =
@@ -24,6 +24,16 @@ static STAGE_UPDATE_LOCK: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(M
 
 pub fn build_sha() -> &'static str {
     option_env!("NUNTIUS_BUILD_SHA").unwrap_or("development")
+}
+
+pub fn build_sequence() -> u64 {
+    option_env!("NUNTIUS_BUILD_SEQUENCE")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+fn release_is_stale(installed_sequence: u64, available_sequence: u64) -> bool {
+    installed_sequence > 0 && available_sequence <= installed_sequence
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +80,8 @@ pub struct BuildInfo {
     pub name: String,
     pub version: String,
     pub build_sha: String,
+    #[serde(default)]
+    pub release_sequence: u64,
     pub target: String,
 }
 
@@ -79,6 +91,7 @@ impl BuildInfo {
             name: name.into(),
             version: version.into(),
             build_sha: build_sha().into(),
+            release_sequence: build_sequence(),
             target: build_target(),
         }
     }
@@ -95,6 +108,8 @@ pub fn build_target() -> String {
 struct UpdateManifest {
     schema_version: u32,
     commit_sha: String,
+    #[serde(default)]
+    release_sequence: u64,
     server: ManifestAsset,
     client: ManifestAsset,
 }
@@ -111,13 +126,33 @@ struct ManifestAsset {
 #[serde(rename_all = "camelCase")]
 struct ServerBuildInfo {
     build_sha: String,
+    #[serde(default)]
+    release_sequence: u64,
 }
 
 #[derive(Debug)]
 pub struct RelayPackage {
     pub commit_sha: String,
+    pub release_sequence: u64,
     pub archive_sha256: String,
     pub archive: Vec<u8>,
+}
+
+#[derive(Clone, Default)]
+pub struct UpdateTrigger(Arc<Notify>);
+
+impl UpdateTrigger {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn notify(&self) {
+        self.0.notify_waiters();
+    }
+
+    pub async fn wait(&self) {
+        self.0.notified().await;
+    }
 }
 
 #[derive(Debug)]
@@ -152,6 +187,14 @@ pub fn spawn_update_loop(
     config: UpdateConfig,
     ready: mpsc::Sender<PreparedUpdate>,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_update_loop_triggered(config, ready, None)
+}
+
+pub fn spawn_update_loop_triggered(
+    config: UpdateConfig,
+    ready: mpsc::Sender<PreparedUpdate>,
+    trigger: Option<UpdateTrigger>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let client = match http_client() {
             Ok(client) => client,
@@ -164,7 +207,14 @@ pub fn spawn_update_loop(
         let mut interval = tokio::time::interval(config.interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            if let Some(trigger) = &trigger {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = trigger.wait() => {}
+                }
+            } else {
+                interval.tick().await;
+            }
             match prepare_update(&client, &config).await {
                 Ok(Some(update)) => {
                     tracing::info!(from=%update.from_sha, to=%update.to_sha, "self-update prepared");
@@ -200,6 +250,15 @@ pub async fn fetch_server_relay_package(
     if server.build_sha == manifest.commit_sha {
         return Ok(None);
     }
+    if release_is_stale(server.release_sequence, manifest.release_sequence) {
+        tracing::warn!(
+            installed_sequence = server.release_sequence,
+            available_sequence = manifest.release_sequence,
+            available = %manifest.commit_sha,
+            "ignoring stale server update manifest"
+        );
+        return Ok(None);
+    }
     if manifest.server.target != expected_target {
         bail!(
             "relay target mismatch: expected {}, got {}",
@@ -210,6 +269,7 @@ pub async fn fetch_server_relay_package(
     let archive = download_archive(&client, &manifest.server).await?;
     Ok(Some(RelayPackage {
         commit_sha: manifest.commit_sha,
+        release_sequence: manifest.release_sequence,
         archive_sha256: manifest.server.sha256,
         archive,
     }))
@@ -218,6 +278,7 @@ pub async fn fetch_server_relay_package(
 pub async fn prepare_relayed_update(
     config: &UpdateConfig,
     commit_sha: &str,
+    release_sequence: u64,
     archive_sha256: &str,
     archive: &[u8],
 ) -> Result<Option<PreparedUpdate>> {
@@ -229,8 +290,23 @@ pub async fn prepare_relayed_update(
     if commit_sha == build_sha() {
         return Ok(None);
     }
+    // A client from before releaseSequence support omits this relay argument.
+    // Accept sequence zero for one rolling-compatibility window; the staged
+    // binary identity and checksum are still verified. New relays always send
+    // a sequence and therefore receive the monotonic downgrade guard.
+    if release_sequence > 0 && release_is_stale(build_sequence(), release_sequence) {
+        tracing::warn!(
+            installed_sequence = build_sequence(),
+            available_sequence = release_sequence,
+            available = %commit_sha,
+            "ignoring stale relayed update"
+        );
+        return Ok(None);
+    }
     verify_archive(archive, archive_sha256)?;
-    Ok(Some(stage_update(config, commit_sha, archive).await?))
+    Ok(Some(
+        stage_update(config, commit_sha, release_sequence, archive).await?,
+    ))
 }
 
 fn http_client() -> Result<reqwest::Client> {
@@ -274,6 +350,16 @@ async fn prepare_update(
         return Ok(None);
     }
 
+    if release_is_stale(build_sequence(), manifest.release_sequence) {
+        tracing::warn!(
+            installed_sequence = build_sequence(),
+            available_sequence = manifest.release_sequence,
+            available = %manifest.commit_sha,
+            "ignoring stale update manifest"
+        );
+        return Ok(None);
+    }
+
     if let Some(server_info_url) = &config.required_server_info_url {
         let server = client
             .get(server_info_url)
@@ -305,7 +391,13 @@ async fn prepare_update(
 
     let archive = download_archive(client, asset).await?;
     Ok(Some(
-        stage_update(config, &manifest.commit_sha, &archive).await?,
+        stage_update(
+            config,
+            &manifest.commit_sha,
+            manifest.release_sequence,
+            &archive,
+        )
+        .await?,
     ))
 }
 
@@ -348,6 +440,7 @@ fn verify_archive(archive: &[u8], expected_digest: &str) -> Result<()> {
 async fn stage_update(
     config: &UpdateConfig,
     commit_sha: &str,
+    release_sequence: u64,
     archive: &[u8],
 ) -> Result<PreparedUpdate> {
     let stage_guard = STAGE_UPDATE_LOCK.clone().lock_owned().await;
@@ -362,6 +455,7 @@ async fn stage_update(
         &staged_path,
         &config.binary_name,
         commit_sha,
+        release_sequence,
         &config.expected_target,
     )
     .await
@@ -470,6 +564,7 @@ async fn probe_binary(
     path: &Path,
     expected_name: &str,
     expected_sha: &str,
+    expected_sequence: u64,
     expected_target: &str,
 ) -> Result<()> {
     let output = Command::new(path)
@@ -485,13 +580,15 @@ async fn probe_binary(
         .context("decode updated binary build information")?;
     if info.name != expected_name
         || info.build_sha != expected_sha
+        || (expected_sequence > 0 && info.release_sequence != expected_sequence)
         || info.target != expected_target
     {
         bail!(
-            "updated binary identity mismatch: name={}, sha={}, target={}",
+            "updated binary identity mismatch: name={}, sha={}, sequence={}, target={}",
             info.name,
             info.build_sha,
-            info.target
+            info.release_sequence,
+            info.target,
         );
     }
     Ok(())
@@ -692,6 +789,15 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
 
     #[test]
+    fn release_sequence_never_moves_backwards_after_migration() {
+        assert!(!release_is_stale(0, 0));
+        assert!(!release_is_stale(0, 10));
+        assert!(!release_is_stale(10, 11));
+        assert!(release_is_stale(10, 10));
+        assert!(release_is_stale(10, 9));
+    }
+
+    #[test]
     fn extracts_named_binary_from_tar_gzip() {
         let encoder = GzEncoder::new(Vec::new(), Compression::default());
         let mut builder = tar::Builder::new(encoder);
@@ -714,6 +820,7 @@ mod tests {
         let manifest = UpdateManifest {
             schema_version: 1,
             commit_sha: "a".repeat(40),
+            release_sequence: 1,
             server: ManifestAsset {
                 url: "https://example.com/server.tar.gz".into(),
                 sha256: "b".repeat(64),
@@ -740,6 +847,10 @@ mod tests {
         let result = prepare_relayed_update(
             &config,
             &"a".repeat(40),
+            // Sequence zero is the legacy-relay compatibility path and deliberately bypasses
+            // monotonic ordering, allowing this test to reach the digest validation even when
+            // CI embeds a large NUNTIUS_BUILD_SEQUENCE in the test binary.
+            0,
             &"b".repeat(64),
             b"not the expected archive",
         )
