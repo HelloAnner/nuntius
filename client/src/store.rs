@@ -130,11 +130,13 @@ impl ClientStore {
         sqlx::query("UPDATE command_inbox SET status='accepted',started_at=NULL,completed_at=NULL,error_code=NULL,error_message=NULL WHERE status='applying' AND json_extract(payload,'$.command.kind')='thread_archive'")
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE status IN ('active','running','inProgress')")
+        // Keep active projections for threads that will be reattached below. Orphaned
+        // active records outside the recovery set cannot be reconciled and are closed.
+        sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE status IN ('active','running','inProgress') AND thread_id NOT IN (SELECT id FROM threads WHERE status='recovering')")
             .bind(&stamp)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE items SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE status IN ('active','running','inProgress')")
+        sqlx::query("UPDATE items SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE status IN ('active','running','inProgress') AND turn_id NOT IN (SELECT r.id FROM turns r JOIN threads t ON t.id=r.thread_id WHERE t.status='recovering')")
             .bind(&stamp)
             .execute(&mut *tx)
             .await?;
