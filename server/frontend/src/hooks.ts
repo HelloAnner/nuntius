@@ -35,8 +35,20 @@ export function useArchiveThreadAction() {
     async (threadId: string) => {
       if (busyIds.has(threadId)) return false;
       setBusyIds((old) => new Set(old).add(threadId));
+      const cachedThread = [
+        ...qc
+          .getQueriesData<ThreadSummary[]>({ queryKey: ["projectThreads"] })
+          .flatMap(([, threads]) => threads ?? []),
+        ...(qc.getQueryData<ThreadSummary[]>(["allThreads"]) ?? []),
+      ].find((thread) => thread.id === threadId);
       try {
         const receipt = await api.archiveThread(threadId, true);
+        if (cachedThread) {
+          qc.setQueryData<ThreadSummary>(["threadSnapshot", threadId], {
+            ...cachedThread,
+            archived: true,
+          });
+        }
         const update = (old: ThreadSummary[] | undefined) =>
           old?.filter((thread) => thread.id !== threadId);
         qc.setQueriesData<ThreadSummary[]>({ queryKey: ["projectThreads"] }, update);
@@ -51,6 +63,9 @@ export function useArchiveThreadAction() {
         toast("会话已归档");
         return true;
       } catch (error) {
+        if (cachedThread) {
+          qc.setQueryData<ThreadSummary>(["threadSnapshot", threadId], cachedThread);
+        }
         await Promise.all([
           qc.invalidateQueries({ queryKey: ["projectThreads"] }),
           qc.invalidateQueries({ queryKey: ["allThreads"] }),

@@ -8,6 +8,7 @@ import {
   IconPlus,
   Spinner,
   SwipeActionRow,
+  compareByRecentActivity,
   newIdemKey,
   statusLabel,
   useConfirmAction,
@@ -55,9 +56,7 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
   const unassigned = project?.kind === "system_unassigned";
   const canCreate = device?.status === "online" && !unassigned;
   const canDelete = device?.status === "online" && !unassigned;
-  const sorted = [...(threads.data ?? [])].sort(
-    (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
-  );
+  const sorted = [...(threads.data ?? [])].sort(compareByRecentActivity);
 
   const remove = () => {
     if (!project || !canDelete || deleting) return;

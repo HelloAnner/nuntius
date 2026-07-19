@@ -6,12 +6,14 @@ import {
   Spinner,
   SwipeActionRow,
   ThreadView,
+  compareByRecentActivity,
   newIdemKey,
   useConfirmAction,
   useToast,
   type ApprovalView,
   type HistoryGroup,
   type HistoryRecord,
+  type ThreadSummary,
 } from "@nuntius/shared";
 import { api } from "../api";
 import { useArchiveThreadAction, useMedia, useNavigate } from "../hooks";
@@ -66,11 +68,19 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     queryKey: ["history", threadId],
     queryFn: () => api.history(threadId),
   });
+  const threadSnapshot = useQuery<ThreadSummary | undefined>({
+    queryKey: ["threadSnapshot", threadId],
+    queryFn: async () => undefined,
+    enabled: false,
+  });
 
   const project = projects.data?.find((p) => p.id === projectId);
+  const historyThread = history.data?.find((record) => record.thread)?.thread ?? undefined;
   const thread =
     projectThreads.data?.find((t) => t.id === threadId) ??
-    allThreads.data?.find((t) => t.id === threadId);
+    allThreads.data?.find((t) => t.id === threadId) ??
+    threadSnapshot.data ??
+    historyThread;
 
   useEffect(() => {
     const missingProject = projects.isSuccess && !project;
@@ -169,9 +179,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
       body: "归档后会从所有会话页面隐藏，历史记录仍保留在本机和服务器数据库中。",
       confirmLabel: "归档",
       action: async () => {
-        if (await archiveThread(threadId)) {
-          navigate({ name: "project", projectId }, { replace: true });
-        }
+        await archiveThread(threadId);
       },
     });
 
@@ -208,14 +216,16 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
       onBack={() => back({ name: "project", projectId })}
       trailing={
         <>
-          <button
-            className="icon-btn"
-            onClick={setArchived}
-            aria-label="归档会话"
-            title="归档会话"
-          >
-            <IconArchive size={18} />
-          </button>
+          {!archived ? (
+            <button
+              className="icon-btn"
+              onClick={setArchived}
+              aria-label="归档会话"
+              title="归档会话"
+            >
+              <IconArchive size={18} />
+            </button>
+          ) : null}
           <ConnIndicator />
         </>
       }
@@ -232,9 +242,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     );
   }
 
-  const sortedThreads = [...(projectThreads.data ?? [])].sort(
-    (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
-  );
+  const sortedThreads = [...(projectThreads.data ?? [])].sort(compareByRecentActivity);
 
   return (
     <div className="page">

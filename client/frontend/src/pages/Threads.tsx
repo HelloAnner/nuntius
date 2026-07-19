@@ -7,6 +7,7 @@ import {
   IconClock,
   Spinner,
   SwipeActionRow,
+  compareByRecentActivity,
 } from "@nuntius/shared";
 import { api } from "../api";
 import { useArchiveThreadAction } from "../hooks";
@@ -19,10 +20,7 @@ export function ThreadsPage() {
 
   const projectName = (id: string) => projects.data?.find((p) => p.id === id)?.displayName ?? "";
   const list = useMemo(
-    () =>
-      [...(threads.data ?? [])].sort(
-        (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
-      ),
+    () => [...(threads.data ?? [])].sort(compareByRecentActivity),
     [threads.data],
   );
 

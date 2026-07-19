@@ -39,6 +39,21 @@ export function fullTime(iso: string | null | undefined): string {
   return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}`;
 }
 
+type RecentActivityItem = {
+  id: string;
+  lastActivityAt: string | null | undefined;
+};
+
+/** Newest meaningful activity first; missing or invalid timestamps stay last. */
+export function compareByRecentActivity(a: RecentActivityItem, b: RecentActivityItem): number {
+  const time = (value: string | null | undefined) => {
+    const parsed = value ? Date.parse(value) : Number.NaN;
+    return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+  };
+  const difference = time(b.lastActivityAt) - time(a.lastActivityAt);
+  return difference || a.id.localeCompare(b.id);
+}
+
 const STATUS_LABELS: Record<string, string> = {
   online: "在线",
   offline: "离线",

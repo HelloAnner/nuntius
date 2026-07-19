@@ -8,6 +8,7 @@ import {
   Segmented,
   Spinner,
   SwipeActionRow,
+  compareByRecentActivity,
 } from "@nuntius/shared";
 import { api } from "../api";
 import { useArchiveThreadAction, useNavigate } from "../hooks";
@@ -31,9 +32,7 @@ export function RecentsPage() {
   );
 
   const list = useMemo(() => {
-    const sorted = [...(threads.data ?? [])].sort(
-      (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
-    );
+    const sorted = [...(threads.data ?? [])].sort(compareByRecentActivity);
     return filter === "all" ? sorted : sorted.filter((t) => t.deviceId === filter);
   }, [threads.data, filter]);
 

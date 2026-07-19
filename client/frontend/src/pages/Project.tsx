@@ -9,6 +9,7 @@ import {
   Sheet,
   Spinner,
   SwipeActionRow,
+  compareByRecentActivity,
   useConfirmAction,
   useToast,
 } from "@nuntius/shared";
@@ -46,9 +47,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
 
   const unassigned = project?.kind === "system_unassigned";
   const canCreate = Boolean(info.data?.appServerRunning && !unassigned);
-  const sorted = [...(threads.data ?? [])].sort(
-    (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
-  );
+  const sorted = [...(threads.data ?? [])].sort(compareByRecentActivity);
 
   const create = async () => {
     const text = firstMessage.trim();

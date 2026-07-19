@@ -10,6 +10,7 @@ import {
   Spinner,
   SwipeActionRow,
   ThreadView,
+  compareByRecentActivity,
   newIdemKey,
   statusLabel,
   turnOptionsForAccess,
@@ -18,6 +19,7 @@ import {
   type ApprovalView,
   type HistoryGroup,
   type HistoryItemView,
+  type ThreadSummary,
 } from "@nuntius/shared";
 import { api, ApiError } from "../api";
 import { trackCommand } from "../events";
@@ -72,18 +74,31 @@ export function ThreadPage({
   const projectThreads = useQuery({
     queryKey: ["projectThreads", deviceId, projectId],
     queryFn: () => api.projectThreads(deviceId, projectId),
-    refetchInterval: (query) =>
-      (query.state.data as { id: string }[] | undefined)?.some((item) => item.id === threadId)
+    refetchInterval: (query) => {
+      if (qc.getQueryData<ThreadSummary>(["threadSnapshot", threadId])?.archived) return false;
+      return (query.state.data as { id: string }[] | undefined)?.some(
+        (item) => item.id === threadId,
+      )
         ? false
-        : 700,
+        : 700;
+    },
   });
   const allThreads = useQuery({
     queryKey: ["allThreads"],
     queryFn: () => api.allThreads(),
-    refetchInterval: (query) =>
-      (query.state.data as { id: string }[] | undefined)?.some((item) => item.id === threadId)
+    refetchInterval: (query) => {
+      if (qc.getQueryData<ThreadSummary>(["threadSnapshot", threadId])?.archived) return false;
+      return (query.state.data as { id: string }[] | undefined)?.some(
+        (item) => item.id === threadId,
+      )
         ? false
-        : 700,
+        : 700;
+    },
+  });
+  const threadSnapshot = useQuery<ThreadSummary | undefined>({
+    queryKey: ["threadSnapshot", threadId],
+    queryFn: async () => undefined,
+    enabled: false,
   });
 
   const history = useQuery({
@@ -112,7 +127,8 @@ export function ThreadPage({
   const project = projects.data?.find((p) => p.id === projectId);
   const thread =
     projectThreads.data?.find((t) => t.id === threadId) ??
-    allThreads.data?.find((t) => t.id === threadId);
+    allThreads.data?.find((t) => t.id === threadId) ??
+    threadSnapshot.data;
 
   useEffect(() => {
     setTurnCount(12);
@@ -257,14 +273,7 @@ export function ThreadPage({
       body: "归档后会从所有会话页面隐藏，历史记录仍保留在服务器数据库中。",
       confirmLabel: "归档",
       action: async () => {
-        if (await archiveThread(threadId)) {
-          navigate(
-            fromRecents
-              ? { name: "recents" }
-              : { name: "project", deviceId, projectId },
-            { replace: true },
-          );
-        }
+        await archiveThread(threadId);
       },
     });
 
@@ -309,7 +318,7 @@ export function ThreadPage({
       onTitleClick={() => setSwitcherOpen(true)}
       trailing={
         <>
-          {!unassigned ? (
+          {!unassigned && !archived ? (
             <button
               className="icon-btn"
               onClick={setArchived}
@@ -344,9 +353,9 @@ export function ThreadPage({
     { value: "all", label: "全部" },
     ...(devices.data ?? []).map((item) => ({ value: item.id, label: item.displayName })),
   ];
-  const sortedThreads = [...(fromRecents ? (allThreads.data ?? []) : (projectThreads.data ?? []))].sort(
-    (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
-  );
+  const sortedThreads = [
+    ...(fromRecents ? (allThreads.data ?? []) : (projectThreads.data ?? [])),
+  ].sort(compareByRecentActivity);
   const sidebarThreads =
     fromRecents && recentFilter !== "all"
       ? sortedThreads.filter((item) => item.deviceId === recentFilter)
