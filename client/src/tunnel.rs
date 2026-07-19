@@ -3,12 +3,52 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
+};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest, http::header},
 };
+
+const EVENT_IN_FLIGHT_LIMIT: usize = 64;
+const HISTORY_IN_FLIGHT_LIMIT: usize = 16;
+
+#[derive(Default)]
+struct PendingWindow {
+    event_ids: HashSet<String>,
+    history_ids: HashSet<String>,
+}
+
+impl PendingWindow {
+    fn track_event(&mut self, event_id: &str) -> bool {
+        if self.event_ids.len() >= EVENT_IN_FLIGHT_LIMIT {
+            return false;
+        }
+        self.event_ids.insert(event_id.into())
+    }
+
+    fn track_history(&mut self, batch_id: &str) -> bool {
+        if self.history_ids.len() >= HISTORY_IN_FLIGHT_LIMIT {
+            return false;
+        }
+        self.history_ids.insert(batch_id.into())
+    }
+
+    fn acknowledge(&mut self, frame: &TunnelFrame) {
+        match frame {
+            TunnelFrame::EventAck { event_id } => {
+                self.event_ids.remove(event_id);
+            }
+            TunnelFrame::HistoryAck { batch_id, .. } => {
+                self.history_ids.remove(batch_id);
+            }
+            _ => {}
+        }
+    }
+}
 
 pub async fn run_forever(
     executor: CommandExecutor,
@@ -143,14 +183,15 @@ async fn run_connection(
     let mut flush = tokio::time::interval(Duration::from_secs(1));
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_server_activity = tokio::time::Instant::now();
-    send_pending(&executor, &mut socket).await?;
+    let mut pending_window = PendingWindow::default();
+    send_pending(&executor, &mut socket, &mut pending_window).await?;
     executor.emit_inventory().await?;
     loop {
         let watchdog_deadline = last_server_activity + Duration::from_secs(45);
         tokio::select! {
-            incoming=socket.next()=>match incoming{Some(Ok(Message::Text(text)))=>{last_server_activity=tokio::time::Instant::now();let frame: TunnelFrame=serde_json::from_str(&text)?;handle_server_frame(&executor,&out_tx,frame,update_trigger).await?},Some(Ok(Message::Ping(payload)))=>{last_server_activity=tokio::time::Instant::now();socket.send(Message::Pong(payload)).await?;},Some(Ok(Message::Close(_)))|None=>break,Some(Err(error))=>return Err(error.into()),_=>{}},
+            incoming=socket.next()=>match incoming{Some(Ok(Message::Text(text)))=>{last_server_activity=tokio::time::Instant::now();let frame: TunnelFrame=serde_json::from_str(&text)?;pending_window.acknowledge(&frame);handle_server_frame(&executor,&out_tx,frame,update_trigger).await?},Some(Ok(Message::Ping(payload)))=>{last_server_activity=tokio::time::Instant::now();socket.send(Message::Pong(payload)).await?;},Some(Ok(Message::Close(_)))|None=>break,Some(Err(error))=>return Err(error.into()),_=>{}},
             Some(frame)=out_rx.recv()=>send(&mut socket,&frame).await?,
-            event=events.recv()=>match event{Ok(event)=>send(&mut socket,&TunnelFrame::Event{event}).await?,Err(broadcast::error::RecvError::Lagged(_))=>send_pending(&executor,&mut socket).await?,Err(broadcast::error::RecvError::Closed)=>break},
+            event=events.recv()=>match event{Ok(event)=>{if pending_window.track_event(&event.event_id){send(&mut socket,&TunnelFrame::Event{event}).await?}},Err(broadcast::error::RecvError::Lagged(_))=>send_pending(&executor,&mut socket,&mut pending_window).await?,Err(broadcast::error::RecvError::Closed)=>break},
             ack=command_acks.recv()=>match ack{
                 Ok(frame) => {
                     let command_id = match &frame {
@@ -165,7 +206,7 @@ async fn run_connection(
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             _=heartbeat.tick()=>{let(project_count,inbox_depth,outbox_depth,active)=executor.store.counts().await?;let providers=executor.agents.statuses().await;let codex=providers.iter().find(|status|status.provider==AgentProvider::Codex);let health=DeviceHealth{app_server_status:codex.map(|status|status.status.clone()).unwrap_or_else(||"unavailable".into()),storage_status:"ok".into(),inbox_depth,outbox_depth,history_backfill_depth:executor.store.pending_history(1000).await?.len() as i64,active_turn_count:active,pending_approval_count:executor.store.pending_approval_count().await?,project_count,codex_version:codex.and_then(|status|status.version.clone()),providers};send(&mut socket,&TunnelFrame::Heartbeat{sent_at:now(),health}).await?;},
-            _=flush.tick()=>send_pending(&executor,&mut socket).await?,
+            _=flush.tick()=>send_pending(&executor,&mut socket,&mut pending_window).await?,
             _=tokio::time::sleep_until(watchdog_deadline)=>return Err(anyhow!("server heartbeat acknowledgement timed out")),
         }
     }
@@ -297,15 +338,28 @@ async fn execute_query(executor: &CommandExecutor, query: DeviceQuery) -> Result
 async fn send_pending<S>(
     executor: &CommandExecutor,
     socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    pending_window: &mut PendingWindow,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    for event in executor.store.pending_events(500).await? {
-        send(socket, &TunnelFrame::Event { event }).await?;
+    for event in executor
+        .store
+        .pending_events(EVENT_IN_FLIGHT_LIMIT as i64)
+        .await?
+    {
+        if pending_window.track_event(&event.event_id) {
+            send(socket, &TunnelFrame::Event { event }).await?;
+        }
     }
-    for batch in executor.store.pending_history(100).await? {
-        send(socket, &TunnelFrame::HistoryBatch { batch }).await?;
+    for batch in executor
+        .store
+        .pending_history(HISTORY_IN_FLIGHT_LIMIT as i64)
+        .await?
+    {
+        if pending_window.track_history(&batch.batch_id) {
+            send(socket, &TunnelFrame::HistoryBatch { batch }).await?;
+        }
     }
     Ok(())
 }
@@ -323,4 +377,43 @@ where
     .await
     .context("device tunnel send timed out")??;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_window_deduplicates_until_acknowledged() {
+        let mut window = PendingWindow::default();
+        assert!(window.track_event("evt_test"));
+        assert!(!window.track_event("evt_test"));
+        window.acknowledge(&TunnelFrame::EventAck {
+            event_id: "evt_test".into(),
+        });
+        assert!(window.track_event("evt_test"));
+
+        assert!(window.track_history("hbatch_test"));
+        assert!(!window.track_history("hbatch_test"));
+        window.acknowledge(&TunnelFrame::HistoryAck {
+            batch_id: "hbatch_test".into(),
+            thread_id: "thr_test".into(),
+            acked_cursor: "hist_test".into(),
+        });
+        assert!(window.track_history("hbatch_test"));
+    }
+
+    #[test]
+    fn pending_window_enforces_bounded_replay() {
+        let mut window = PendingWindow::default();
+        for index in 0..EVENT_IN_FLIGHT_LIMIT {
+            assert!(window.track_event(&format!("evt_{index}")));
+        }
+        assert!(!window.track_event("evt_overflow"));
+
+        for index in 0..HISTORY_IN_FLIGHT_LIMIT {
+            assert!(window.track_history(&format!("hbatch_{index}")));
+        }
+        assert!(!window.track_history("hbatch_overflow"));
+    }
 }
