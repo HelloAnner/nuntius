@@ -32,6 +32,8 @@ use tower_http::{catch_panic::CatchPanicLayer, limit::RequestBodyLimitLayer, tra
 use tracing_subscriber::EnvFilter;
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Parser)]
 #[command(
@@ -329,7 +331,18 @@ fn stop() -> Result<()> {
         }
     }
     println!("sent shutdown signal to pid {pid}");
-    Ok(())
+    let deadline = std::time::Instant::now() + STOP_WAIT_TIMEOUT;
+    loop {
+        if !process_alive(pid) || !data_lock_is_held()? {
+            let _ = running_pid()?;
+            println!("stopped nuntius-client pid {pid}");
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("nuntius-client pid {pid} did not stop within 15 seconds")
+        }
+        std::thread::sleep(STOP_POLL_INTERVAL);
+    }
 }
 fn status() -> Result<()> {
     match running_pid()? {
