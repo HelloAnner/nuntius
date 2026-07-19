@@ -21,7 +21,13 @@ import {
 } from "@nuntius/shared";
 import { api, ApiError } from "../api";
 import { trackCommand } from "../events";
-import { useArchiveThreadAction, useMedia, useNavigate } from "../hooks";
+import {
+  projectNameFrom,
+  useArchiveThreadAction,
+  useMedia,
+  useNavigate,
+  useProjectNameMap,
+} from "../hooks";
 import { liveStore, useAccessMode, useApprovals, useRoute, useThreadLive } from "../stores";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
@@ -86,6 +92,7 @@ export function ThreadPage({
         ? false
         : 700,
   });
+  const projectNames = useProjectNameMap((devices.data ?? []).map((item) => item.id));
 
   const history = useQuery({
     queryKey: ["threadHistory", threadId, turnCount],
@@ -408,7 +415,12 @@ export function ThreadPage({
                     >
                       <ThreadRow
                         thread={item}
-                        context={fromRecents ? deviceName(item.deviceId) : undefined}
+                        deviceName={deviceName(item.deviceId)}
+                        projectName={projectNameFrom(
+                          projectNames,
+                          item.deviceId,
+                          item.projectId,
+                        )}
                         selected={item.id === threadId}
                         onClick={() =>
                           navigate(

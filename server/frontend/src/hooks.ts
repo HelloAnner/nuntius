@@ -1,6 +1,6 @@
 /* misc hooks */
 import { useCallback, useState, useSyncExternalStore } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { useToast, type ThreadSummary } from "@nuntius/shared";
 import { api } from "./api";
 import { trackCommand, waitForCommand } from "./events";
@@ -24,6 +24,31 @@ export function useMedia(query: string): boolean {
     [query],
   );
   return useSyncExternalStore(subscribe, () => window.matchMedia(query).matches);
+}
+
+export function useProjectNameMap(deviceIds: string[]): Map<string, string> {
+  const uniqueDeviceIds = [...new Set(deviceIds)];
+  const projectQueries = useQueries({
+    queries: uniqueDeviceIds.map((deviceId) => ({
+      queryKey: ["projects", deviceId],
+      queryFn: () => api.projects(deviceId),
+    })),
+  });
+  const names = new Map<string, string>();
+  projectQueries.forEach((query, index) => {
+    for (const project of query.data ?? []) {
+      names.set(`${uniqueDeviceIds[index]}:${project.id}`, project.displayName);
+    }
+  });
+  return names;
+}
+
+export function projectNameFrom(
+  names: Map<string, string>,
+  deviceId: string,
+  projectId: string,
+): string {
+  return names.get(`${deviceId}:${projectId}`) ?? "项目";
 }
 
 export function useArchiveThreadAction() {

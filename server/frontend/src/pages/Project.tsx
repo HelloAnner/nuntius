@@ -147,6 +147,8 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
                 >
                   <ThreadRow
                     thread={t}
+                    deviceName={device?.displayName ?? "设备"}
+                    projectName={project?.displayName ?? "项目"}
                     onClick={() =>
                       navigate({ name: "thread", deviceId, projectId, threadId: t.id })
                     }

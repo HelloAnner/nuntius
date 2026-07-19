@@ -229,21 +229,18 @@ export function ProjectRow({
 
 export function ThreadRow({
   thread,
-  context,
+  deviceName,
+  projectName,
   selected = false,
   onClick,
 }: {
   thread: ThreadSummary;
-  context?: string;
+  deviceName: string;
+  projectName: string;
   selected?: boolean;
   onClick: () => void;
 }) {
   const active = thread.status === "active";
-  const secondaryStatus =
-    !thread.archived && !["active", "completed", "idle"].includes(thread.status)
-      ? statusLabel(thread.status)
-      : null;
-  const details = [context, thread.archived ? "已归档" : secondaryStatus].filter(Boolean) as string[];
   return (
     <button
       className={`list-row${selected ? " selected" : ""}`}
@@ -257,15 +254,14 @@ export function ThreadRow({
         <div className="title" style={thread.archived ? { color: "var(--ink-3)" } : undefined}>
           {thread.title || "未命名会话"}
         </div>
-        {details.length ? (
-          <div className="sub">
-            {details.map((detail) => <span className="ellipsis" key={detail}>{detail}</span>)}
-          </div>
-        ) : null}
+        <div className="sub thread-context" aria-label={`${deviceName}，${projectName}`}>
+          <span className="ellipsis">{deviceName}</span>
+          <span className="sep" aria-hidden="true">·</span>
+          <span className="ellipsis">{projectName}</span>
+        </div>
       </div>
       <div className="trailing">
         {active ? <span className="live-dot" aria-label="进行中" /> : null}
-        <span className="num" style={{ fontSize: 12 }}>{relTime(thread.lastActivityAt)}</span>
         <IconChevronRight size={16} />
       </div>
     </button>

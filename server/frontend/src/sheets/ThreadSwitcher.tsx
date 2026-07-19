@@ -1,17 +1,15 @@
 /* Fast thread switcher: search + recent threads across every device. */
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  IconChat,
-  IconArchive,
-  IconSearch,
-  Sheet,
-  SwipeActionRow,
-  relTime,
-  statusLabel,
-} from "@nuntius/shared";
+import { IconArchive, IconSearch, Sheet, SwipeActionRow } from "@nuntius/shared";
 import { api } from "../api";
-import { useArchiveThreadAction, useNavigate } from "../hooks";
+import {
+  projectNameFrom,
+  useArchiveThreadAction,
+  useNavigate,
+  useProjectNameMap,
+} from "../hooks";
+import { ThreadRow } from "../components";
 
 export function ThreadSwitcher({
   open,
@@ -29,6 +27,7 @@ export function ThreadSwitcher({
   const [query, setQuery] = useState("");
   const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
+  const projectNames = useProjectNameMap((devices.data ?? []).map((device) => device.id));
 
   const deviceName = (id: string) => devices.data?.find((d) => d.id === id)?.displayName ?? "设备";
 
@@ -81,9 +80,11 @@ export function ThreadSwitcher({
                 busy={busyIds.has(t.id)}
                 onAction={() => archive(t.id)}
               >
-                <button
-                  className="list-row"
-                  style={t.id === currentThreadId ? { background: "var(--accent-soft)" } : undefined}
+                <ThreadRow
+                  thread={t}
+                  deviceName={deviceName(t.deviceId)}
+                  projectName={projectNameFrom(projectNames, t.deviceId, t.projectId)}
+                  selected={t.id === currentThreadId}
                   onClick={() => {
                     navigate(
                       navigationContext === "recents"
@@ -97,19 +98,7 @@ export function ThreadSwitcher({
                     );
                     onClose();
                   }}
-                >
-                  <span className={`row-glyph thread${t.status === "active" ? " live" : ""}`}>
-                    <IconChat size={15} />
-                  </span>
-                  <div className="grow">
-                    <div className="title" style={{ fontSize: 14.5 }}>{t.title || "未命名会话"}</div>
-                    <div className="sub">
-                      <span>{statusLabel(t.status)}</span>
-                      <span>·</span>
-                      <span className="num">{relTime(t.lastActivityAt)}</span>
-                    </div>
-                  </div>
-                </button>
+                />
               </SwipeActionRow>
             ))}
           </div>

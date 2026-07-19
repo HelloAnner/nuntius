@@ -10,7 +10,12 @@ import {
   SwipeActionRow,
 } from "@nuntius/shared";
 import { api } from "../api";
-import { useArchiveThreadAction, useNavigate } from "../hooks";
+import {
+  projectNameFrom,
+  useArchiveThreadAction,
+  useNavigate,
+  useProjectNameMap,
+} from "../hooks";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 
 export function RecentsPage() {
@@ -19,8 +24,10 @@ export function RecentsPage() {
   const [filter, setFilter] = useState<string>("all");
   const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
+  const projectNames = useProjectNameMap((devices.data ?? []).map((device) => device.id));
 
-  const deviceName = (id: string) => devices.data?.find((d) => d.id === id)?.displayName ?? "";
+  const deviceName = (id: string) =>
+    devices.data?.find((device) => device.id === id)?.displayName ?? "设备";
 
   const options = useMemo(
     () => [
@@ -68,7 +75,8 @@ export function RecentsPage() {
                 >
                   <ThreadRow
                     thread={t}
-                    context={deviceName(t.deviceId)}
+                    deviceName={deviceName(t.deviceId)}
+                    projectName={projectNameFrom(projectNames, t.deviceId, t.projectId)}
                     onClick={() =>
                       navigate({
                         name: "recentThread",
