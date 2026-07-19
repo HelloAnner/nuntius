@@ -162,6 +162,11 @@ export function startEvents(qc: QueryClient): () => void {
       });
       return;
     }
+    if (type === "thread.summary") {
+      markThreadDirty(event.threadId);
+      void qc.invalidateQueries({ queryKey: ["devices"] });
+      return;
+    }
     if (type === "project.removed") {
       const projectId =
         typeof (event.payload as { projectId?: unknown }).projectId === "string"
@@ -215,8 +220,23 @@ export function startEvents(qc: QueryClient): () => void {
     }
     if (type.startsWith("app_server.")) {
       const m = type.slice("app_server.".length).toLowerCase();
-      if (m === "turn.completed" || m === "turn.failed" || m.startsWith("turn.interrupt")) {
-        if (event.threadId) useApprovals.getState().cancelForThread(event.threadId);
+      if (
+        m === "turn.started" ||
+        m === "turn.completed" ||
+        m === "turn.failed" ||
+        m === "turn.error" ||
+        m === "thread.status.changed" ||
+        m.startsWith("turn.interrupt")
+      ) {
+        if (
+          event.threadId &&
+          (m === "turn.completed" ||
+            m === "turn.failed" ||
+            m === "turn.error" ||
+            m.startsWith("turn.interrupt"))
+        ) {
+          useApprovals.getState().cancelForThread(event.threadId);
+        }
         markThreadDirty(event.threadId);
         void qc.invalidateQueries({ queryKey: ["devices"] });
       }

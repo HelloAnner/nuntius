@@ -111,11 +111,9 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
 
   const appRunning = info.data?.appServerRunning ?? false;
   const archived = thread?.archived ?? false;
-  const latestAuthoritativeTurn = [...live.turns]
-    .reverse()
-    .find((turn) => !turn.id.startsWith("local:"));
-  const running = live.turns.some((turn) => !liveStore.isTerminal(turn)) ||
-    (latestAuthoritativeTurn ? false : thread?.status === "active");
+  // SQLite is authoritative. Live events render output but never manufacture
+  // the execution state shown to the user.
+  const running = thread?.status === "active";
 
   const canSend = Boolean(appRunning && !archived && thread);
   const lockedReason = !thread
@@ -217,6 +215,8 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
       canSend={canSend}
       lockedReason={lockedReason}
       running={running}
+      runtimeStatus={thread?.status ?? null}
+      runtimeConnected={appRunning}
       busy={actionBusy}
       onSend={send}
       onRetry={retry}

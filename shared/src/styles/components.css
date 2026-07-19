@@ -919,7 +919,7 @@
 .to-bottom {
   position: absolute;
   right: 16px;
-  bottom: calc(92px + var(--sab));
+  bottom: calc(126px + var(--sab));
   z-index: 20;
   display: flex;
   align-items: center;
@@ -947,6 +947,86 @@
     transparent,
     var(--bg) 28%
   );
+}
+.thread-runtime {
+  max-width: 736px;
+  min-height: 28px;
+  margin: 0 auto 6px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink-2);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02);
+  font-size: 11px;
+  line-height: 1;
+}
+.thread-runtime strong {
+  flex: none;
+  color: var(--ink);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+.thread-runtime-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--ink-4);
+}
+.thread-runtime-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thread-runtime-proof {
+  flex: none;
+  margin-left: auto;
+  padding-left: 8px;
+  border-left: 1px solid var(--hairline);
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+.thread-runtime.running {
+  border-color: var(--ok-soft);
+  background: var(--ok-soft);
+}
+.thread-runtime.running .thread-runtime-dot {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--ok-soft);
+  animation: pulse-dot 1.8s ease-in-out infinite;
+}
+.thread-runtime.running strong,
+.thread-runtime.running .thread-runtime-proof {
+  color: var(--ok);
+}
+.thread-runtime.unknown {
+  border-color: var(--warn-soft);
+  background: var(--warn-soft);
+}
+.thread-runtime.unknown .thread-runtime-dot,
+.thread-runtime.failed .thread-runtime-dot {
+  background: var(--warn);
+}
+.thread-runtime.unknown strong {
+  color: var(--warn);
+}
+.thread-runtime.failed {
+  border-color: var(--danger-soft);
+  background: var(--danger-soft);
+}
+.thread-runtime.failed .thread-runtime-dot {
+  background: var(--danger);
+}
+.thread-runtime.failed strong {
+  color: var(--danger);
 }
 .composer-inner {
   max-width: 760px;

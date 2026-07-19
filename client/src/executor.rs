@@ -94,6 +94,8 @@ impl CommandExecutor {
                         bail!("active App Server turn identity is unavailable")
                     }
                     self.store.touch_thread(thread_id, "idle").await?;
+                    self.sync_thread(thread_id).await?;
+                    self.emit_thread_summary(thread_id).await?;
                     return Ok(json!({"alreadyTerminal":true}));
                 };
                 let result = self
@@ -105,6 +107,7 @@ impl CommandExecutor {
                     .await?;
                 self.store.touch_thread(thread_id, "interrupted").await?;
                 self.sync_thread(thread_id).await?;
+                self.emit_thread_summary(thread_id).await?;
                 Ok(result)
             }
             DeviceCommandKind::ApprovalDecide {
@@ -342,6 +345,7 @@ impl CommandExecutor {
             .record_user_turn(&thread.id, app_turn.as_deref(), &request.text)
             .await?;
         self.sync_thread(&thread.id).await?;
+        self.emit_thread_summary(&thread.id).await?;
         self.emit(
             "turn.started",
             Some(&thread.project_id),
@@ -423,6 +427,19 @@ impl CommandExecutor {
             .thread(id, &self.device_id)
             .await?
             .context("thread not found")
+    }
+    async fn emit_thread_summary(&self, thread_id: &str) -> Result<()> {
+        let thread = self.thread(thread_id).await?;
+        self.emit(
+            "thread.summary",
+            Some(&thread.project_id),
+            Some(&thread.id),
+            None,
+            serde_json::to_value(&thread)?,
+            true,
+        )
+        .await?;
+        Ok(())
     }
     async fn command_thread(&self, id: &str) -> Result<ThreadSummary> {
         self.store
@@ -594,6 +611,7 @@ impl CommandExecutor {
             .import_app_history(&local_thread, app_thread)
             .await?;
         self.sync_thread(&local_thread).await?;
+        self.emit_thread_summary(&local_thread).await?;
         self.store
             .state_set(
                 &thread_fingerprint_key(app_id),
@@ -970,6 +988,58 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
             .await?;
         return Ok(());
     }
+    if let Some(local_thread) = thread_id.as_deref() {
+        if method == "turn/started" {
+            let app_turn = find_string(&params, &["turnId", "turn/id"]);
+            executor
+                .store
+                .mark_app_turn_started(local_thread, app_turn.as_deref())
+                .await?;
+            executor.sync_thread(local_thread).await?;
+            executor.emit_thread_summary(local_thread).await?;
+        } else if method == "turn/completed"
+            || method == "turn/failed"
+            || method == "turn/error"
+            || method.starts_with("turn/interrupt")
+        {
+            let app_turn = find_string(&params, &["turnId", "turn/id"]);
+            let status = if method == "turn/completed" {
+                find_string(&params, &["turn/status", "status"])
+                    .unwrap_or_else(|| "completed".into())
+            } else if method.starts_with("turn/interrupt") {
+                "interrupted".into()
+            } else {
+                "failed".into()
+            };
+            executor
+                .store
+                .complete_app_turn(local_thread, app_turn.as_deref(), &status)
+                .await?;
+            executor.sync_thread(local_thread).await?;
+            executor.emit_thread_summary(local_thread).await?;
+        } else if method == "thread/status/changed" {
+            let status = find_string(&params, &["status/type", "status"])
+                .unwrap_or_else(|| "unknown".into());
+            if status == "active" {
+                executor.store.touch_thread(local_thread, "active").await?;
+            } else {
+                let terminal = if status == "idle" {
+                    "completed"
+                } else {
+                    "failed"
+                };
+                executor
+                    .store
+                    .complete_app_turn(local_thread, None, terminal)
+                    .await?;
+                if status != "idle" {
+                    executor.store.touch_thread(local_thread, &status).await?;
+                }
+            }
+            executor.sync_thread(local_thread).await?;
+            executor.emit_thread_summary(local_thread).await?;
+        }
+    }
     let durable = !method.ends_with("/delta");
     let event_type = format!("app_server.{}", method.replace('/', "."));
     executor
@@ -1005,17 +1075,14 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
             executor.sync_thread(local_thread).await?;
         }
     }
-    if method == "turn/completed"
+    if (method == "turn/completed"
+        || method == "turn/failed"
+        || method == "turn/error"
+        || method.starts_with("turn/interrupt"))
         && let Some(local_thread) = thread_id.as_deref()
     {
-        let app_turn = find_string(&params, &["turnId", "turn/id"]);
-        let status =
-            find_string(&params, &["turn/status", "status"]).unwrap_or_else(|| "completed".into());
-        executor
-            .store
-            .complete_app_turn(local_thread, app_turn.as_deref(), &status)
-            .await?;
         executor.refresh_thread_history(local_thread).await?;
+        executor.emit_thread_summary(local_thread).await?;
     }
     Ok(())
 }

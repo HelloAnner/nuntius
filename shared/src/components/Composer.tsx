@@ -8,6 +8,8 @@ export function Composer({
   canSend,
   lockedReason,
   running,
+  runtimeStatus,
+  runtimeConnected,
   busy,
   placeholder,
   onSend,
@@ -17,6 +19,8 @@ export function Composer({
   canSend: boolean;
   lockedReason?: string | null;
   running: boolean;
+  runtimeStatus: string | null;
+  runtimeConnected: boolean;
   busy?: boolean;
   placeholder?: string;
   onSend: (text: string) => void;
@@ -47,6 +51,7 @@ export function Composer({
   const locked = !canSend;
   return (
     <div className={`composer${locked ? " locked" : ""}`}>
+      <RuntimeStatus status={runtimeStatus} connected={runtimeConnected} />
       <div className="composer-inner">
         <textarea
           ref={ref}
@@ -86,6 +91,57 @@ export function Composer({
           {busy ? <Spinner sm /> : <IconArrowUp size={17} />}
         </button>
       </div>
+    </div>
+  );
+}
+
+function RuntimeStatus({ status, connected }: { status: string | null; connected: boolean }) {
+  let tone = "idle";
+  let label = "当前空闲";
+  let detail = "数据库已确认";
+  let proof = "已同步";
+
+  if (!status) {
+    tone = "unknown";
+    label = "正在确认状态";
+    detail = "等待数据库快照";
+    proof = "待同步";
+  } else if (!connected) {
+    tone = "unknown";
+    label = "状态待确认";
+    detail = status === "active" ? "连接中断，上次记录为运行中" : "设备连接已中断";
+    proof = "非实时";
+  } else if (status === "active") {
+    tone = "running";
+    label = "正在运行";
+    detail = "设备数据库实时状态";
+    proof = "实时";
+  } else if (status === "unknown" || status === "systemError") {
+    tone = "unknown";
+    label = "状态待确认";
+    detail = status === "systemError" ? "运行服务状态异常" : "数据库没有可靠终态";
+    proof = "待核对";
+  } else if (status === "failed") {
+    tone = "failed";
+    label = "执行失败";
+    detail = "数据库已记录终态";
+    proof = "已同步";
+  } else if (status === "interrupted") {
+    label = "已中断";
+    detail = "数据库已记录终态";
+  }
+
+  return (
+    <div
+      className={`thread-runtime ${tone}`}
+      role="status"
+      aria-live="polite"
+      title="状态直接来自设备 SQLite；实时事件仅用于触发数据库刷新"
+    >
+      <span className="thread-runtime-dot" aria-hidden="true" />
+      <strong>{label}</strong>
+      <span className="thread-runtime-detail">{detail}</span>
+      <span className="thread-runtime-proof">{proof}</span>
     </div>
   );
 }

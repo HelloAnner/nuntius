@@ -160,11 +160,9 @@ export function ThreadPage({
   const online = device?.status === "online";
   const unassigned = project?.kind === "system_unassigned";
   const archived = thread?.archived ?? false;
-  const latestAuthoritativeTurn = [...live.turns]
-    .reverse()
-    .find((turn) => !turn.id.startsWith("local:"));
-  const running = live.turns.some((turn) => !liveStore.isTerminal(turn)) ||
-    (latestAuthoritativeTurn ? false : thread?.status === "active");
+  // The server SQLite projection is authoritative. Browser memory is only a
+  // transient rendering layer for streamed output.
+  const running = thread?.status === "active";
 
   const canSend = Boolean(online && !unassigned && !archived && thread);
   const lockedReason = !thread
@@ -286,6 +284,8 @@ export function ThreadPage({
       canSend={canSend}
       lockedReason={lockedReason}
       running={running}
+      runtimeStatus={thread?.status ?? null}
+      runtimeConnected={online}
       busy={busyIds.has(threadId)}
       onSend={send}
       onRetry={retry}

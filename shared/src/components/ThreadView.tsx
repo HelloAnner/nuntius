@@ -100,6 +100,8 @@ export function ThreadView({
   canSend,
   lockedReason,
   running,
+  runtimeStatus,
+  runtimeConnected,
   busy,
   onSend,
   onRetry,
@@ -118,6 +120,8 @@ export function ThreadView({
   canSend: boolean;
   lockedReason?: string | null;
   running: boolean;
+  runtimeStatus: string | null;
+  runtimeConnected: boolean;
   busy?: boolean;
   onSend: (text: string) => void;
   onRetry?: (turnId: string, text: string) => void;
@@ -336,6 +340,8 @@ export function ThreadView({
         canSend={canSend}
         lockedReason={lockedReason}
         running={running}
+        runtimeStatus={runtimeStatus}
+        runtimeConnected={runtimeConnected}
         busy={busy}
         onSend={sendAndFollow}
         onInterrupt={onInterrupt}

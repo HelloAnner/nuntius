@@ -412,7 +412,7 @@ impl ClientStore {
     /// App-server turn id of the thread's currently active turn, if any.
     pub async fn active_app_turn_id(&self, thread_id: &str) -> Result<Option<String>> {
         Ok(sqlx::query_scalar(
-            "SELECT app_server_turn_id FROM turns WHERE thread_id=? AND status='active' AND app_server_turn_id IS NOT NULL ORDER BY ordinal DESC LIMIT 1",
+            "SELECT app_server_turn_id FROM turns WHERE thread_id=? AND status IN ('active','running','inProgress') AND app_server_turn_id IS NOT NULL ORDER BY ordinal DESC LIMIT 1",
         )
         .bind(thread_id)
         .fetch_optional(&self.pool)
@@ -443,16 +443,122 @@ impl ClientStore {
         text: &str,
     ) -> Result<String> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let ordinal: i64 =
-            sqlx::query_scalar("SELECT COALESCE(MAX(ordinal),0)+1 FROM turns WHERE thread_id=?")
-                .bind(thread_id)
-                .fetch_one(&mut *tx)
-                .await?;
-        let turn_id = new_id("trn");
-        let item_id = new_id("itm");
         let stamp = now();
-        sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at) VALUES(?,?,?,?,'active',?)").bind(&turn_id).bind(thread_id).bind(app_turn_id).bind(ordinal).bind(&stamp).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO items(id,turn_id,ordinal,kind,status,content_text,occurred_at,completed_at) VALUES(?, ?, 1, 'user_message', 'completed', ?, ?, ?)").bind(item_id).bind(&turn_id).bind(text).bind(&stamp).bind(&stamp).execute(&mut *tx).await?;
+        let mut existing = if let Some(app_turn_id) = app_turn_id {
+            sqlx::query_scalar::<_, String>(
+                "SELECT id FROM turns WHERE thread_id=? AND app_server_turn_id=?",
+            )
+            .bind(thread_id)
+            .bind(app_turn_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        } else {
+            None
+        };
+        if existing.is_none() && app_turn_id.is_some() {
+            existing = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM turns WHERE thread_id=? AND app_server_turn_id IS NULL AND status IN ('active','running','inProgress') ORDER BY ordinal DESC LIMIT 1",
+            )
+            .bind(thread_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        }
+        let turn_id = existing.clone().unwrap_or_else(|| new_id("trn"));
+        sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE thread_id=? AND id<>? AND status IN ('active','running','inProgress')")
+            .bind(&stamp).bind(thread_id).bind(&turn_id).execute(&mut *tx).await?;
+        if existing.is_some() {
+            sqlx::query("UPDATE turns SET app_server_turn_id=COALESCE(app_server_turn_id,?),status='inProgress',started_at=COALESCE(started_at,?),completed_at=NULL WHERE id=?")
+                .bind(app_turn_id).bind(&stamp).bind(&turn_id).execute(&mut *tx).await?;
+        } else {
+            let ordinal: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(ordinal),0)+1 FROM turns WHERE thread_id=?",
+            )
+            .bind(thread_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at) VALUES(?,?,?,?,'inProgress',?)")
+                .bind(&turn_id).bind(thread_id).bind(app_turn_id).bind(ordinal).bind(&stamp)
+                .execute(&mut *tx).await?;
+        }
+        if sqlx::query_scalar::<_, String>(
+            "SELECT id FROM items WHERE turn_id=? AND kind='user_message' AND content_text=? LIMIT 1",
+        )
+        .bind(&turn_id)
+        .bind(text)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_none()
+        {
+            let item_id = new_id("itm");
+            let item_ordinal: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(ordinal),0)+1 FROM items WHERE turn_id=?",
+            )
+            .bind(&turn_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query("INSERT INTO items(id,turn_id,ordinal,kind,status,content_text,occurred_at,completed_at) VALUES(?,?,?,'user_message','completed',?,?,?)")
+                .bind(item_id).bind(&turn_id).bind(item_ordinal).bind(text).bind(&stamp).bind(&stamp)
+                .execute(&mut *tx).await?;
+        }
+        sqlx::query(
+            "UPDATE threads SET status='active',last_activity_at=?,updated_at=? WHERE id=?",
+        )
+        .bind(&stamp)
+        .bind(&stamp)
+        .bind(thread_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(turn_id)
+    }
+    pub async fn mark_app_turn_started(
+        &self,
+        thread_id: &str,
+        app_turn_id: Option<&str>,
+    ) -> Result<String> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let stamp = now();
+        let mut existing = if let Some(app_turn_id) = app_turn_id {
+            sqlx::query_scalar::<_, String>(
+                "SELECT id FROM turns WHERE thread_id=? AND app_server_turn_id=?",
+            )
+            .bind(thread_id)
+            .bind(app_turn_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        } else {
+            sqlx::query_scalar::<_, String>(
+                "SELECT id FROM turns WHERE thread_id=? AND status IN ('active','running','inProgress') ORDER BY ordinal DESC LIMIT 1",
+            )
+            .bind(thread_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        };
+        if existing.is_none() && app_turn_id.is_some() {
+            existing = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM turns WHERE thread_id=? AND app_server_turn_id IS NULL AND status IN ('active','running','inProgress') ORDER BY ordinal DESC LIMIT 1",
+            )
+            .bind(thread_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        }
+        let turn_id = existing.clone().unwrap_or_else(|| new_id("trn"));
+        sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE thread_id=? AND id<>? AND status IN ('active','running','inProgress')")
+            .bind(&stamp).bind(thread_id).bind(&turn_id).execute(&mut *tx).await?;
+        if existing.is_some() {
+            sqlx::query("UPDATE turns SET app_server_turn_id=COALESCE(app_server_turn_id,?),status='inProgress',started_at=COALESCE(started_at,?),completed_at=NULL WHERE id=?")
+                .bind(app_turn_id).bind(&stamp).bind(&turn_id).execute(&mut *tx).await?;
+        } else {
+            let ordinal: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(ordinal),0)+1 FROM turns WHERE thread_id=?",
+            )
+            .bind(thread_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at) VALUES(?,?,?,?,'inProgress',?)")
+                .bind(&turn_id).bind(thread_id).bind(app_turn_id).bind(ordinal).bind(&stamp)
+                .execute(&mut *tx).await?;
+        }
         sqlx::query(
             "UPDATE threads SET status='active',last_activity_at=?,updated_at=? WHERE id=?",
         )
@@ -522,8 +628,9 @@ impl ClientStore {
         let stamp = now();
         sqlx::query("INSERT OR IGNORE INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,content_text,structured_detail,occurred_at,completed_at) VALUES(?,?,?,?,'agent_message','completed',?,?,?,?)").bind(&item_id).bind(&turn_id).bind(app_item_id).bind(ordinal).bind(text).bind(serde_json::to_string(detail)?).bind(&stamp).bind(&stamp).execute(&mut *tx).await?;
         sqlx::query(
-            "UPDATE threads SET status='active',last_activity_at=?,updated_at=? WHERE id=?",
+            "UPDATE threads SET status=CASE WHEN EXISTS(SELECT 1 FROM turns WHERE thread_id=? AND status IN ('active','running','inProgress')) THEN 'active' ELSE status END,last_activity_at=?,updated_at=? WHERE id=?",
         )
+        .bind(thread_id)
         .bind(&stamp)
         .bind(&stamp)
         .bind(thread_id)
@@ -547,6 +654,11 @@ impl ClientStore {
             sqlx::query("UPDATE turns SET status=?,completed_at=? WHERE id=(SELECT id FROM turns WHERE thread_id=? ORDER BY ordinal DESC LIMIT 1)")
                 .bind(status).bind(&stamp).bind(thread_id).execute(&mut *tx).await?;
         }
+        sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE thread_id=? AND status IN ('active','running','inProgress')")
+            .bind(&stamp)
+            .bind(thread_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("UPDATE threads SET status='idle',last_activity_at=?,updated_at=? WHERE id=?")
             .bind(&stamp)
             .bind(&stamp)
@@ -676,11 +788,38 @@ impl ClientStore {
             }
             tx.commit().await?;
         }
-        sqlx::query("UPDATE threads SET updated_at=? WHERE id=?")
-            .bind(now())
+        let stamp = now();
+        let thread_status = value_status(thread.get("status"), "idle");
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if thread_status == "active" {
+            let current: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM turns WHERE thread_id=? AND status IN ('active','running','inProgress') ORDER BY ordinal DESC LIMIT 1",
+            )
             .bind(thread_id)
-            .execute(&self.pool)
+            .fetch_optional(&mut *tx)
             .await?;
+            if let Some(current) = current {
+                sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE thread_id=? AND id<>? AND status IN ('active','running','inProgress')")
+                    .bind(&stamp)
+                    .bind(thread_id)
+                    .bind(current)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        } else {
+            sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE thread_id=? AND status IN ('active','running','inProgress')")
+                .bind(&stamp)
+                .bind(thread_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("UPDATE threads SET status=?,updated_at=? WHERE id=?")
+            .bind(thread_status)
+            .bind(&stamp)
+            .bind(thread_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
     pub async fn history_records(
@@ -1222,6 +1361,95 @@ mod tests {
 
         let unassigned = store.ensure_unassigned_project("dev_test").await.unwrap();
         assert!(store.remove_project(&unassigned).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn authoritative_runtime_state_keeps_only_one_active_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_runtime", "Runtime", &workspace, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_thread(
+                "thr_runtime",
+                "prj_runtime",
+                "app_runtime",
+                "Runtime",
+                &json!({}),
+            )
+            .await
+            .unwrap();
+
+        store
+            .mark_app_turn_started("thr_runtime", Some("app_turn_one"))
+            .await
+            .unwrap();
+        store
+            .mark_app_turn_started("thr_runtime", Some("app_turn_two"))
+            .await
+            .unwrap();
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM turns WHERE thread_id='thr_runtime' AND status IN ('active','running','inProgress')",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(active, 1);
+        assert_eq!(
+            store
+                .thread("thr_runtime", "dev_test")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "active"
+        );
+
+        store
+            .complete_app_turn("thr_runtime", Some("app_turn_two"), "completed")
+            .await
+            .unwrap();
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM turns WHERE thread_id='thr_runtime' AND status IN ('active','running','inProgress')",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(active, 0);
+        assert_eq!(
+            store
+                .thread("thr_runtime", "dev_test")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "idle"
+        );
+
+        store
+            .import_app_history(
+                "thr_runtime",
+                &json!({
+                    "status":"active",
+                    "turns":[
+                        {"id":"app_turn_one","status":"inProgress","items":[]},
+                        {"id":"app_turn_two","status":"inProgress","items":[]}
+                    ]
+                }),
+            )
+            .await
+            .unwrap();
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM turns WHERE thread_id='thr_runtime' AND status IN ('active','running','inProgress')",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(active, 1);
     }
 
     #[tokio::test]

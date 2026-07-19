@@ -369,6 +369,16 @@ async fn handle_frame(
                 return Err(anyhow!("event violates size or identity limits"));
             }
             event.user_id = Some(user_id.into());
+            if event.event_type == "thread.summary" {
+                let thread = serde_json::from_value::<ThreadSummary>(event.payload.clone())?;
+                if thread.device_id != device_id
+                    || event.thread_id.as_deref() != Some(thread.id.as_str())
+                    || event.project_id.as_deref() != Some(thread.project_id.as_str())
+                {
+                    return Err(anyhow!("thread summary identity mismatch"));
+                }
+                state.store.upsert_created_thread(user_id, &thread).await?;
+            }
             if event.event_type == "project.summary" {
                 let project = serde_json::from_value::<ProjectSummary>(event.payload.clone())?;
                 if project.device_id != device_id {
