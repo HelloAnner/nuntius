@@ -1,6 +1,7 @@
 use crate::{config::DATABASE_FILE, protocol::*};
 use anyhow::{Result, anyhow, bail};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use sqlx::{
     ConnectOptions, Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
@@ -1327,7 +1328,17 @@ impl ClientStore {
             .fetch_all(&self.pool)
             .await?;
         rows.into_iter()
-            .map(|r| Ok(serde_json::from_str(&r.get::<String, _>("payload"))?))
+            .map(|row| {
+                let mut batch =
+                    serde_json::from_str::<HistoryBatch>(&row.get::<String, _>("payload"))?;
+                // Durable outbox rows can outlive protocol additions with
+                // serde defaults. Deserializing such a row and sending it adds
+                // the new fields, so its original hash no longer describes
+                // the wire records. Refresh the hash without changing the
+                // stable batch/cursor identity used for acknowledgement.
+                batch.payload_hash = history_payload_hash(&batch.records)?;
+                Ok(batch)
+            })
             .collect()
     }
     pub async fn ack_history(&self, batch_id: &str) -> Result<()> {
@@ -1750,10 +1761,42 @@ fn truncate_utf8(value: String, max_bytes: usize) -> (String, bool) {
     (value[..boundary].to_string(), true)
 }
 
+fn history_payload_hash(records: &[HistoryRecord]) -> Result<String> {
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(records)?)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn pending_history_rehashes_legacy_protocol_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        let legacy_records = r#"[{"thread":{"id":"thr_legacy","deviceId":"dev_test","projectId":"prj_test","appServerThreadId":"app_test","title":"Legacy","status":"idle","archived":false,"historyCompleteness":"complete","lastSyncedAt":null,"lastActivityAt":null},"turn":null,"item":null}]"#;
+        let legacy_hash = hex::encode(Sha256::digest(legacy_records.as_bytes()));
+        let payload = format!(
+            r#"{{"batchId":"hbatch_legacy","deviceId":"dev_test","threadId":"thr_legacy","fromCursor":null,"toCursor":"hist_legacy","inventoryRevision":1,"payloadHash":"{legacy_hash}","complete":true,"records":{legacy_records}}}"#,
+        );
+        sqlx::query(
+            "INSERT INTO history_outbox(batch_id,thread_id,to_cursor,payload,created_at) VALUES(?,?,?,?,?)",
+        )
+        .bind("hbatch_legacy")
+        .bind("thr_legacy")
+        .bind("hist_legacy")
+        .bind(payload)
+        .bind(now())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        let pending = store.pending_history(10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        let current_hash = history_payload_hash(&pending[0].records).unwrap();
+        assert_ne!(legacy_hash, current_hash);
+        assert_eq!(pending[0].payload_hash, current_hash);
+    }
 
     #[tokio::test]
     async fn threads_are_sorted_by_the_newest_update_or_conversation() {

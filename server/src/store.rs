@@ -1245,26 +1245,29 @@ impl ServerStore {
         if encoded_records.len() > 768 * 1024 {
             bail!("history batch payload exceeds 768 KiB");
         }
-        let actual_hash = hex::encode(Sha256::digest(&encoded_records));
-        if actual_hash != batch.payload_hash {
-            bail!("history batch payload hash mismatch");
-        }
         let mut tx = self.pool.begin().await?;
         if let Some(row) =
-            sqlx::query("SELECT payload_hash,to_cursor,device_id,thread_id,inventory_revision FROM history_sync_batches WHERE batch_id=?")
+            sqlx::query("SELECT to_cursor,device_id,thread_id,inventory_revision FROM history_sync_batches WHERE batch_id=?")
                 .bind(&batch.batch_id)
                 .fetch_optional(&mut *tx)
                 .await?
         {
-            if row.get::<String, _>("payload_hash") != batch.payload_hash
-                || row.get::<String, _>("device_id") != batch.device_id
+            if row.get::<String, _>("device_id") != batch.device_id
                 || row.get::<String, _>("thread_id") != batch.thread_id
                 || row.get::<String, _>("to_cursor") != batch.to_cursor
                 || row.get::<i64, _>("inventory_revision") != batch.inventory_revision
             {
-                bail!("history batch hash conflict");
+                bail!("history batch identity conflict");
             }
+            // An acknowledgement can be lost across an upgrade. New serde
+            // defaults change the reserialized records and therefore the hash,
+            // but a previously committed batch with the same durable identity
+            // is already authoritative and must remain idempotently ackable.
             return Ok(row.get("to_cursor"));
+        }
+        let actual_hash = hex::encode(Sha256::digest(&encoded_records));
+        if actual_hash != batch.payload_hash {
+            bail!("history batch payload hash mismatch");
         }
         let owner: Option<String> =
             sqlx::query_scalar("SELECT user_id FROM devices WHERE id=? AND status='active'")
@@ -2173,6 +2176,16 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(stored_messages, vec!["question", "done"]);
+
+        let mut upgraded_replay = history_batch.clone();
+        upgraded_replay.payload_hash = "0".repeat(64);
+        assert_eq!(
+            store
+                .ingest_history_batch(&user.id, &upgraded_replay)
+                .await
+                .unwrap(),
+            "cursor_test"
+        );
 
         let pruned_records = history_batch
             .records
