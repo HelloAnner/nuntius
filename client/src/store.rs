@@ -128,15 +128,15 @@ impl ClientStore {
         // Archive expresses an idempotent desired state, so it is safe to run again after
         // a process restart. Other applying commands retain the conservative unknown state.
         sqlx::query("UPDATE command_inbox SET status='accepted',started_at=NULL,completed_at=NULL,error_code=NULL,error_message=NULL WHERE status='applying' AND json_extract(payload,'$.command.kind')='thread_archive'")
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE status IN ('active','running','inProgress')")
             .bind(&stamp)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE items SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE status IN ('active','running','inProgress')")
             .bind(&stamp)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE command_inbox SET status='unknown',completed_at=?,error_code='execution_state_unknown_after_restart',error_message='客户端重启，无法确认命令是否已经执行' WHERE status='applying'")
             .bind(&stamp)
