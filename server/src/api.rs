@@ -137,6 +137,7 @@ async fn info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiErro
             "directory-browser.v1".into(),
             "sync-snapshot.v1".into(),
             "approvals.v1".into(),
+            "server-update-relay.ssh.v1".into(),
         ],
     }))
 }

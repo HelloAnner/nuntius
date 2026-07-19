@@ -8,14 +8,19 @@ use std::{
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, LazyLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::{process::Command, sync::mpsc};
+use tokio::{
+    process::Command,
+    sync::{Mutex, OwnedMutexGuard, mpsc},
+};
 
 pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/HelloAnner/nuntius/releases/download/continuous/manifest.json";
-const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
+static STAGE_UPDATE_LOCK: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
 
 pub fn build_sha() -> &'static str {
     option_env!("NUNTIUS_BUILD_SHA").unwrap_or("development")
@@ -109,7 +114,15 @@ struct ServerBuildInfo {
 }
 
 #[derive(Debug)]
+pub struct RelayPackage {
+    pub commit_sha: String,
+    pub archive_sha256: String,
+    pub archive: Vec<u8>,
+}
+
+#[derive(Debug)]
 pub struct PreparedUpdate {
+    _stage_guard: OwnedMutexGuard<()>,
     staged_path: PathBuf,
     executable_path: PathBuf,
     previous_path: PathBuf,
@@ -140,13 +153,7 @@ pub fn spawn_update_loop(
     ready: mpsc::Sender<PreparedUpdate>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let client = match reqwest::Client::builder()
-            .user_agent(format!("nuntius-updater/{}", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(120))
-            .redirect(reqwest::redirect::Policy::limited(8))
-            .build()
-        {
+        let client = match http_client() {
             Ok(client) => client,
             Err(error) => {
                 tracing::error!(error=?error, "cannot initialize self-updater HTTP client");
@@ -173,22 +180,77 @@ pub fn spawn_update_loop(
     })
 }
 
-async fn prepare_update(
-    client: &reqwest::Client,
+pub async fn fetch_server_relay_package(
+    manifest_url: &str,
+    server_info_url: &str,
+    expected_target: &str,
+) -> Result<Option<RelayPackage>> {
+    let client = http_client()?;
+    let manifest = fetch_manifest(&client, manifest_url).await?;
+    let server = client
+        .get(server_info_url)
+        .send()
+        .await
+        .context("query server build before relaying update")?
+        .error_for_status()
+        .context("server build query returned an error")?
+        .json::<ServerBuildInfo>()
+        .await
+        .context("decode server build information")?;
+    if server.build_sha == manifest.commit_sha {
+        return Ok(None);
+    }
+    if manifest.server.target != expected_target {
+        bail!(
+            "relay target mismatch: expected {}, got {}",
+            expected_target,
+            manifest.server.target
+        );
+    }
+    let archive = download_archive(&client, &manifest.server).await?;
+    Ok(Some(RelayPackage {
+        commit_sha: manifest.commit_sha,
+        archive_sha256: manifest.server.sha256,
+        archive,
+    }))
+}
+
+pub async fn prepare_relayed_update(
     config: &UpdateConfig,
+    commit_sha: &str,
+    archive_sha256: &str,
+    archive: &[u8],
 ) -> Result<Option<PreparedUpdate>> {
+    if config.role != UpdateRole::Server {
+        bail!("relayed updates are only accepted for the server role");
+    }
+    validate_commit_sha(commit_sha)?;
+    validate_digest(archive_sha256)?;
+    if commit_sha == build_sha() {
+        return Ok(None);
+    }
+    verify_archive(archive, archive_sha256)?;
+    Ok(Some(stage_update(config, commit_sha, archive).await?))
+}
+
+fn http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent(format!("nuntius-updater/{}", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::limited(8))
+        .build()?)
+}
+
+async fn fetch_manifest(client: &reqwest::Client, manifest_url: &str) -> Result<UpdateManifest> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let separator = if config.manifest_url.contains('?') {
-        '&'
-    } else {
-        '?'
-    };
-    let manifest_url = format!("{}{separator}nonce={nonce}", config.manifest_url);
+    let separator = if manifest_url.contains('?') { '&' } else { '?' };
+    let url = format!("{manifest_url}{separator}nonce={nonce}");
     let manifest = client
-        .get(&manifest_url)
+        .get(url)
         .header(reqwest::header::CACHE_CONTROL, "no-cache")
         .send()
         .await
@@ -199,6 +261,14 @@ async fn prepare_update(
         .await
         .context("decode update manifest")?;
     validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+async fn prepare_update(
+    client: &reqwest::Client,
+    config: &UpdateConfig,
+) -> Result<Option<PreparedUpdate>> {
+    let manifest = fetch_manifest(client, &config.manifest_url).await?;
 
     if manifest.commit_sha == build_sha() {
         return Ok(None);
@@ -233,6 +303,13 @@ async fn prepare_update(
         );
     }
 
+    let archive = download_archive(client, asset).await?;
+    Ok(Some(
+        stage_update(config, &manifest.commit_sha, &archive).await?,
+    ))
+}
+
+async fn download_archive(client: &reqwest::Client, asset: &ManifestAsset) -> Result<Vec<u8>> {
     let response = client
         .get(&asset.url)
         .header(reqwest::header::CACHE_CONTROL, "no-cache")
@@ -244,32 +321,47 @@ async fn prepare_update(
     if response.content_length().unwrap_or(0) > MAX_ARCHIVE_BYTES as u64 {
         bail!("update archive exceeds size limit");
     }
-    let archive = response.bytes().await.context("read update archive")?;
-    if archive.len() > MAX_ARCHIVE_BYTES {
-        bail!("update archive exceeds size limit");
+    let archive = response
+        .bytes()
+        .await
+        .context("read update archive")?
+        .to_vec();
+    verify_archive(&archive, &asset.sha256)?;
+    Ok(archive)
+}
+
+fn verify_archive(archive: &[u8], expected_digest: &str) -> Result<()> {
+    if archive.is_empty() || archive.len() > MAX_ARCHIVE_BYTES {
+        bail!("update archive has an invalid size");
     }
-    let actual_digest = hex::encode(Sha256::digest(&archive));
-    if actual_digest != asset.sha256 {
+    let actual_digest = hex::encode(Sha256::digest(archive));
+    if actual_digest != expected_digest {
         bail!(
             "update archive checksum mismatch: expected {}, got {}",
-            asset.sha256,
+            expected_digest,
             actual_digest
         );
     }
+    Ok(())
+}
+
+async fn stage_update(
+    config: &UpdateConfig,
+    commit_sha: &str,
+    archive: &[u8],
+) -> Result<PreparedUpdate> {
+    let stage_guard = STAGE_UPDATE_LOCK.clone().lock_owned().await;
     let binary = extract_binary(&archive, &config.binary_name)?;
     let executable_path = std::env::current_exe().context("resolve current executable")?;
     let directory = executable_path
         .parent()
         .context("current executable has no parent directory")?;
-    let staged_path = directory.join(format!(
-        ".{}.update-{}",
-        config.binary_name, manifest.commit_sha
-    ));
+    let staged_path = directory.join(format!(".{}.update-{}", config.binary_name, commit_sha));
     write_executable(&staged_path, &binary)?;
     probe_binary(
         &staged_path,
         &config.binary_name,
-        &manifest.commit_sha,
+        commit_sha,
         &config.expected_target,
     )
     .await
@@ -278,14 +370,15 @@ async fn prepare_update(
     })?;
 
     let previous_path = directory.join(format!("{}.previous", config.binary_name));
-    Ok(Some(PreparedUpdate {
+    Ok(PreparedUpdate {
+        _stage_guard: stage_guard,
         staged_path,
         executable_path,
         previous_path,
         marker_path: marker_path(&config.data_dir),
         from_sha: build_sha().into(),
-        to_sha: manifest.commit_sha,
-    }))
+        to_sha: commit_sha.to_owned(),
+    })
 }
 
 fn validate_manifest(manifest: &UpdateManifest) -> Result<()> {
@@ -295,24 +388,29 @@ fn validate_manifest(manifest: &UpdateManifest) -> Result<()> {
             manifest.schema_version
         );
     }
-    if manifest.commit_sha.len() != 40
-        || !manifest
-            .commit_sha
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        bail!("invalid update commit SHA");
-    }
+    validate_commit_sha(&manifest.commit_sha)?;
     for asset in [&manifest.server, &manifest.client] {
-        if asset.sha256.len() != 64 || !asset.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            bail!("invalid update archive SHA-256");
-        }
+        validate_digest(&asset.sha256)?;
         if !asset
             .url
             .starts_with("https://github.com/HelloAnner/nuntius/")
         {
             bail!("update asset URL is outside the trusted repository");
         }
+    }
+    Ok(())
+}
+
+fn validate_commit_sha(value: &str) -> Result<()> {
+    if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("invalid update commit SHA");
+    }
+    Ok(())
+}
+
+fn validate_digest(value: &str) -> Result<()> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("invalid update archive SHA-256");
     }
     Ok(())
 }
@@ -628,5 +726,24 @@ mod tests {
             },
         };
         assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_relay_archive_with_wrong_digest() {
+        let config = UpdateConfig::production(
+            UpdateRole::Server,
+            "nuntius-server",
+            "x86_64-unknown-linux-gnu",
+            PathBuf::from("/tmp/nuntius-updater-test"),
+            Duration::from_secs(60),
+        );
+        let result = prepare_relayed_update(
+            &config,
+            &"a".repeat(40),
+            &"b".repeat(64),
+            b"not the expected archive",
+        )
+        .await;
+        assert!(result.is_err());
     }
 }

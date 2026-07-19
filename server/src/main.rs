@@ -7,6 +7,7 @@ mod event_hub;
 mod protocol;
 mod store;
 mod tunnel;
+mod update_relay;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -41,6 +42,14 @@ enum Command {
     Serve,
     Backup,
     BuildInfo,
+    ReceiveUpdate {
+        #[arg(long)]
+        commit_sha: String,
+        #[arg(long)]
+        archive_sha256: String,
+        #[arg(long)]
+        source_device_id: String,
+    },
 }
 
 #[derive(Clone)]
@@ -96,6 +105,14 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+        Command::ReceiveUpdate {
+            commit_sha,
+            archive_sha256,
+            source_device_id,
+        } => {
+            let data_dir = required_data_dir(cli.data_dir)?;
+            update_relay::receive(&data_dir, commit_sha, archive_sha256, source_device_id).await
+        }
     }
 }
 
@@ -126,6 +143,7 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
     let store = ServerStore::open(&data_dir)
         .await
         .context("open server SQLite")?;
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(1);
     let state = AppState {
         config: Arc::new(config.clone()),
         data_dir: Arc::new(data_dir.clone()),
@@ -158,7 +176,6 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
         }
     });
     tracing::info!(bind=%config.bind,public_base_url=%config.public_base_url,secure=config.is_secure(),"nuntius server listening");
-    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(1);
     let update_task = config.auto_update.then(|| {
         nuntius_updater::spawn_update_loop(
             UpdateConfig::production(
@@ -168,9 +185,12 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
                 data_dir.clone(),
                 Duration::from_secs(config.update_interval_seconds),
             ),
-            update_tx,
+            update_tx.clone(),
         )
     });
+    let update_relay_task = config
+        .auto_update
+        .then(|| update_relay::spawn(data_dir.clone(), Duration::from_secs(5), update_tx));
     let (graceful_tx, graceful_rx) = tokio::sync::oneshot::channel();
     let mut graceful_tx = Some(graceful_tx);
     let server = std::future::IntoFuture::into_future(
@@ -188,13 +208,16 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
             if let Some(tx) = graceful_tx.take() { let _ = tx.send(()); }
             (&mut server).await?;
         }
-        update = update_rx.recv(), if update_task.is_some() => {
+        update = update_rx.recv(), if config.auto_update => {
             prepared_update = update;
             if let Some(tx) = graceful_tx.take() { let _ = tx.send(()); }
             (&mut server).await?;
         }
     }
     if let Some(task) = update_task {
+        task.abort();
+    }
+    if let Some(task) = update_relay_task {
         task.abort();
     }
     health_marker_task.abort();
@@ -210,8 +233,9 @@ fn init_tracing(
     config: &ServerConfig,
     data_dir: &std::path::Path,
 ) -> tracing_appender::non_blocking::WorkerGuard {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("nuntius_server=info,tower_http=info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("nuntius_server=info,nuntius_updater=info,tower_http=info")
+    });
     let appender = tracing_appender::rolling::never(data_dir.join("logs"), "nuntius-server.log");
     let (writer, guard) = tracing_appender::non_blocking(appender);
     if config.log_format == "json" {

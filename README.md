@@ -92,6 +92,25 @@ auto_update = true
 update_interval_seconds = 60 # Client 默认是 300
 ```
 
+如果 Server 不能直接访问 GitHub，可以只把一个已配对的 Client 指定为 Server
+更新中继。该 Client 仍按 `update_interval_seconds` 检查滚动通道，在确认 Server
+版本落后后下载并校验 Linux 产物，再通过配置的 SSH 连接投递给 Server：
+
+```toml
+# 仅在负责中继的 Client 上开启；其他 Client 保持 false。
+server_update_relay = true
+server_update_ssh_command = ["ssh", "moss-dev"]
+server_update_remote_binary = "/var/docker/mysql/nuntius/bin/nuntius-server"
+server_update_remote_data_dir = "/var/docker/mysql/nuntius/data"
+```
+
+SSH 命令按参数数组直接执行，不经过本地 shell，因此也可以加入 `-p`、`-i`、
+`ProxyJump` 等 OpenSSH 参数。连接必须能免交互执行远端二进制；SSH 登录权限就是
+中继的授权边界。Client 会把归档写入远端 Server 数据目录的更新收件箱，运行中的
+Server 每 5 秒读取一次，并再次校验 SHA-256、目标架构和二进制内嵌的 commit 身份，
+随后自行平滑退出、替换和重启。这个流程不需要服务器上的更新脚本。第一次启用时
+需要人工部署一次包含 `receive-update` 子命令的新 Server，之后即可自动滚动。
+
 远程控制页（`server/frontend`）面向手机、平板和桌面，相关设计系统、
 协议类型、SSE 归并器和消息组件全部收在该项目内部。Client 本地页将按
 本地 API 单独实现，不建立跨项目的前端源码依赖。

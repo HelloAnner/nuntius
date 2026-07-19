@@ -10,6 +10,7 @@ mod pairing;
 mod protocol;
 mod store;
 mod tunnel;
+mod update_relay;
 
 use anyhow::{Context, Result, bail};
 use app_server::AppServerRuntime;
@@ -212,6 +213,9 @@ async fn run() -> Result<()> {
             .ok();
         nuntius_updater::spawn_update_loop(update, update_tx)
     });
+    let update_relay_task = cfg
+        .server_update_relay
+        .then(|| update_relay::spawn(cfg.clone()));
     let (graceful_tx, graceful_rx) = tokio::sync::oneshot::channel();
     let mut graceful_tx = Some(graceful_tx);
     let server = std::future::IntoFuture::into_future(
@@ -236,6 +240,9 @@ async fn run() -> Result<()> {
         }
     }
     if let Some(task) = update_task {
+        task.abort();
+    }
+    if let Some(task) = update_relay_task {
         task.abort();
     }
     health_marker_task.abort();
@@ -390,8 +397,9 @@ fn process_alive(_pid: u32) -> bool {
 }
 
 fn init_tracing(config: &ClientConfig) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("nuntius_client=info,tower_http=info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("nuntius_client=info,nuntius_updater=info,tower_http=info")
+    });
     if config.log_format == "json" {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
