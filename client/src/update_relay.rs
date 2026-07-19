@@ -81,6 +81,10 @@ async fn upload(config: &ClientConfig, package: RelayPackage) -> Result<()> {
                 .await
                 .context("stream server update archive over SSH")?;
             stdin.shutdown().await.context("finish SSH update input")?;
+            // ChildStdin::shutdown flushes the writer, but keeping the handle alive
+            // while waiting for the SSH process can keep the remote stdin channel
+            // open. Drop it explicitly so receive-update observes EOF immediately.
+            drop(stdin);
             child
                 .wait_with_output()
                 .await
