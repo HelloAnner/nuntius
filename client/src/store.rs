@@ -94,23 +94,35 @@ impl ClientStore {
             .await?;
         Ok(())
     }
-    pub async fn recover_process_state(&self) -> Result<()> {
+    pub async fn recover_process_state(&self) -> Result<Vec<String>> {
         let stamp = now();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // Preserve every conversation that may still be executing. `unknown`
+        // with an in-progress turn covers clients upgraded from the previous
+        // restart behavior, which changed only the thread status.
+        let recovery_threads = sqlx::query_scalar(
+            "SELECT t.id FROM threads t WHERE t.status IN ('active','recovering') OR (t.status='unknown' AND EXISTS(SELECT 1 FROM turns r WHERE r.thread_id=t.id AND r.status IN ('active','running','inProgress'))) ORDER BY t.id",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
         sqlx::query(
             "UPDATE pending_app_requests SET status='unknown',decided_at=? WHERE status IN ('pending','responding')",
         )
         .bind(&stamp)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE threads SET status='unknown',updated_at=? WHERE status='active'")
+        sqlx::query(
+            "UPDATE threads SET status='recovering',updated_at=? WHERE status IN ('active','recovering') OR (status='unknown' AND EXISTS(SELECT 1 FROM turns r WHERE r.thread_id=threads.id AND r.status IN ('active','running','inProgress')))",
+        )
             .bind(&stamp)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE command_inbox SET status='unknown',completed_at=?,error_code='execution_state_unknown_after_restart',error_message='客户端重启，无法确认命令是否已经执行' WHERE status='applying'")
             .bind(&stamp)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
-        Ok(())
+        tx.commit().await?;
+        Ok(recovery_threads)
     }
     pub async fn pending_approval_count(&self) -> Result<i64> {
         Ok(
@@ -238,7 +250,7 @@ impl ClientStore {
             bail!("系统项目不能删除");
         }
         let active_threads: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM threads WHERE project_id=? AND status='active'",
+            "SELECT COUNT(*) FROM threads WHERE project_id=? AND status IN ('active','recovering')",
         )
         .bind(id)
         .fetch_one(&mut *tx)
@@ -422,6 +434,15 @@ impl ClientStore {
         sqlx::query("UPDATE threads SET status=?,last_activity_at=?,updated_at=? WHERE id=?")
             .bind(status)
             .bind(now())
+            .bind(now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+    pub async fn set_thread_status(&self, id: &str, status: &str) -> Result<()> {
+        sqlx::query("UPDATE threads SET status=?,updated_at=? WHERE id=?")
+            .bind(status)
             .bind(now())
             .bind(id)
             .execute(&self.pool)
@@ -1161,9 +1182,11 @@ impl ClientStore {
         )
         .fetch_one(&self.pool)
         .await?;
-        let active = sqlx::query_scalar("SELECT COUNT(*) FROM threads WHERE status='active'")
-            .fetch_one(&self.pool)
-            .await?;
+        let active = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM threads WHERE status IN ('active','recovering')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
         Ok((projects, inbox, outbox, active))
     }
 }
@@ -1415,6 +1438,59 @@ mod tests {
 
         let unassigned = store.ensure_unassigned_project("dev_test").await.unwrap();
         assert!(store.remove_project(&unassigned).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn process_recovery_preserves_running_thread_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_recovery", "Recovery", &workspace, &json!({}))
+            .await
+            .unwrap();
+        for (local_id, app_id, turn_id) in [
+            ("thr_active", "app_active", "turn_active"),
+            ("thr_legacy", "app_legacy", "turn_legacy"),
+        ] {
+            store
+                .create_thread(local_id, "prj_recovery", app_id, "Recover me", &json!({}))
+                .await
+                .unwrap();
+            store
+                .mark_app_turn_started(local_id, Some(turn_id))
+                .await
+                .unwrap();
+        }
+        // Previous releases changed only the thread to `unknown`, leaving the
+        // active turn behind. Upgrades must recover that legacy state too.
+        store
+            .set_thread_status("thr_legacy", "unknown")
+            .await
+            .unwrap();
+
+        let candidates = store.recover_process_state().await.unwrap();
+        assert_eq!(candidates, vec!["thr_active", "thr_legacy"]);
+        for thread_id in candidates {
+            assert_eq!(
+                store
+                    .thread(thread_id, "dev_test")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "recovering"
+            );
+            let completed_at: Option<String> = sqlx::query_scalar(
+                "SELECT completed_at FROM turns WHERE thread_id=? ORDER BY ordinal DESC LIMIT 1",
+            )
+            .bind(thread_id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+            assert!(completed_at.is_none());
+        }
     }
 
     #[tokio::test]

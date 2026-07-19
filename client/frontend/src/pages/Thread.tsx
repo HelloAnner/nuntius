@@ -111,15 +111,18 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
   // SQLite is authoritative. Live events render output but never manufacture
   // the execution state shown to the user.
   const running = thread?.status === "active";
+  const recovering = thread?.status === "recovering";
 
-  const canSend = Boolean(appRunning && !archived && thread);
+  const canSend = Boolean(appRunning && !archived && !recovering && thread);
   const lockedReason = !thread
     ? "会话加载中…"
     : archived
       ? "已归档"
       : !appRunning
         ? "Codex App Server 未运行"
-        : null;
+        : recovering
+          ? "正在恢复运行连接…"
+          : null;
 
   const send = async (text: string) => {
     const provisionalId = `pending:${newIdemKey()}`;

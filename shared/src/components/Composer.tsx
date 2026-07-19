@@ -107,6 +107,9 @@ function RuntimeStatus({ status, connected }: { status: string | null; connected
   } else if (status === "active") {
     tone = "running";
     label = "正在运行";
+  } else if (status === "recovering") {
+    tone = "syncing";
+    label = "正在恢复运行连接";
   } else if (status === "unknown" || status === "systemError") {
     tone = "warning";
     label = status === "systemError" ? "运行服务异常" : "状态待确认";
