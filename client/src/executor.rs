@@ -611,7 +611,6 @@ impl CommandExecutor {
             .import_app_history(&local_thread, app_thread)
             .await?;
         self.sync_thread(&local_thread).await?;
-        self.emit_thread_summary(&local_thread).await?;
         self.store
             .state_set(
                 &thread_fingerprint_key(app_id),
@@ -629,6 +628,7 @@ impl CommandExecutor {
             )
             .await?;
         }
+        self.emit_thread_summary(&local_thread).await?;
         Ok(())
     }
     pub async fn discover_project(&self, project_id: &str) -> Result<usize> {
