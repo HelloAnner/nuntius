@@ -59,7 +59,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Restore embedded frontends
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist-${{ github.sha }}
           path: .
@@ -83,7 +83,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Restore embedded frontends
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist-${{ github.sha }}
           path: .
@@ -163,7 +163,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Restore embedded frontends
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: frontend-dist-${{ github.sha }}
           path: .
@@ -226,13 +226,13 @@ jobs:
 
     steps:
       - name: Download server artifact
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: nuntius-server-linux-x86_64-${{ github.sha }}
           path: release
 
       - name: Download client artifact
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: nuntius-client-macos-arm64-${{ github.sha }}
           path: release
