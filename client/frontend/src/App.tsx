@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ToastHost, useTheme } from "@nuntius/shared";
 import { startEvents } from "./events";
+import { useArchiveOutboxRunner } from "./archiveOutbox";
 import { useRoute, useThemeStore } from "./stores";
 import { NavRail, TabBar } from "./components";
 import { OverviewPage } from "./pages/Overview";
@@ -16,6 +17,7 @@ function Boot() {
   const qc = useQueryClient();
   const theme = useThemeStore((s) => s.theme);
   useTheme(theme);
+  useArchiveOutboxRunner();
 
   useEffect(() => startEvents(qc), [qc]);
 

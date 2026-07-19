@@ -1049,7 +1049,15 @@ async fn enqueue(
         .ok_or_else(|| ApiError::BadRequest("Idempotency-Key header is required".into()))?;
     validate_device_command(&kind)?;
     let issued = now();
-    let expiry = OffsetDateTime::now_utc() + Duration::minutes(5);
+    // Archive is an idempotent desired-state operation. Keep it durable long enough to
+    // survive a device restart; interactive commands retain their short safety window.
+    let can_wait_for_device = matches!(&kind, DeviceCommandKind::ThreadArchive { .. });
+    let expiry = OffsetDateTime::now_utc()
+        + if can_wait_for_device {
+            Duration::hours(24)
+        } else {
+            Duration::minutes(5)
+        };
     let command_id = new_id("cmd");
     let command = DeviceCommand {
         command_id: command_id.clone(),
@@ -1081,8 +1089,9 @@ async fn enqueue(
     let stored = if let Some(stored) = existing {
         stored
     } else {
-        // Reject a new side effect when the device is already unavailable. Once the
-        // durable insert commits, a racing disconnect is recovered by tunnel replay.
+        // Idempotent desired-state commands may be accepted while the device is offline;
+        // the durable command log replays them when its tunnel reconnects. Commands whose
+        // outcome cannot be safely repeated still require a live device at acceptance.
         if !state
             .store
             .device_is_active_for_user(&session.user_id, &device_id)
@@ -1090,7 +1099,7 @@ async fn enqueue(
         {
             return Err(ApiError::NotFound);
         }
-        if !state.tunnels.is_online(&device_id).await {
+        if !can_wait_for_device && !state.tunnels.is_online(&device_id).await {
             return Err(ApiError::DeviceOffline);
         }
         state
@@ -1105,6 +1114,7 @@ async fn enqueue(
             .await
             .map_err(|e| ApiError::Conflict(e.to_string()))?
     };
+    let mut receipt_status = stored.status;
     if stored.newly_created {
         state
             .store
@@ -1124,6 +1134,8 @@ async fn enqueue(
                     },
                 )
                 .await;
+        } else {
+            receipt_status = CommandStatus::WaitingDevice;
         }
     }
     let command_id = stored.command.command_id.clone();
@@ -1131,7 +1143,7 @@ async fn enqueue(
         StatusCode::ACCEPTED,
         Json(CommandReceipt {
             command_id: command_id.clone(),
-            status: stored.status,
+            status: receipt_status,
             accepted_at: stored.command.issued_at,
             status_url: format!("/api/v1/commands/{command_id}"),
         }),

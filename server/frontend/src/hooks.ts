@@ -1,10 +1,13 @@
 /* misc hooks */
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useToast, type ThreadSummary } from "@nuntius/shared";
-import { api } from "./api";
-import { trackCommand, waitForCommand } from "./events";
-import { useRoute, type Route } from "./stores";
+import { useToast } from "@nuntius/shared";
+import {
+  queueArchive,
+  submitArchive,
+  usePendingArchiveIds,
+} from "./archiveOutbox";
+import { useRoute, useSession, type Route } from "./stores";
 
 export function useNavigate() {
   const navigate = useRoute((s) => s.navigate);
@@ -29,43 +32,16 @@ export function useMedia(query: string): boolean {
 export function useArchiveThreadAction() {
   const qc = useQueryClient();
   const toast = useToast();
-  const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
+  const userId = useSession((state) => state.session?.userId);
+  const busyIds = usePendingArchiveIds(userId);
 
   const archive = useCallback(
     async (threadId: string) => {
-      if (busyIds.has(threadId)) return false;
-      setBusyIds((old) => new Set(old).add(threadId));
-      try {
-        const receipt = await api.archiveThread(threadId, true);
-        const update = (old: ThreadSummary[] | undefined) =>
-          old?.filter((thread) => thread.id !== threadId);
-        qc.setQueriesData<ThreadSummary[]>({ queryKey: ["projectThreads"] }, update);
-        qc.setQueryData<ThreadSummary[]>(["allThreads"], update);
-        trackCommand(qc, receipt.commandId, threadId, "thread.archive");
-        await waitForCommand(receipt.commandId);
-        await Promise.all([
-          qc.invalidateQueries({ queryKey: ["projectThreads"] }),
-          qc.invalidateQueries({ queryKey: ["allThreads"] }),
-          qc.invalidateQueries({ queryKey: ["devices"] }),
-        ]);
-        toast("会话已归档");
-        return true;
-      } catch (error) {
-        await Promise.all([
-          qc.invalidateQueries({ queryKey: ["projectThreads"] }),
-          qc.invalidateQueries({ queryKey: ["allThreads"] }),
-        ]);
-        toast(error instanceof Error ? error.message : "归档失败，请重试", { error: true });
-        return false;
-      } finally {
-        setBusyIds((old) => {
-          const next = new Set(old);
-          next.delete(threadId);
-          return next;
-        });
-      }
+      if (!userId || busyIds.has(threadId)) return false;
+      queueArchive(userId, threadId);
+      return (await submitArchive(userId, threadId, qc, toast, true)) !== "failed";
     },
-    [busyIds, qc, toast],
+    [busyIds, qc, toast, userId],
   );
 
   return { archive, busyIds };

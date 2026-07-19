@@ -208,9 +208,10 @@ paths:
   /threads/{threadId}/archive:
     post:
       operationId: setThreadArchived
+      description: 归档是可重复的目标状态操作；设备离线时仍会持久化排队，并在重连后自动执行。
       parameters: [{$ref: '#/components/parameters/ThreadId'}, {$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody: {required: true, content: {application/json: {schema: {type: object, required: [archived], properties: {archived: {type: boolean}}}}}}
-      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}}
   /threads/{threadId}/history-sync:
     post:
       operationId: syncThreadHistory

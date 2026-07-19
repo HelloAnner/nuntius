@@ -129,8 +129,8 @@ export const api = {
     req<CommandReceipt>("POST", `/threads/${threadId}/steer`, { text }, { idemKey }),
   interruptTurn: (threadId: string) =>
     req<CommandReceipt>("POST", `/threads/${threadId}/interrupt`),
-  archiveThread: (threadId: string, archived = true) =>
-    req<CommandReceipt>("POST", `/threads/${threadId}/archive`, { archived }),
+  archiveThread: (threadId: string, archived = true, idemKey?: string) =>
+    req<CommandReceipt>("POST", `/threads/${threadId}/archive`, { archived }, { idemKey }),
 
   decideApproval: (deviceId: string, approvalId: string, decision: string, idemKey: string) =>
     req<CommandReceipt>(

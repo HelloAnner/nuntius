@@ -106,6 +106,11 @@ impl ClientStore {
             .bind(&stamp)
             .execute(&self.pool)
             .await?;
+        // Archive expresses an idempotent desired state, so it is safe to run again after
+        // a process restart. Other applying commands retain the conservative unknown state.
+        sqlx::query("UPDATE command_inbox SET status='accepted',started_at=NULL,completed_at=NULL,error_code=NULL,error_message=NULL WHERE status='applying' AND json_extract(payload,'$.command.kind')='thread_archive'")
+            .execute(&self.pool)
+            .await?;
         sqlx::query("UPDATE command_inbox SET status='unknown',completed_at=?,error_code='execution_state_unknown_after_restart',error_message='客户端重启，无法确认命令是否已经执行' WHERE status='applying'")
             .bind(&stamp)
             .execute(&self.pool)
@@ -1701,6 +1706,31 @@ mod tests {
         assert_eq!(
             store.inbox("cmd_uncertain").await.unwrap().unwrap().status,
             "unknown"
+        );
+
+        let retryable_archive = DeviceCommand {
+            command_id: "cmd_retryable_archive".into(),
+            thread_id: Some("thr_test".into()),
+            command: DeviceCommandKind::ThreadArchive {
+                thread_id: "thr_test".into(),
+                archived: true,
+            },
+            ..command.clone()
+        };
+        store
+            .receive_command("epoch_test", 3, "thread:thr_test", 2, &retryable_archive)
+            .await
+            .unwrap();
+        assert!(store.start_command("cmd_retryable_archive").await.unwrap());
+        store.recover_process_state().await.unwrap();
+        assert_eq!(
+            store
+                .inbox("cmd_retryable_archive")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "accepted"
         );
 
         store
