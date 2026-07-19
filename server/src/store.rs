@@ -6,12 +6,13 @@ use sqlx::{
     ConnectOptions, Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
-use std::{path::Path, str::FromStr};
+use std::{path::Path, str::FromStr, sync::Arc};
 use time::{Duration, OffsetDateTime};
 
 #[derive(Clone)]
 pub struct ServerStore {
     pool: SqlitePool,
+    queue_epoch: Arc<str>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +41,7 @@ pub struct DeviceAuthRecord {
 
 #[derive(Debug, Clone)]
 pub struct StoredCommand {
+    pub queue_epoch: String,
     pub sequence: i64,
     pub command: DeviceCommand,
     pub status: CommandStatus,
@@ -62,6 +64,27 @@ impl ServerStore {
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
+        let queue_epoch = match sqlx::query_scalar::<_, String>(
+            "SELECT value FROM server_runtime_state WHERE key='command_queue_epoch'",
+        )
+        .fetch_optional(&pool)
+        .await?
+        {
+            Some(value) => value,
+            None => {
+                let value = new_id("queue");
+                sqlx::query("INSERT INTO server_runtime_state(key,value,updated_at) VALUES('command_queue_epoch',?,?)")
+                    .bind(&value)
+                    .bind(now())
+                    .execute(&pool)
+                    .await?;
+                value
+            }
+        };
+        sqlx::query("UPDATE commands SET queue_epoch=? WHERE queue_epoch='legacy'")
+            .bind(&queue_epoch)
+            .execute(&pool)
+            .await?;
         crate::config::set_private_file_permissions(&path)?;
         for suffix in ["-wal", "-shm"] {
             let sidecar = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
@@ -69,11 +92,18 @@ impl ServerStore {
                 crate::config::set_private_file_permissions(&sidecar)?;
             }
         }
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            queue_epoch: queue_epoch.into(),
+        })
     }
 
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    pub fn queue_epoch(&self) -> &str {
+        &self.queue_epoch
     }
 
     pub async fn ready(&self) -> Result<()> {
@@ -675,12 +705,12 @@ impl ServerStore {
         let payload = serde_json::to_string(command)?;
         let kind = command.command.name();
         let mut tx = self.pool.begin().await?;
-        if let Some(row) = sqlx::query("SELECT server_sequence,payload,status,request_fingerprint FROM commands WHERE user_id=? AND device_id=? AND idempotency_key=?")
+        if let Some(row) = sqlx::query("SELECT queue_epoch,server_sequence,payload,status,request_fingerprint FROM commands WHERE user_id=? AND device_id=? AND idempotency_key=?")
             .bind(user_id).bind(&command.device_id).bind(idempotency_key).fetch_optional(&mut *tx).await? {
             let existing_fingerprint: String = row.get("request_fingerprint");
             if existing_fingerprint != fingerprint { bail!("idempotency key reused with different request"); }
             let stored: DeviceCommand = serde_json::from_str(&row.get::<String,_>("payload"))?;
-            return Ok(StoredCommand { sequence: row.get("server_sequence"), command: stored, status: parse_command_status(&row.get::<String,_>("status")), newly_created: false });
+            return Ok(StoredCommand { queue_epoch: row.get("queue_epoch"), sequence: row.get("server_sequence"), command: stored, status: parse_command_status(&row.get::<String,_>("status")), newly_created: false });
         }
         if let DeviceCommandKind::ApprovalDecide { approval_id, .. } = &command.command {
             let claimed = sqlx::query("UPDATE approvals SET status='responding' WHERE id=? AND user_id=? AND device_id=? AND status='pending'")
@@ -691,12 +721,13 @@ impl ServerStore {
         }
         let sequence: i64 = sqlx::query_scalar("INSERT INTO device_command_sequences(device_id,next_sequence) VALUES(?,2) ON CONFLICT(device_id) DO UPDATE SET next_sequence=device_command_sequences.next_sequence+1 RETURNING next_sequence-1")
             .bind(&command.device_id).fetch_one(&mut *tx).await?;
-        sqlx::query("INSERT INTO commands(id,user_id,device_id,project_id,thread_id,kind,payload,idempotency_key,request_fingerprint,server_sequence,status,accepted_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?, 'accepted',?,?)")
+        sqlx::query("INSERT INTO commands(id,user_id,device_id,project_id,thread_id,kind,payload,idempotency_key,request_fingerprint,queue_epoch,server_sequence,status,accepted_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?, 'accepted',?,?)")
             .bind(&command.command_id).bind(user_id).bind(&command.device_id).bind(&command.project_id).bind(&command.thread_id)
-            .bind(kind).bind(payload).bind(idempotency_key).bind(fingerprint).bind(sequence).bind(&command.issued_at).bind(expires_at_unix)
+            .bind(kind).bind(payload).bind(idempotency_key).bind(fingerprint).bind(self.queue_epoch()).bind(sequence).bind(&command.issued_at).bind(expires_at_unix)
             .execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(StoredCommand {
+            queue_epoch: self.queue_epoch().into(),
             sequence,
             command: command.clone(),
             status: CommandStatus::Accepted,
@@ -711,13 +742,14 @@ impl ServerStore {
         idempotency_key: &str,
         fingerprint: &str,
     ) -> Result<Option<StoredCommand>> {
-        let row = sqlx::query("SELECT server_sequence,payload,status,request_fingerprint FROM commands WHERE user_id=? AND device_id=? AND idempotency_key=?")
+        let row = sqlx::query("SELECT queue_epoch,server_sequence,payload,status,request_fingerprint FROM commands WHERE user_id=? AND device_id=? AND idempotency_key=?")
             .bind(user_id).bind(device_id).bind(idempotency_key).fetch_optional(&self.pool).await?;
         row.map(|row| {
             if row.get::<String, _>("request_fingerprint") != fingerprint {
                 bail!("idempotency key reused with different request");
             }
             Ok(StoredCommand {
+                queue_epoch: row.get("queue_epoch"),
                 sequence: row.get("server_sequence"),
                 command: serde_json::from_str(&row.get::<String, _>("payload"))?,
                 status: parse_command_status(&row.get::<String, _>("status")),
@@ -740,12 +772,13 @@ impl ServerStore {
         expire_approval_payloads(&mut tx, expired).await?;
         // Replay every non-terminal command. A maximum sequence cannot represent holes when
         // commands complete out of order.
-        let rows = sqlx::query("SELECT server_sequence,payload,status FROM commands WHERE device_id=? AND status IN ('accepted','waiting_device','device_accepted','applying') ORDER BY server_sequence LIMIT ?")
+        let rows = sqlx::query("SELECT queue_epoch,server_sequence,payload,status FROM commands WHERE device_id=? AND status IN ('accepted','waiting_device','device_accepted','applying') ORDER BY server_sequence LIMIT ?")
             .bind(device_id).bind(limit).fetch_all(&mut *tx).await?;
         tx.commit().await?;
         rows.into_iter()
             .map(|r| {
                 Ok(StoredCommand {
+                    queue_epoch: r.get("queue_epoch"),
                     sequence: r.get("server_sequence"),
                     command: serde_json::from_str(&r.get::<String, _>("payload"))?,
                     status: parse_command_status(&r.get::<String, _>("status")),
@@ -770,6 +803,7 @@ impl ServerStore {
         stage: &str,
         result: Option<&Value>,
         error_code: Option<&str>,
+        error_message: Option<&str>,
     ) -> Result<CommandStatus> {
         let incoming = match stage {
             "persisted" => CommandStatus::DeviceAccepted,
@@ -815,8 +849,8 @@ impl ServerStore {
                 | CommandStatus::Expired
         );
         let result_json = result.map(serde_json::to_string).transpose()?;
-        sqlx::query("UPDATE commands SET status=?,device_accepted_at=CASE WHEN ?='device_accepted' THEN COALESCE(device_accepted_at,?) ELSE device_accepted_at END,completed_at=CASE WHEN ? THEN ? ELSE completed_at END,result=COALESCE(?,result),error_code=COALESCE(?,error_code) WHERE id=? AND device_id=?")
-            .bind(incoming.as_str()).bind(incoming.as_str()).bind(now()).bind(terminal).bind(now()).bind(result_json).bind(error_code).bind(command_id).bind(device_id)
+        sqlx::query("UPDATE commands SET status=?,device_accepted_at=CASE WHEN ?='device_accepted' THEN COALESCE(device_accepted_at,?) ELSE device_accepted_at END,completed_at=CASE WHEN ? THEN ? ELSE completed_at END,result=COALESCE(?,result),error_code=COALESCE(?,error_code),error_message=COALESCE(?,error_message) WHERE id=? AND device_id=?")
+            .bind(incoming.as_str()).bind(incoming.as_str()).bind(now()).bind(terminal).bind(now()).bind(result_json).bind(error_code).bind(error_message).bind(command_id).bind(device_id)
             .execute(&mut *tx).await?;
         if terminal
             && let DeviceCommandKind::ApprovalDecide {
@@ -847,7 +881,7 @@ impl ServerStore {
         user_id: &str,
         command_id: &str,
     ) -> Result<Option<CommandView>> {
-        let row = sqlx::query("SELECT id,device_id,status,kind,accepted_at,completed_at,error_code,result FROM commands WHERE id=? AND user_id=?")
+        let row = sqlx::query("SELECT id,device_id,status,kind,accepted_at,completed_at,error_code,error_message,result FROM commands WHERE id=? AND user_id=?")
             .bind(command_id).bind(user_id).fetch_optional(&self.pool).await?;
         Ok(row.map(|r| CommandView {
             id: r.get("id"),
@@ -857,6 +891,7 @@ impl ServerStore {
             accepted_at: r.get("accepted_at"),
             completed_at: r.get("completed_at"),
             error_code: r.get("error_code"),
+            error_message: r.get("error_message"),
             result: r
                 .get::<Option<String>, _>("result")
                 .and_then(|s| serde_json::from_str(&s).ok()),
@@ -1374,7 +1409,7 @@ mod tests {
     #[tokio::test]
     async fn web_session_survives_store_reopen() {
         let temp = tempfile::tempdir().unwrap();
-        let session_id = {
+        let (session_id, queue_epoch) = {
             let store = ServerStore::open(temp.path()).await.unwrap();
             let user = store.create_owner("owner", "test-hash").await.unwrap();
             let (session_id, _) = store
@@ -1387,10 +1422,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            session_id
+            (session_id, store.queue_epoch().to_owned())
         };
 
         let reopened = ServerStore::open(temp.path()).await.unwrap();
+        assert_eq!(reopened.queue_epoch(), queue_epoch);
         let session = reopened
             .session_by_token_hash("persistent-session-hash")
             .await
@@ -1481,14 +1517,14 @@ mod tests {
         assert_eq!(second.sequence, first.sequence + 1);
         assert_eq!(
             store
-                .update_command_ack(&device_id, "cmd_1", "persisted", None, None)
+                .update_command_ack(&device_id, "cmd_1", "persisted", None, None, None)
                 .await
                 .unwrap(),
             CommandStatus::DeviceAccepted
         );
         assert_eq!(
             store
-                .update_command_ack(&device_id, "cmd_1", "applying", None, None)
+                .update_command_ack(&device_id, "cmd_1", "applying", None, None, None)
                 .await
                 .unwrap(),
             CommandStatus::Applying
@@ -1501,6 +1537,7 @@ mod tests {
                     "completed",
                     Some(&serde_json::json!({"ok":true})),
                     None,
+                    None,
                 )
                 .await
                 .unwrap(),
@@ -1509,7 +1546,7 @@ mod tests {
         // A delayed ACK can never regress a terminal result.
         assert_eq!(
             store
-                .update_command_ack(&device_id, "cmd_1", "persisted", None, None)
+                .update_command_ack(&device_id, "cmd_1", "persisted", None, None, None)
                 .await
                 .unwrap(),
             CommandStatus::Completed

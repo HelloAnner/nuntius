@@ -1088,6 +1088,7 @@ async fn enqueue(
                 .send(
                     &device_id,
                     TunnelFrame::Command {
+                        queue_epoch: stored.queue_epoch.clone(),
                         server_sequence: stored.sequence,
                         command: stored.command.clone(),
                     },

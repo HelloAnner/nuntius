@@ -21,11 +21,15 @@ export const UserBubble = memo(function UserBubble({
   state,
   stateLabel,
   stateError,
+  errorMessage,
+  onRetry,
 }: {
   text: string;
   state?: string | null;
   stateLabel?: string | null;
   stateError?: boolean;
+  errorMessage?: string | null;
+  onRetry?: () => void;
 }) {
   return (
     <div className="msg-user">
@@ -35,7 +39,13 @@ export const UserBubble = memo(function UserBubble({
           {state === "applying" || state === "accepted" || state === "waiting_device" ? (
             <Spinner sm />
           ) : null}
-          {stateLabel}
+          <span className="send-state-label">{stateLabel}</span>
+          {stateError && errorMessage ? (
+            <span className="send-state-error">· {errorMessage}</span>
+          ) : null}
+          {stateError && onRetry ? (
+            <button className="send-retry" onClick={onRetry}>重试</button>
+          ) : null}
         </div>
       ) : null}
     </div>

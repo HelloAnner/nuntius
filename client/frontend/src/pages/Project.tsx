@@ -59,9 +59,13 @@ export function ProjectPage({ projectId }: { projectId: string }) {
             liveStore.applyCommandStatus(optimisticKey, "completed");
             void qc.invalidateQueries({ queryKey: ["projectThreads", projectId] });
           })
-          .catch(() => {
-            liveStore.applyCommandStatus(optimisticKey, "failed");
-            toast("会话已创建，但第一条消息发送失败，请重试", { error: true });
+          .catch((error) => {
+            liveStore.applyCommandStatus(
+              optimisticKey,
+              "failed",
+              "request_failed",
+              error instanceof Error ? error.message : "发送失败",
+            );
           });
       }
     } catch (e) {

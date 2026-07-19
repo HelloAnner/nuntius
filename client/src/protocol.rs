@@ -266,6 +266,10 @@ pub struct DeviceCommand {
     pub expires_at: String,
     pub command: DeviceCommandKind,
 }
+
+fn legacy_queue_epoch() -> String {
+    "legacy".into()
+}
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(
     tag = "kind",
@@ -327,6 +331,8 @@ pub enum TunnelFrame {
         agent_version: String,
         transport_security: TransportSecurity,
         last_server_command_seq: i64,
+        #[serde(default)]
+        command_queue_epoch: Option<String>,
         event_acks: BTreeMap<String, i64>,
         history_cursors: BTreeMap<String, String>,
         capabilities: Vec<String>,
@@ -335,11 +341,15 @@ pub enum TunnelFrame {
         protocol_version: u16,
         connection_id: String,
         connection_epoch: i64,
+        #[serde(default = "legacy_queue_epoch")]
+        command_queue_epoch: String,
         server_time: String,
         transport_security: TransportSecurity,
         capabilities: Vec<String>,
     },
     Command {
+        #[serde(default = "legacy_queue_epoch")]
+        queue_epoch: String,
         server_sequence: i64,
         command: DeviceCommand,
     },
@@ -348,6 +358,8 @@ pub enum TunnelFrame {
         stage: String,
         result: Option<Value>,
         error_code: Option<String>,
+        #[serde(default)]
+        error_message: Option<String>,
     },
     Event {
         event: NuntiusEvent,

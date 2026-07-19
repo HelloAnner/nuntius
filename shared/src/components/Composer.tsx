@@ -11,7 +11,6 @@ export function Composer({
   busy,
   placeholder,
   onSend,
-  onSteer,
   onInterrupt,
 }: {
   draftKey: string;
@@ -21,7 +20,6 @@ export function Composer({
   busy?: boolean;
   placeholder?: string;
   onSend: (text: string) => void;
-  onSteer: (text: string) => void;
   onInterrupt: () => void;
 }) {
   const storageKey = `nuntius:draft:${draftKey}`;
@@ -42,8 +40,7 @@ export function Composer({
   const submit = () => {
     const value = text.trim();
     if (!value || busy) return;
-    if (running) onSteer(value);
-    else onSend(value);
+    onSend(value);
     setText("");
   };
 
@@ -59,9 +56,7 @@ export function Composer({
           placeholder={
             locked
               ? (lockedReason ?? "当前不可发送")
-              : running
-                ? "追加指导，转向当前任务…"
-                : (placeholder ?? "输入消息…")
+              : (placeholder ?? "输入消息…")
           }
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
@@ -77,7 +72,6 @@ export function Composer({
             className="send-btn stop"
             onClick={onInterrupt}
             aria-label="中断执行"
-            title="中断当前 Turn"
             disabled={busy}
           >
             {busy ? <Spinner sm /> : <IconStop size={15} />}

@@ -590,8 +590,29 @@
   color: var(--ink-3);
   letter-spacing: 0.03em;
 }
+.msg-user .send-state-label,
+.msg-user .send-retry {
+  flex: none;
+  white-space: nowrap;
+}
+.msg-user .send-state-error {
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
 .msg-user .send-state.err {
   color: var(--danger);
+}
+.msg-user .send-retry {
+  border: 0;
+  padding: 0 2px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
 }
 
 /* agent document */

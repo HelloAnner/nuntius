@@ -1,4 +1,6 @@
-use crate::{assets, directory, error::ApiError, executor::CommandExecutor, protocol::*};
+use crate::{
+    assets, command_queue, directory, error::ApiError, executor::CommandExecutor, protocol::*,
+};
 use async_stream::stream;
 use axum::{
     Json, Router,
@@ -348,20 +350,64 @@ async fn run(
     project_id: Option<String>,
     thread_id: Option<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let expires_at = (time::OffsetDateTime::now_utc() + time::Duration::minutes(10))
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     let command = DeviceCommand {
         command_id: new_id("local"),
         device_id: executor.device_id.clone(),
         project_id,
         thread_id,
         issued_at: now(),
-        expires_at: now(),
+        expires_at,
         command: kind,
     };
+    let target = command_queue::target_key(&command);
+    let priority = command_queue::priority(&command);
+    let mut feedback = executor.command_acks.subscribe();
     executor
-        .execute(&command)
+        .store
+        .enqueue_local_command(&target, priority, &command)
         .await
-        .map(|value| (StatusCode::OK, Json(value)))
-        .map_err(|error| ApiError::BadRequest(error.to_string()))
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    executor.command_notify.notify_one();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    loop {
+        let record = executor
+            .store
+            .inbox(&command.command_id)
+            .await
+            .map_err(|error| ApiError::BadRequest(error.to_string()))?
+            .ok_or_else(|| ApiError::BadRequest("命令入队失败".into()))?;
+        match record.status.as_str() {
+            "completed" => {
+                return Ok((StatusCode::OK, Json(record.result.unwrap_or(Value::Null))));
+            }
+            "failed" | "unknown" | "expired" => {
+                return Err(ApiError::BadRequest(
+                    record
+                        .error_message
+                        .or(record.error_code)
+                        .unwrap_or_else(|| "命令执行失败，请重试".into()),
+                ));
+            }
+            _ => {}
+        }
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(ApiError::BadRequest("命令仍在执行，可稍后在会话中查看结果".into()));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            ack = feedback.recv() => match ack {
+                Ok(TunnelFrame::CommandAck { command_id, .. }) if command_id == command.command_id => {}
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+    }
 }
 async fn events(
     State(executor): State<CommandExecutor>,

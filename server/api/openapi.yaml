@@ -180,6 +180,7 @@ paths:
       responses: {'200': {description: Server 聚合的 Turn, content: {application/json: {schema: {type: array, items: {type: object, additionalProperties: true}}}}}}
     post:
       operationId: startTurn
+      description: 将输入持久化入队；设备端恢复会话后自动选择启动新 Turn 或转向当前活动 Turn。
       parameters: [{$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartTurn'}}}}
       responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
@@ -422,6 +423,7 @@ components:
         acceptedAt: {type: string, format: date-time}
         completedAt: {type: [string, 'null'], format: date-time}
         errorCode: {type: [string, 'null']}
+        errorMessage: {type: [string, 'null']}
         result: {}
     CommandStatus: {enum: [accepted, waiting_device, device_accepted, applying, completed, failed, rejected, unknown, expired]}
     Error:

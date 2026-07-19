@@ -1,4 +1,4 @@
-use crate::{directory, executor::CommandExecutor, pairing, protocol::*, store::InboxRecord};
+use crate::{command_queue, directory, executor::CommandExecutor, pairing, protocol::*};
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
@@ -67,6 +67,11 @@ async fn run_connection(executor: CommandExecutor) -> Result<()> {
         .store
         .state_set("instance_id", &instance_id)
         .await?;
+    let client_queue_epoch = executor.store.active_command_queue_epoch().await?;
+    let last_server_command_seq = executor
+        .store
+        .last_server_sequence(client_queue_epoch.as_deref())
+        .await?;
     send(
         &mut socket,
         &TunnelFrame::Hello {
@@ -75,7 +80,8 @@ async fn run_connection(executor: CommandExecutor) -> Result<()> {
             instance_id,
             agent_version: env!("CARGO_PKG_VERSION").into(),
             transport_security: executor.config.transport_security(),
-            last_server_command_seq: executor.store.last_server_sequence().await?,
+            last_server_command_seq,
+            command_queue_epoch: client_queue_epoch,
             event_acks: BTreeMap::new(),
             history_cursors: BTreeMap::new(),
             capabilities: vec![
@@ -94,35 +100,27 @@ async fn run_connection(executor: CommandExecutor) -> Result<()> {
     let Message::Text(text) = welcome else {
         bail!("server welcome was not text")
     };
-    match serde_json::from_str::<TunnelFrame>(&text)? {
+    let server_queue_epoch = match serde_json::from_str::<TunnelFrame>(&text)? {
         TunnelFrame::Welcome {
             protocol_version,
             transport_security,
+            command_queue_epoch,
             ..
         } if protocol_version == DEVICE_PROTOCOL_VERSION
-            && transport_security == executor.config.transport_security() => {}
+            && transport_security == executor.config.transport_security() =>
+        {
+            command_queue_epoch
+        }
         other => bail!("invalid server welcome: {other:?}"),
-    }
+    };
+    executor
+        .store
+        .state_set("active_command_queue_epoch", &server_queue_epoch)
+        .await?;
     tracing::info!(device_id=%executor.device_id,security=?executor.config.transport_security(),"device tunnel connected");
     let (out_tx, mut out_rx) = mpsc::channel::<TunnelFrame>(512);
-    let (command_tx, mut command_rx) = mpsc::channel::<(i64, DeviceCommand)>(128);
-    let command_executor = executor.clone();
-    let command_out = out_tx.clone();
-    let command_worker = tokio::spawn(async move {
-        while let Some((sequence, command)) = command_rx.recv().await {
-            if let Err(error) = execute_reliable(
-                command_executor.clone(),
-                command_out.clone(),
-                sequence,
-                command,
-            )
-            .await
-            {
-                tracing::error!(error=?error,"command execution pipeline failed");
-            }
-        }
-    });
     let mut events = executor.events.subscribe();
+    let mut command_acks = executor.command_acks.subscribe();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // History is already durable in the local outbox. Flush it quickly so a
@@ -136,36 +134,73 @@ async fn run_connection(executor: CommandExecutor) -> Result<()> {
     loop {
         let watchdog_deadline = last_server_activity + Duration::from_secs(45);
         tokio::select! {
-            incoming=socket.next()=>match incoming{Some(Ok(Message::Text(text)))=>{last_server_activity=tokio::time::Instant::now();let frame: TunnelFrame=serde_json::from_str(&text)?;handle_server_frame(&executor,&out_tx,&command_tx,frame).await?},Some(Ok(Message::Ping(payload)))=>{last_server_activity=tokio::time::Instant::now();socket.send(Message::Pong(payload)).await?;},Some(Ok(Message::Close(_)))|None=>break,Some(Err(error))=>{command_worker.abort();return Err(error.into())},_=>{}},
+            incoming=socket.next()=>match incoming{Some(Ok(Message::Text(text)))=>{last_server_activity=tokio::time::Instant::now();let frame: TunnelFrame=serde_json::from_str(&text)?;handle_server_frame(&executor,&out_tx,frame).await?},Some(Ok(Message::Ping(payload)))=>{last_server_activity=tokio::time::Instant::now();socket.send(Message::Pong(payload)).await?;},Some(Ok(Message::Close(_)))|None=>break,Some(Err(error))=>return Err(error.into()),_=>{}},
             Some(frame)=out_rx.recv()=>send(&mut socket,&frame).await?,
             event=events.recv()=>match event{Ok(event)=>send(&mut socket,&TunnelFrame::Event{event}).await?,Err(broadcast::error::RecvError::Lagged(_))=>send_pending(&executor,&mut socket).await?,Err(broadcast::error::RecvError::Closed)=>break},
+            ack=command_acks.recv()=>match ack{
+                Ok(frame) => {
+                    let command_id = match &frame {
+                        TunnelFrame::CommandAck { command_id, .. } => command_id,
+                        _ => continue,
+                    };
+                    if executor.store.inbox(command_id).await?.is_some_and(|record| record.queue_epoch != "local") {
+                        send(&mut socket,&frame).await?;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
             _=heartbeat.tick()=>{let(project_count,inbox_depth,outbox_depth,active)=executor.store.counts().await?;let health=DeviceHealth{app_server_status:if executor.app.is_running().await{"online".into()}else{"stopped".into()},storage_status:"ok".into(),inbox_depth,outbox_depth,history_backfill_depth:executor.store.pending_history(1000).await?.len() as i64,active_turn_count:active,pending_approval_count:executor.store.pending_approval_count().await?,project_count,codex_version:None};send(&mut socket,&TunnelFrame::Heartbeat{sent_at:now(),health}).await?;},
             _=flush.tick()=>send_pending(&executor,&mut socket).await?,
-            _=tokio::time::sleep_until(watchdog_deadline)=>{command_worker.abort();return Err(anyhow!("server heartbeat acknowledgement timed out"))},
+            _=tokio::time::sleep_until(watchdog_deadline)=>return Err(anyhow!("server heartbeat acknowledgement timed out")),
         }
     }
-    command_worker.abort();
     Ok(())
 }
 
 async fn handle_server_frame(
     executor: &CommandExecutor,
     out: &mpsc::Sender<TunnelFrame>,
-    commands: &mpsc::Sender<(i64, DeviceCommand)>,
     frame: TunnelFrame,
 ) -> Result<()> {
     match frame {
         TunnelFrame::Command {
+            queue_epoch,
             server_sequence,
             command,
         } => {
             if command.device_id != executor.device_id {
                 bail!("command targets a different device")
             }
-            commands
-                .send((server_sequence, command))
+            let target = command_queue::target_key(&command);
+            let priority = command_queue::priority(&command);
+            let inbox = executor
+                .store
+                .receive_command(&queue_epoch, server_sequence, &target, priority, &command)
+                .await?;
+            let acknowledgement = match inbox.status.as_str() {
+                "completed" | "failed" | "unknown" | "expired" => terminal_ack(&inbox),
+                "applying" => TunnelFrame::CommandAck {
+                    command_id: command.command_id,
+                    stage: "applying".into(),
+                    result: None,
+                    error_code: None,
+                    error_message: None,
+                },
+                _ => {
+                    executor.command_notify.notify_one();
+                    TunnelFrame::CommandAck {
+                        command_id: command.command_id,
+                        stage: "persisted".into(),
+                        result: None,
+                        error_code: None,
+                        error_message: None,
+                    }
+                }
+            };
+            out.send(acknowledgement)
                 .await
-                .map_err(|_| anyhow!("command worker stopped"))?;
+                .map_err(|_| anyhow!("tunnel sender closed"))?;
         }
         TunnelFrame::Query {
             correlation_id,
@@ -207,134 +242,14 @@ async fn handle_server_frame(
     }
     Ok(())
 }
-
-async fn execute_reliable(
-    executor: CommandExecutor,
-    out: mpsc::Sender<TunnelFrame>,
-    sequence: i64,
-    command: DeviceCommand,
-) -> Result<()> {
-    let inbox = executor.store.receive_command(sequence, &command).await?;
-    match inbox.status.as_str() {
-        "completed" | "failed" | "unknown" | "expired" => {
-            return ack_terminal(&out, &inbox).await;
-        }
-        "applying" => {
-            executor
-                .store
-                .finish_command_as(
-                    &command.command_id,
-                    sequence,
-                    "unknown",
-                    None,
-                    Some("execution_state_unknown_after_restart"),
-                )
-                .await?;
-            return out
-                .send(TunnelFrame::CommandAck {
-                    command_id: command.command_id,
-                    stage: "unknown".into(),
-                    result: None,
-                    error_code: Some("execution_state_unknown_after_restart".into()),
-                })
-                .await
-                .map_err(|_| anyhow!("tunnel sender closed"));
-        }
-        _ => {}
-    }
-    let expired = time::OffsetDateTime::parse(
-        &command.expires_at,
-        &time::format_description::well_known::Rfc3339,
-    )
-    .map(|expires_at| expires_at <= time::OffsetDateTime::now_utc())
-    .unwrap_or(true);
-    if expired {
-        executor
-            .store
-            .finish_command_as(
-                &command.command_id,
-                sequence,
-                "expired",
-                None,
-                Some("expired"),
-            )
-            .await?;
-        return out
-            .send(TunnelFrame::CommandAck {
-                command_id: command.command_id,
-                stage: "expired".into(),
-                result: None,
-                error_code: Some("expired".into()),
-            })
-            .await
-            .map_err(|_| anyhow!("tunnel sender closed"));
-    }
-    out.send(TunnelFrame::CommandAck {
-        command_id: command.command_id.clone(),
-        stage: "persisted".into(),
-        result: None,
-        error_code: None,
-    })
-    .await
-    .map_err(|_| anyhow!("tunnel sender closed"))?;
-    if !executor.store.start_command(&command.command_id).await? {
-        return Ok(());
-    };
-    out.send(TunnelFrame::CommandAck {
-        command_id: command.command_id.clone(),
-        stage: "applying".into(),
-        result: None,
-        error_code: None,
-    })
-    .await
-    .map_err(|_| anyhow!("tunnel sender closed"))?;
-    match executor.execute(&command).await {
-        Ok(result) => {
-            executor
-                .store
-                .finish_command(&command.command_id, sequence, Some(&result), None)
-                .await?;
-            out.send(TunnelFrame::CommandAck {
-                command_id: command.command_id,
-                stage: "completed".into(),
-                result: Some(result),
-                error_code: None,
-            })
-            .await
-            .map_err(|_| anyhow!("tunnel sender closed"))?
-        }
-        Err(error) => {
-            let code = classify_error(&error);
-            let status = if code == "outcome_unknown" {
-                "unknown"
-            } else {
-                "failed"
-            };
-            executor
-                .store
-                .finish_command_as(&command.command_id, sequence, status, None, Some(&code))
-                .await?;
-            out.send(TunnelFrame::CommandAck {
-                command_id: command.command_id,
-                stage: status.into(),
-                result: None,
-                error_code: Some(code),
-            })
-            .await
-            .map_err(|_| anyhow!("tunnel sender closed"))?
-        }
-    }
-    Ok(())
-}
-async fn ack_terminal(out: &mpsc::Sender<TunnelFrame>, inbox: &InboxRecord) -> Result<()> {
-    out.send(TunnelFrame::CommandAck {
+fn terminal_ack(inbox: &crate::store::InboxRecord) -> TunnelFrame {
+    TunnelFrame::CommandAck {
         command_id: inbox.command.command_id.clone(),
         stage: inbox.status.clone(),
         result: inbox.result.clone(),
         error_code: inbox.error_code.clone(),
-    })
-    .await
-    .map_err(|_| anyhow!("tunnel sender closed"))
+        error_message: inbox.error_message.clone(),
+    }
 }
 async fn execute_query(executor: &CommandExecutor, query: DeviceQuery) -> Result<Value> {
     match query {
@@ -385,20 +300,4 @@ where
     .await
     .context("device tunnel send timed out")??;
     Ok(())
-}
-fn classify_error(error: &anyhow::Error) -> String {
-    let message = error.to_string().to_ascii_lowercase();
-    if message.contains("timed out") || message.contains("outcome is unknown") {
-        "outcome_unknown".into()
-    } else if message.contains("not found") {
-        "not_found".into()
-    } else if message.contains("expired") {
-        "expired".into()
-    } else if message.contains("outside allowed") || message.contains("invalid") {
-        "invalid_request".into()
-    } else if message.contains("app server") || message.contains("codex") {
-        "app_server_unavailable".into()
-    } else {
-        "execution_failed".into()
-    }
 }

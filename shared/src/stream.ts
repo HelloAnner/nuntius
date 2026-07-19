@@ -48,6 +48,8 @@ export interface LiveTurn {
   status: LiveTurnStatus;
   userText: string | null;
   sendState: CommandStatus | null;
+  sendErrorCode: string | null;
+  sendErrorMessage: string | null;
   items: LiveItem[];
   itemIndex: Record<string, number>;
   startedAt: string;
@@ -115,6 +117,10 @@ export class ThreadLiveStore {
     for (const t of live.turns) {
       if (t.userText === text && Date.now() - Date.parse(t.startedAt) < 120_000) {
         this.pending.set(commandId, { threadId, turnId: t.id });
+        t.sendState = "accepted";
+        t.sendErrorCode = null;
+        t.sendErrorMessage = null;
+        this.bump();
         return t.id;
       }
     }
@@ -125,6 +131,8 @@ export class ThreadLiveStore {
         status: "running",
         userText: text,
         sendState: "accepted",
+        sendErrorCode: null,
+        sendErrorMessage: null,
         items: [],
         itemIndex: {},
         startedAt: new Date().toISOString(),
@@ -137,14 +145,45 @@ export class ThreadLiveStore {
     return turnId;
   }
 
-  applyCommandStatus(commandId: string, status: CommandStatus) {
+  bindCommand(provisionalId: string, commandId: string) {
+    const loc = this.pending.get(provisionalId);
+    if (!loc) return;
+    this.pending.delete(provisionalId);
+    this.pending.set(commandId, loc);
+  }
+
+  applyCommandStatus(
+    commandId: string,
+    status: CommandStatus,
+    errorCode?: string | null,
+    errorMessage?: string | null,
+  ) {
     const loc = this.pending.get(commandId);
     if (!loc) return;
     const turn = this.get(loc.threadId).byId[loc.turnId];
-    if (turn && turn.sendState !== status) {
+    if (turn) {
       turn.sendState = status;
+      turn.sendErrorCode = errorCode ?? null;
+      turn.sendErrorMessage = errorMessage ?? null;
+      if (["failed", "rejected", "expired"].includes(status)) turn.status = "failed";
+      if (status === "unknown") turn.status = "unknown";
+      if (status === "completed") this.pending.delete(commandId);
       this.bump();
     }
+  }
+
+  removeOptimistic(threadId: string, turnId: string) {
+    const live = this.get(threadId);
+    const turn = live.byId[turnId];
+    if (!turn || turn.items.length > 0 || !turn.sendState) return;
+    for (const [key, candidate] of Object.entries(live.byId)) {
+      if (candidate === turn) delete live.byId[key];
+    }
+    live.turns = live.turns.filter((candidate) => candidate !== turn);
+    for (const [commandId, loc] of this.pending) {
+      if (loc.threadId === threadId && loc.turnId === turnId) this.pending.delete(commandId);
+    }
+    this.bump();
   }
 
   /** optimistic echo for a steer sent mid-turn; rendered inline in order */
@@ -163,11 +202,17 @@ export class ThreadLiveStore {
     if (text) {
       for (const t of live.turns) {
         if (t.id.startsWith("local:") && t.userText === text) {
-          delete live.byId[t.id];
+          const optimisticId = t.id;
+          delete live.byId[optimisticId];
           const idx = live.turns.indexOf(t);
           t.id = realTurnId;
           live.byId[realTurnId] = t;
           if (idx >= 0) live.turns[idx] = t;
+          for (const loc of this.pending.values()) {
+            if (loc.threadId === threadId && loc.turnId === optimisticId) {
+              loc.turnId = realTurnId;
+            }
+          }
           return t;
         }
       }
@@ -179,6 +224,8 @@ export class ThreadLiveStore {
         status: "running",
         userText: text,
         sendState: null,
+        sendErrorCode: null,
+        sendErrorMessage: null,
         items: [],
         itemIndex: {},
         startedAt: new Date().toISOString(),

@@ -6,6 +6,7 @@ import {
   IconRefresh,
   Spinner,
   ThreadView,
+  newIdemKey,
   useConfirmAction,
   useToast,
   type ApprovalView,
@@ -108,35 +109,36 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
 
   const appRunning = info.data?.appServerRunning ?? false;
   const archived = thread?.archived ?? false;
-  const running =
-    live.turns.some((t) => !liveStore.isTerminal(t)) || thread?.status === "active";
+  const latestAuthoritativeTurn = [...live.turns]
+    .reverse()
+    .find((turn) => !turn.id.startsWith("local:"));
+  const running = live.turns.some((turn) => !liveStore.isTerminal(turn)) ||
+    (latestAuthoritativeTurn ? false : thread?.status === "active");
 
   const canSend = Boolean(appRunning && !archived && thread);
   const lockedReason = !thread
     ? "会话加载中…"
     : archived
-      ? "会话已归档，归档的会话只读"
+      ? "已归档"
       : !appRunning
         ? "Codex App Server 未运行"
         : null;
 
   const send = async (text: string) => {
+    const provisionalId = `pending:${newIdemKey()}`;
+    liveStore.addOptimistic(threadId, provisionalId, text);
     try {
-      const result = await api.startTurn(threadId, text);
-      liveStore.addOptimistic(threadId, result.turnId, text);
-      liveStore.applyCommandStatus(result.turnId, "completed");
+      await api.startTurn(threadId, text);
+      liveStore.applyCommandStatus(provisionalId, "completed");
     } catch (e) {
-      toast(e instanceof Error ? e.message : "发送失败", { error: true });
+      const message = e instanceof Error ? e.message : "发送失败";
+      liveStore.applyCommandStatus(provisionalId, "failed", "request_failed", message);
     }
   };
 
-  const steer = async (text: string) => {
-    try {
-      await api.steerTurn(threadId, text);
-      liveStore.appendSteerEcho(threadId, text);
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "指导发送失败", { error: true });
-    }
+  const retry = (turnId: string, text: string) => {
+    liveStore.removeOptimistic(threadId, turnId);
+    void send(text);
   };
 
   const interrupt = async () => {
@@ -191,9 +193,9 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
   const headerOverlay = (
     <>
       {!appRunning && !info.isLoading ? (
-        <div className="notice-banner warn">Codex App Server 未运行，对话暂停执行，历史仍可阅读。</div>
+        <div className="notice-banner warn">Codex App Server 未运行</div>
       ) : null}
-      {archived ? <div className="notice-banner">会话已归档，内容只读。</div> : null}
+      {archived ? <div className="notice-banner">已归档</div> : null}
     </>
   );
 
@@ -215,7 +217,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
       running={running}
       busy={actionBusy}
       onSend={send}
-      onSteer={steer}
+      onRetry={retry}
       onInterrupt={interrupt}
     />
   );

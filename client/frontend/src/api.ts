@@ -69,7 +69,7 @@ export const api = {
   threads: () => req<ThreadSummary[]>("GET", "/threads"),
   history: (threadId: string) => req<HistoryRecord[]>("GET", `/threads/${threadId}/history`),
   startTurn: (threadId: string, text: string) =>
-    req<{ turnId: string }>("POST", `/threads/${threadId}/turns`, {
+    req<{ operation: "start" | "steer"; turnId?: string }>("POST", `/threads/${threadId}/turns`, {
       text,
       options: turnOptionsForAccess("full"),
     }),

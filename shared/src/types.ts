@@ -157,6 +157,7 @@ export interface CommandView {
   acceptedAt: string;
   completedAt: string | null;
   errorCode: string | null;
+  errorMessage: string | null;
   result: unknown;
 }
 
@@ -217,6 +218,10 @@ export interface ApprovalRequestedPayload {
 export interface CommandStatusPayload {
   commandId: string;
   status: CommandStatus;
+  kind?: string;
+  threadId?: string | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
 }
 export interface HistoryProgressPayload {
   threadId: string;

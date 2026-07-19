@@ -143,12 +143,17 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
             firstTurnKey,
           )
           .then((turnReceipt) => {
-            liveStore.applyCommandStatus(firstTurnKey, "completed");
-            trackCommand(qc, turnReceipt.commandId, created.threadId, "turn.start");
+            liveStore.bindCommand(firstTurnKey, turnReceipt.commandId);
+            liveStore.applyCommandStatus(turnReceipt.commandId, turnReceipt.status);
+            trackCommand(qc, turnReceipt.commandId, created.threadId, "thread.input");
           })
-          .catch(() => {
-            liveStore.applyCommandStatus(firstTurnKey, "failed");
-            toast("会话已创建，但第一条消息发送失败，请重试", { error: true });
+          .catch((error) => {
+            liveStore.applyCommandStatus(
+              firstTurnKey,
+              "failed",
+              error instanceof ApiError ? error.code : "request_failed",
+              error instanceof Error ? error.message : "发送失败",
+            );
           });
       }
     } catch (e) {

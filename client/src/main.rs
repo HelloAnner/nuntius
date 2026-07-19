@@ -1,6 +1,7 @@
 mod api;
 mod app_server;
 mod assets;
+mod command_queue;
 mod config;
 mod directory;
 mod error;
@@ -147,6 +148,7 @@ async fn run() -> Result<()> {
     let store = ClientStore::open(&root).await?;
     store.recover_process_state().await?;
     let (events, _) = tokio::sync::broadcast::channel(4096);
+    let (command_acks, _) = tokio::sync::broadcast::channel(1024);
     let app = AppServerRuntime::new(cfg.clone());
     let device_id = cfg.device_id.clone().unwrap_or_else(|| "unpaired".into());
     let executor = CommandExecutor {
@@ -155,8 +157,11 @@ async fn run() -> Result<()> {
         app: app.clone(),
         device_id,
         events,
+        command_acks,
+        command_notify: Arc::new(tokio::sync::Notify::new()),
         history_import_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
+    let command_queue_task = tokio::spawn(command_queue::run(executor.clone()));
     let maintenance_store = executor.store.clone();
     let maintenance_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -253,6 +258,7 @@ async fn run() -> Result<()> {
     discovery_task.abort();
     history_monitor_task.abort();
     app_events_task.abort();
+    command_queue_task.abort();
     maintenance_task.abort();
     if let Some(update) = prepared_update {
         tracing::info!(target=%update.target_sha(), "activating self-update");

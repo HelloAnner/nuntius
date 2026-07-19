@@ -158,22 +158,27 @@ export function ThreadPage({
   const online = device?.status === "online";
   const unassigned = project?.kind === "system_unassigned";
   const archived = thread?.archived ?? false;
-  const running =
-    live.turns.some((t) => !liveStore.isTerminal(t)) || thread?.status === "active";
+  const latestAuthoritativeTurn = [...live.turns]
+    .reverse()
+    .find((turn) => !turn.id.startsWith("local:"));
+  const running = live.turns.some((turn) => !liveStore.isTerminal(turn)) ||
+    (latestAuthoritativeTurn ? false : thread?.status === "active");
 
   const canSend = Boolean(online && !unassigned && !archived && thread);
   const lockedReason = !thread
     ? "会话加载中…"
     : archived
-      ? "会话已归档，归档的会话只读"
+      ? "已归档"
       : unassigned
-        ? "未归类会话不能继续执行"
+        ? "未归类，只读"
         : !online
-          ? `设备${statusLabel(device?.status ?? "offline")}，无法发送`
+          ? `设备${statusLabel(device?.status ?? "offline")}`
           : null;
 
   const send = async (text: string) => {
     const idemKey = newIdemKey();
+    const provisionalId = `pending:${idemKey}`;
+    liveStore.addOptimistic(threadId, provisionalId, text);
     try {
       const receipt = await api.startTurn(
         threadId,
@@ -181,26 +186,28 @@ export function ThreadPage({
         turnOptionsForAccess(accessMode),
         idemKey,
       );
-      liveStore.addOptimistic(threadId, receipt.commandId, text);
-      trackCommand(qc, receipt.commandId, threadId, "turn.start");
+      liveStore.bindCommand(provisionalId, receipt.commandId);
+      liveStore.applyCommandStatus(receipt.commandId, receipt.status);
+      trackCommand(qc, receipt.commandId, threadId, "thread.input");
     } catch (e) {
-      toast(
-        e instanceof ApiError && e.code === "device_offline" ? "设备离线，消息未发送" : "发送失败，请重试",
-        { error: true },
+      const message =
+        e instanceof ApiError && e.code === "device_offline"
+          ? "设备离线，消息未发送"
+          : e instanceof Error
+            ? e.message
+            : "发送失败";
+      liveStore.applyCommandStatus(
+        provisionalId,
+        "failed",
+        e instanceof ApiError ? e.code : "request_failed",
+        message,
       );
     }
   };
 
-  const steer = async (text: string) => {
-    const idemKey = newIdemKey();
-    try {
-      const receipt = await api.steerTurn(threadId, text, idemKey);
-      liveStore.appendSteerEcho(threadId, text);
-      trackCommand(qc, receipt.commandId, threadId, "turn.steer");
-      toast("指导已发送");
-    } catch {
-      toast("指导发送失败", { error: true });
-    }
+  const retry = (turnId: string, text: string) => {
+    liveStore.removeOptimistic(threadId, turnId);
+    void send(text);
   };
 
   const interrupt = async () => {
@@ -258,15 +265,11 @@ export function ThreadPage({
   const headerOverlay = (
     <>
       {!online && device ? (
-        <div className="notice-banner warn">
-          设备{statusLabel(device.status)} · 以下为服务器已同步的历史
-          {thread?.lastSyncedAt ? `（同步于 ${thread.lastSyncedAt.slice(0, 16).replace("T", " ")}）` : ""}
-          ，不能继续执行。
-        </div>
+        <div className="notice-banner warn">设备{statusLabel(device.status)}</div>
       ) : null}
-      {archived ? <div className="notice-banner">会话已归档，内容只读。</div> : null}
+      {archived ? <div className="notice-banner">已归档</div> : null}
       {unassigned ? (
-        <div className="notice-banner info">未归类会话：历史可阅读，回到设备本地归类后才能继续对话。</div>
+        <div className="notice-banner info">未归类，只读</div>
       ) : null}
     </>
   );
@@ -292,7 +295,7 @@ export function ThreadPage({
       running={running}
       busy={actionBusy}
       onSend={send}
-      onSteer={steer}
+      onRetry={retry}
       onInterrupt={interrupt}
     />
   );

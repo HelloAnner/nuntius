@@ -268,7 +268,13 @@ impl AppSessionHandle {
                 .get("code")
                 .map(Value::to_string)
                 .unwrap_or_else(|| "unknown".into());
-            bail!("App Server {method} failed with code {code}")
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error")
+                .replace(['\r', '\n'], " ");
+            let message: String = message.chars().take(500).collect();
+            bail!("App Server {method} failed with code {code}: {message}")
         }
         Ok(response.get("result").cloned().unwrap_or(Value::Null))
     }

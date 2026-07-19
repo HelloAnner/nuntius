@@ -61,6 +61,7 @@ paths:
   /threads/{threadId}/turns:
     post:
       operationId: startLocalTurn
+      description: 将输入写入本地持久化队列；恢复会话后自动选择启动新 Turn 或转向当前活动 Turn。
       parameters: [{$ref: '#/components/parameters/ThreadId'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartTurn'}}}}
       responses: {'200': {description: Turn 已提交给 App Server, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, '400': {$ref: '#/components/responses/BadRequest'}}

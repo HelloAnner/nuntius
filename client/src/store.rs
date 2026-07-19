@@ -23,10 +23,15 @@ pub struct ProjectRecord {
 }
 #[derive(Debug, Clone)]
 pub struct InboxRecord {
+    pub queue_epoch: String,
+    pub server_sequence: i64,
+    pub target_key: String,
+    pub priority: i64,
     pub command: DeviceCommand,
     pub status: String,
     pub result: Option<Value>,
     pub error_code: Option<String>,
+    pub error_message: Option<String>,
 }
 
 impl ClientStore {
@@ -96,7 +101,7 @@ impl ClientStore {
             .bind(&stamp)
             .execute(&self.pool)
             .await?;
-        sqlx::query("UPDATE command_inbox SET status='unknown',completed_at=?,error_code='execution_state_unknown_after_restart' WHERE status='applying'")
+        sqlx::query("UPDATE command_inbox SET status='unknown',completed_at=?,error_code='execution_state_unknown_after_restart',error_message='客户端重启，无法确认命令是否已经执行' WHERE status='applying'")
             .bind(&stamp)
             .execute(&self.pool)
             .await?;
@@ -127,9 +132,15 @@ impl ClientStore {
             .bind(key).bind(now()).fetch_one(&self.pool).await?;
         Ok(revision.parse()?)
     }
-    pub async fn last_server_sequence(&self) -> Result<i64> {
+    pub async fn active_command_queue_epoch(&self) -> Result<Option<String>> {
+        self.state_get("active_command_queue_epoch").await
+    }
+    pub async fn last_server_sequence(&self, queue_epoch: Option<&str>) -> Result<i64> {
+        let key = queue_epoch
+            .map(|epoch| format!("last_server_sequence:{epoch}"))
+            .unwrap_or_else(|| "last_server_sequence".into());
         Ok(self
-            .state_get("last_server_sequence")
+            .state_get(&key)
             .await?
             .and_then(|v| v.parse().ok())
             .unwrap_or(0))
@@ -600,31 +611,76 @@ impl ClientStore {
 
     pub async fn receive_command(
         &self,
+        queue_epoch: &str,
         sequence: i64,
+        target_key: &str,
+        priority: i64,
         command: &DeviceCommand,
     ) -> Result<InboxRecord> {
         let json = serde_json::to_string(command)?;
-        sqlx::query("INSERT OR IGNORE INTO command_inbox(command_id,server_sequence,payload,status,received_at) VALUES(?,?,?,'accepted',?)").bind(&command.command_id).bind(sequence).bind(json).bind(now()).execute(&self.pool).await?;
-        self.inbox(&command.command_id)
-            .await?
-            .ok_or_else(|| anyhow!("inbox write lost"))
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query("INSERT OR IGNORE INTO command_inbox(command_id,queue_epoch,server_sequence,target_key,priority,payload,status,received_at) VALUES(?,?,?,?,?,?,'accepted',?)")
+            .bind(&command.command_id).bind(queue_epoch).bind(sequence).bind(target_key).bind(priority).bind(&json).bind(now()).execute(&mut *tx).await?;
+        let row = sqlx::query("SELECT * FROM command_inbox WHERE command_id=?")
+            .bind(&command.command_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(row) = row else {
+            let collision: Option<String> = sqlx::query_scalar(
+                "SELECT command_id FROM command_inbox WHERE queue_epoch=? AND server_sequence=?",
+            )
+            .bind(queue_epoch)
+            .bind(sequence)
+            .fetch_optional(&mut *tx)
+            .await?;
+            anyhow::bail!(
+                "command queue identity collision: epoch={queue_epoch} sequence={sequence} existing={}",
+                collision.unwrap_or_else(|| "missing".into())
+            );
+        };
+        if row.get::<String, _>("queue_epoch") != queue_epoch
+            || row.get::<i64, _>("server_sequence") != sequence
+            || row.get::<String, _>("payload") != json
+        {
+            anyhow::bail!("command id reused with different queue identity or payload")
+        }
+        let record = inbox_from_row(&row)?;
+        tx.commit().await?;
+        Ok(record)
+    }
+
+    pub async fn enqueue_local_command(
+        &self,
+        target_key: &str,
+        priority: i64,
+        command: &DeviceCommand,
+    ) -> Result<InboxRecord> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let sequence: i64 = sqlx::query_scalar("INSERT INTO runtime_state(key,value,updated_at) VALUES('next_local_command_sequence','2',?) ON CONFLICT(key) DO UPDATE SET value=CAST(runtime_state.value AS INTEGER)+1,updated_at=excluded.updated_at RETURNING CAST(value AS INTEGER)-1")
+            .bind(now()).fetch_one(&mut *tx).await?;
+        let json = serde_json::to_string(command)?;
+        sqlx::query("INSERT INTO command_inbox(command_id,queue_epoch,server_sequence,target_key,priority,payload,status,received_at) VALUES(?,'local',?,?,?,?, 'accepted',?)")
+            .bind(&command.command_id).bind(sequence).bind(target_key).bind(priority).bind(json).bind(now()).execute(&mut *tx).await?;
+        let row = sqlx::query("SELECT * FROM command_inbox WHERE command_id=?")
+            .bind(&command.command_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let record = inbox_from_row(&row)?;
+        tx.commit().await?;
+        Ok(record)
+    }
+
+    pub async fn pending_inbox(&self, limit: i64) -> Result<Vec<InboxRecord>> {
+        let rows = sqlx::query("SELECT * FROM command_inbox WHERE status='accepted' ORDER BY received_at,command_id LIMIT ?")
+            .bind(limit).fetch_all(&self.pool).await?;
+        rows.iter().map(inbox_from_row).collect()
     }
     pub async fn inbox(&self, id: &str) -> Result<Option<InboxRecord>> {
         let row = sqlx::query("SELECT * FROM command_inbox WHERE command_id=?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
-        row.map(|r| {
-            Ok(InboxRecord {
-                command: serde_json::from_str(&r.get::<String, _>("payload"))?,
-                status: r.get("status"),
-                result: r
-                    .get::<Option<String>, _>("result")
-                    .and_then(|v| serde_json::from_str(&v).ok()),
-                error_code: r.get("error_code"),
-            })
-        })
-        .transpose()
+        row.as_ref().map(inbox_from_row).transpose()
     }
     pub async fn start_command(&self, id: &str) -> Result<bool> {
         Ok(sqlx::query("UPDATE command_inbox SET status='applying',started_at=? WHERE command_id=? AND status='accepted'").bind(now()).bind(id).execute(&self.pool).await?.rows_affected()==1)
@@ -632,33 +688,49 @@ impl ClientStore {
     pub async fn finish_command(
         &self,
         id: &str,
+        queue_epoch: &str,
         sequence: i64,
         result: Option<&Value>,
         error: Option<&str>,
+        error_message: Option<&str>,
     ) -> Result<()> {
         let status = if error.is_some() {
             "failed"
         } else {
             "completed"
         };
-        self.finish_command_as(id, sequence, status, result, error)
-            .await
+        self.finish_command_as(
+            id,
+            queue_epoch,
+            sequence,
+            status,
+            result,
+            error,
+            error_message,
+        )
+        .await
     }
 
     pub async fn finish_command_as(
         &self,
         id: &str,
+        queue_epoch: &str,
         sequence: i64,
         status: &str,
         result: Option<&Value>,
         error: Option<&str>,
+        error_message: Option<&str>,
     ) -> Result<()> {
         if !matches!(status, "completed" | "failed" | "unknown" | "expired") {
             anyhow::bail!("invalid terminal command status")
         }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("UPDATE command_inbox SET status=?,completed_at=?,result=?,error_code=? WHERE command_id=?").bind(status).bind(now()).bind(result.map(serde_json::to_string).transpose()?).bind(error).bind(id).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO runtime_state(key,value,updated_at) VALUES('last_server_sequence',?,?) ON CONFLICT(key) DO UPDATE SET value=CASE WHEN CAST(value AS INTEGER) < ? THEN excluded.value ELSE value END,updated_at=excluded.updated_at").bind(sequence.to_string()).bind(now()).bind(sequence).execute(&mut *tx).await?;
+        sqlx::query("UPDATE command_inbox SET status=?,completed_at=?,result=?,error_code=?,error_message=? WHERE command_id=?").bind(status).bind(now()).bind(result.map(serde_json::to_string).transpose()?).bind(error).bind(error_message).bind(id).execute(&mut *tx).await?;
+        if queue_epoch != "local" {
+            let key = format!("last_server_sequence:{queue_epoch}");
+            sqlx::query("INSERT INTO runtime_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=CASE WHEN CAST(value AS INTEGER) < ? THEN excluded.value ELSE value END,updated_at=excluded.updated_at").bind(key).bind(sequence.to_string()).bind(now()).bind(sequence).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO runtime_state(key,value,updated_at) VALUES('active_command_queue_epoch',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").bind(queue_epoch).bind(now()).execute(&mut *tx).await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -807,6 +879,22 @@ impl ClientStore {
             .await?;
         Ok((projects, inbox, outbox, active))
     }
+}
+
+fn inbox_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<InboxRecord> {
+    Ok(InboxRecord {
+        queue_epoch: r.get("queue_epoch"),
+        server_sequence: r.get("server_sequence"),
+        target_key: r.get("target_key"),
+        priority: r.get("priority"),
+        command: serde_json::from_str(&r.get::<String, _>("payload"))?,
+        status: r.get("status"),
+        result: r
+            .get::<Option<String>, _>("result")
+            .and_then(|value| serde_json::from_str(&value).ok()),
+        error_code: r.get("error_code"),
+        error_message: r.get("error_message"),
+    })
 }
 
 fn project_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ProjectSummary {
@@ -995,19 +1083,72 @@ mod tests {
             command: DeviceCommandKind::Refresh,
         };
         assert_eq!(
-            store.receive_command(1, &command).await.unwrap().status,
+            store
+                .receive_command("epoch_test", 1, "device:dev_test", 2, &command)
+                .await
+                .unwrap()
+                .status,
             "accepted"
         );
         assert!(store.start_command("cmd_test").await.unwrap());
         store
-            .finish_command("cmd_test", 1, Some(&json!({"ok":true})), None)
+            .finish_command(
+                "cmd_test",
+                "epoch_test",
+                1,
+                Some(&json!({"ok":true})),
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
-            store.receive_command(1, &command).await.unwrap().status,
+            store
+                .receive_command("epoch_test", 1, "device:dev_test", 2, &command)
+                .await
+                .unwrap()
+                .status,
             "completed"
         );
-        assert_eq!(store.last_server_sequence().await.unwrap(), 1);
+        assert_eq!(
+            store
+                .last_server_sequence(Some("epoch_test"))
+                .await
+                .unwrap(),
+            1
+        );
+
+        let next_epoch = DeviceCommand {
+            command_id: "cmd_next_epoch".into(),
+            ..command.clone()
+        };
+        assert_eq!(
+            store
+                .receive_command("epoch_next", 1, "device:dev_test", 2, &next_epoch)
+                .await
+                .unwrap()
+                .status,
+            "accepted"
+        );
+        let collision = DeviceCommand {
+            command_id: "cmd_collision".into(),
+            ..command.clone()
+        };
+        assert!(
+            store
+                .receive_command("epoch_test", 1, "device:dev_test", 2, &collision)
+                .await
+                .is_err()
+        );
+        let local = DeviceCommand {
+            command_id: "cmd_local".into(),
+            ..command.clone()
+        };
+        let local_record = store
+            .enqueue_local_command("device:dev_test", 2, &local)
+            .await
+            .unwrap();
+        assert_eq!(local_record.queue_epoch, "local");
 
         let unassigned = store.ensure_unassigned_project("dev_test").await.unwrap();
         assert_eq!(
@@ -1023,7 +1164,10 @@ mod tests {
             expires_at: now(),
             command: DeviceCommandKind::Refresh,
         };
-        store.receive_command(2, &uncertain).await.unwrap();
+        store
+            .receive_command("epoch_test", 2, "device:dev_test", 2, &uncertain)
+            .await
+            .unwrap();
         assert!(store.start_command("cmd_uncertain").await.unwrap());
         store.recover_process_state().await.unwrap();
         assert_eq!(

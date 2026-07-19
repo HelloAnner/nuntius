@@ -15,9 +15,6 @@ export function AuthPage({ initialized }: { initialized: boolean }) {
           <div className="auth-title display" style={{ marginTop: 18 }}>
             Nuntius
           </div>
-          <div className="auth-sub">
-            {mode === "login" ? "登录以控制你的设备" : "创建所有者账户，初始化服务器"}
-          </div>
         </div>
         {mode === "login" ? <LoginForm /> : <BootstrapForm />}
         {initialized ? (

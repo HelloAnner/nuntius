@@ -5,9 +5,7 @@ import {
   Avatar,
   IconBolt,
   IconKey,
-  IconMoon,
   IconShield,
-  IconSun,
   Segmented,
   Spinner,
   deviceTone,
@@ -112,7 +110,6 @@ export function SettingsPage() {
                 <div className="access-settings-title">
                   {accessMode === "full" ? "完全访问" : "操作前询问"}
                 </div>
-                <div className="access-settings-sub">用于新会话，也会在已有会话的下一条消息生效</div>
               </div>
             </div>
             <Segmented
@@ -128,13 +125,11 @@ export function SettingsPage() {
             <div className={`access-settings-note ${accessMode}`}>
               {accessMode === "full" ? (
                 <>
-                  <strong>无需批准，拥有完整系统与网络访问。</strong>
-                  适合你信任的个人设备；Codex 可以直接执行命令、修改任意可访问文件。
+                  <strong>无需批准，完整系统与网络访问。</strong>
                 </>
               ) : (
                 <>
-                  <strong>默认只在项目工作区内执行。</strong>
-                  需要越过工作区或访问受限资源时，会在审批页面等待你的确认。
+                  <strong>越过工作区或访问受限资源时询问。</strong>
                 </>
               )}
             </div>
@@ -157,9 +152,7 @@ export function SettingsPage() {
                 <span className="row-glyph">
                   <IconKey size={17} />
                 </span>
-                <div style={{ flex: 1, fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.6 }}>
-                  生成一次性配对码，把新的电脑接入你的账户。
-                </div>
+                <div style={{ flex: 1 }} />
                 <button className="btn primary sm" onClick={newPairingCode} disabled={busyPairing}>
                   {busyPairing ? <Spinner sm /> : null}
                   生成配对码
@@ -206,14 +199,6 @@ export function SettingsPage() {
               value={theme}
               onChange={setTheme}
             />
-            <div style={{ display: "flex", gap: 16, marginTop: 12, fontSize: 12, color: "var(--ink-3)" }}>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-                <IconSun size={13} /> 纸面浅色系
-              </span>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-                <IconMoon size={13} /> 墨色深色系
-              </span>
-            </div>
           </div>
 
           <div className="section-label micro">关于</div>

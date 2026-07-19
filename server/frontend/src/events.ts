@@ -33,7 +33,14 @@ export function trackCommand(qc: QueryClient, commandId: string, threadId?: stri
     if (!cur || TERMINAL_CMD.has(cur.status)) return;
     try {
       const view = await api.command(commandId);
-      applyCommandStatus(qc, commandId, view.status, view.kind);
+      applyCommandStatus(
+        qc,
+        commandId,
+        view.status,
+        view.kind,
+        view.errorCode,
+        view.errorMessage,
+      );
     } catch (e) {
       if (!(e instanceof ApiError && e.code === "not_found") && attempt < 4) {
         setTimeout(() => void poll(attempt + 1), 3000 * attempt);
@@ -47,10 +54,17 @@ export function trackCommand(qc: QueryClient, commandId: string, threadId?: stri
   setTimeout(() => void poll(1), 4000);
 }
 
-function applyCommandStatus(qc: QueryClient, commandId: string, status: string, kind?: string) {
+function applyCommandStatus(
+  qc: QueryClient,
+  commandId: string,
+  status: string,
+  kind?: string,
+  errorCode?: string | null,
+  errorMessage?: string | null,
+) {
   const cmd = useCommands.getState().byId[commandId];
   useCommands.getState().apply(commandId, status as never);
-  liveStore.applyCommandStatus(commandId, status as never);
+  liveStore.applyCommandStatus(commandId, status as never, errorCode, errorMessage);
   const resolvedKind = kind ?? cmd?.kind;
   if (TERMINAL_CMD.has(status) && resolvedKind) {
     if (resolvedKind.startsWith("thread.")) {
@@ -139,7 +153,14 @@ export function startEvents(qc: QueryClient): () => void {
     }
     if (type === "command.status_changed") {
       const p = event.payload as CommandStatusPayload;
-      applyCommandStatus(qc, p.commandId, p.status);
+      applyCommandStatus(
+        qc,
+        p.commandId,
+        p.status,
+        p.kind,
+        p.errorCode,
+        p.errorMessage,
+      );
       return;
     }
     if (type === "history.sync_progress") {

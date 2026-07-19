@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, Notify, broadcast};
 
 #[derive(Clone)]
 pub struct CommandExecutor {
@@ -14,6 +14,8 @@ pub struct CommandExecutor {
     pub app: AppServerRuntime,
     pub device_id: String,
     pub events: broadcast::Sender<NuntiusEvent>,
+    pub command_acks: broadcast::Sender<TunnelFrame>,
+    pub command_notify: Arc<Notify>,
     pub history_import_lock: Arc<Mutex<()>>,
 }
 
@@ -57,20 +59,20 @@ impl CommandExecutor {
             }
             DeviceCommandKind::TurnSteer { thread_id, request } => {
                 let thread = self.command_thread(thread_id).await?;
-                let app_turn = self
-                    .store
-                    .active_app_turn_id(thread_id)
-                    .await?
-                    .context("no active turn to steer")?;
+                let state = self.resume_app_thread(&thread).await?;
+                let app_turn = state.active_turn_id.context("no active turn to steer")?;
                 self.app.call("turn/steer",json!({"threadId":thread.app_server_thread_id,"expectedTurnId":app_turn,"input":[{"type":"text","text":request.text}]})).await
             }
             DeviceCommandKind::TurnInterrupt { thread_id } => {
                 let thread = self.command_thread(thread_id).await?;
-                let app_turn = self
-                    .store
-                    .active_app_turn_id(thread_id)
-                    .await?
-                    .context("no active turn to interrupt")?;
+                let state = self.resume_app_thread(&thread).await?;
+                let Some(app_turn) = state.active_turn_id else {
+                    if state.status == "active" {
+                        bail!("active App Server turn identity is unavailable")
+                    }
+                    self.store.touch_thread(thread_id, "idle").await?;
+                    return Ok(json!({"alreadyTerminal":true}));
+                };
                 let result = self
                     .app
                     .call(
@@ -224,6 +226,32 @@ impl CommandExecutor {
             bail!("turn text cannot be empty")
         };
         let thread = self.command_thread(thread_id).await?;
+        let state = self.resume_app_thread(&thread).await?;
+        if let Some(app_turn) = state.active_turn_id {
+            let result = self
+                .app
+                .call(
+                    "turn/steer",
+                    json!({
+                        "threadId":thread.app_server_thread_id,
+                        "expectedTurnId":app_turn,
+                        "input":[{"type":"text","text":request.text}]
+                    }),
+                )
+                .await?;
+            return Ok(
+                json!({"operation":"steer","appServerTurnId":app_turn,"appServerResult":result}),
+            );
+        }
+        if state.status == "active" {
+            bail!("active App Server turn identity is unavailable")
+        }
+        if state.status == "systemError" || state.status == "notLoaded" {
+            bail!(
+                "App Server thread cannot accept input while status is {}",
+                state.status
+            )
+        }
         let mut params = object(request.options.clone());
         params.insert("threadId".into(), json!(thread.app_server_thread_id));
         params.insert("input".into(), json!([{"type":"text","text":request.text}]));
@@ -243,7 +271,53 @@ impl CommandExecutor {
             true,
         )
         .await?;
-        Ok(json!({"turnId":local_turn,"appServerResult":result}))
+        Ok(json!({"operation":"start","turnId":local_turn,"appServerResult":result}))
+    }
+
+    async fn resume_app_thread(&self, thread: &ThreadSummary) -> Result<ResumedThreadState> {
+        let app_thread_id = thread
+            .app_server_thread_id
+            .as_deref()
+            .context("thread has no App Server id")?;
+        let result = self
+            .app
+            .call(
+                "thread/resume",
+                json!({
+                    "threadId": app_thread_id,
+                    "initialTurnsPage": {
+                        "limit": 1,
+                        "sortDirection": "desc",
+                        "itemsView": "notLoaded"
+                    }
+                }),
+            )
+            .await?;
+        let app_thread = result.get("thread").unwrap_or(&result);
+        let status = app_thread_status(app_thread).to_owned();
+        let mut active_turn_id = result
+            .pointer("/initialTurnsPage/data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .chain(
+                app_thread
+                    .get("turns")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten(),
+            )
+            .find(|turn| turn.get("status").and_then(Value::as_str) == Some("inProgress"))
+            .and_then(|turn| turn.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if active_turn_id.is_none() && status == "active" {
+            active_turn_id = self.store.active_app_turn_id(&thread.id).await?;
+        }
+        Ok(ResumedThreadState {
+            status,
+            active_turn_id,
+        })
     }
 
     async fn thread(&self, id: &str) -> Result<ThreadSummary> {
@@ -825,6 +899,10 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
 
 fn object(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
+}
+struct ResumedThreadState {
+    status: String,
+    active_turn_id: Option<String>,
 }
 fn derive_title(text: &str) -> String {
     text.chars().take(40).collect()

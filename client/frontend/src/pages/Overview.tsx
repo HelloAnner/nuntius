@@ -75,14 +75,13 @@ export function OverviewPage() {
                 <StatusRow
                   ok
                   title="本地服务"
-                  detail="数据库与本地 API 正常"
                 />
                 <StatusRow
                   ok={data.appServerRunning}
                   title="Codex App Server"
                   detail={
                     data.appServerRunning
-                      ? "进程运行中，可以发起对话"
+                      ? undefined
                       : "未运行。确认已安装 Codex，并用 nuntius-client run 查看原因"
                   }
                 />
@@ -91,7 +90,7 @@ export function OverviewPage() {
                   title="公网连接"
                   detail={
                     data.paired
-                      ? "已配对，事件正在同步到服务器"
+                      ? undefined
                       : "未配对。在服务器「设置」页生成配对码后运行 nuntius-client pair <CODE>"
                   }
                 />
@@ -100,7 +99,7 @@ export function OverviewPage() {
                   title="同步队列"
                   detail={
                     data.pendingCommands === 0 && data.pendingEvents === 0
-                      ? "没有积压的命令或事件"
+                      ? undefined
                       : `待处理命令 ${data.pendingCommands} · 待同步事件 ${data.pendingEvents}`
                   }
                 />
@@ -125,10 +124,6 @@ export function OverviewPage() {
                   <div className="v num">{data.pendingEvents}</div>
                 </div>
               </div>
-
-              <p style={{ margin: "26px 0 10px", textAlign: "center", fontSize: 12, color: "var(--ink-4)" }}>
-                此页面只连接本机 loopback 服务，公网不可用时依然可以管理本机项目与会话
-              </p>
             </>
           ) : null}
         </div>
@@ -137,7 +132,7 @@ export function OverviewPage() {
   );
 }
 
-function StatusRow({ ok, title, detail }: { ok: boolean; title: string; detail: string }) {
+function StatusRow({ ok, title, detail }: { ok: boolean; title: string; detail?: string }) {
   return (
     <div className="list-row">
       <span className={`row-glyph${ok ? "" : " muted"}`} style={ok ? {} : { background: "var(--warn-soft)", color: "var(--warn)" }}>
@@ -145,9 +140,7 @@ function StatusRow({ ok, title, detail }: { ok: boolean; title: string; detail: 
       </span>
       <div className="grow">
         <div className="title">{title}</div>
-        <div className="sub">
-          <span className="ellipsis">{detail}</span>
-        </div>
+        {detail ? <div className="sub"><span className="ellipsis">{detail}</span></div> : null}
       </div>
       <Pill tone={ok ? "ok" : "warn"}>{ok ? "正常" : "待处理"}</Pill>
     </div>

@@ -54,7 +54,7 @@ export function ThreadView({
   running,
   busy,
   onSend,
-  onSteer,
+  onRetry,
   onInterrupt,
 }: {
   history: HistoryGroup[];
@@ -72,7 +72,7 @@ export function ThreadView({
   running: boolean;
   busy?: boolean;
   onSend: (text: string) => void;
-  onSteer: (text: string) => void;
+  onRetry?: (turnId: string, text: string) => void;
   onInterrupt: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -174,11 +174,6 @@ export function ThreadView({
     onSend(text);
   }, [followLatest, onSend]);
 
-  const steerAndFollow = useCallback((text: string) => {
-    followLatest(false);
-    onSteer(text);
-  }, [followLatest, onSteer]);
-
   const renderLiveTurn = (turn: LiveTurn) => {
     const stateErr = turn.sendState && SEND_ERROR.includes(turn.sendState);
     return (
@@ -197,6 +192,12 @@ export function ThreadView({
                 : null
             }
             stateError={Boolean(stateErr)}
+            errorMessage={stateErr ? turn.sendErrorMessage : null}
+            onRetry={
+              stateErr && onRetry
+                ? () => onRetry(turn.id, turn.userText ?? "")
+                : undefined
+            }
           />
         ) : null}
         {turn.items.filter((item) => item.kind === "agent" || item.kind === "user").map((item) =>
@@ -310,7 +311,6 @@ export function ThreadView({
         running={running}
         busy={busy}
         onSend={sendAndFollow}
-        onSteer={steerAndFollow}
         onInterrupt={onInterrupt}
       />
     </div>

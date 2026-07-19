@@ -164,19 +164,21 @@ async fn run_socket(
         return Err(anyhow!("first frame must be text hello"));
     };
     let hello: TunnelFrame = serde_json::from_str(&text)?;
-    let (device_id, agent_version, security, last_sequence) = match hello {
+    let (device_id, agent_version, security, last_sequence, client_queue_epoch) = match hello {
         TunnelFrame::Hello {
             protocol_version,
             device_id,
             agent_version,
             transport_security,
             last_server_command_seq,
+            command_queue_epoch,
             ..
         } if protocol_version == DEVICE_PROTOCOL_VERSION && device_id == authenticated_device => (
             device_id,
             agent_version,
             transport_security,
             last_server_command_seq,
+            command_queue_epoch,
         ),
         _ => return Err(anyhow!("invalid hello")),
     };
@@ -213,6 +215,7 @@ async fn run_socket(
                 protocol_version: DEVICE_PROTOCOL_VERSION,
                 connection_id: new_id("conn"),
                 connection_epoch: epoch,
+                command_queue_epoch: state.store.queue_epoch().into(),
                 server_time: now(),
                 transport_security: expected_security,
                 capabilities: vec![
@@ -223,13 +226,19 @@ async fn run_socket(
                 ],
             })
             .await?;
+        let replay_after = if client_queue_epoch.as_deref() == Some(state.store.queue_epoch()) {
+            last_sequence
+        } else {
+            0
+        };
         for stored in state
             .store
-            .pending_commands(&device_id, last_sequence, 500)
+            .pending_commands(&device_id, replay_after, 500)
             .await?
         {
             out_tx
                 .send(TunnelFrame::Command {
+                    queue_epoch: stored.queue_epoch,
                     server_sequence: stored.sequence,
                     command: stored.command,
                 })
@@ -305,6 +314,7 @@ async fn handle_frame(
             stage,
             result,
             error_code,
+            error_message,
         } => {
             if stage == "completed"
                 && let Some(thread) = result
@@ -325,6 +335,7 @@ async fn handle_frame(
                     &stage,
                     result.as_ref(),
                     error_code.as_deref(),
+                    error_message.as_deref(),
                 )
                 .await?;
             publish_device_event(
@@ -332,7 +343,12 @@ async fn handle_frame(
                 user_id,
                 device_id,
                 "command.status_changed",
-                json!({"commandId":command_id,"status":status}),
+                json!({
+                    "commandId": command_id,
+                    "status": status,
+                    "errorCode": error_code,
+                    "errorMessage": error_message,
+                }),
             )
             .await?;
         }
