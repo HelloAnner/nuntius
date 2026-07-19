@@ -99,10 +99,13 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
     patch:
       operationId: renameDevice
+      description: 更新 Server 权威设备名称；通过 SSE 刷新管理页面，在线 Client 立即同步本机配置，离线 Client 在下次连接时对账。
       parameters: [{$ref: '#/components/parameters/Csrf'}]
       requestBody: {required: true, content: {application/json: {schema: {type: object, required: [displayName], properties: {displayName: {type: string, minLength: 1, maxLength: 128}}}}}}
       responses:
         '200': {description: 已更新设备, content: {application/json: {schema: {$ref: '#/components/schemas/Device'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
     delete:
       operationId: revokeDevice
       parameters: [{$ref: '#/components/parameters/Csrf'}]

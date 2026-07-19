@@ -17,6 +17,7 @@ export interface ClientInfo {
   clientVersion: string;
   buildSha: string;
   deviceId: string;
+  displayName: string;
   paired: boolean;
   localBind: string;
   appServerRunning: boolean;

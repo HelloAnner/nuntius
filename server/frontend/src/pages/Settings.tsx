@@ -17,10 +17,12 @@ import {
   type PairingCodeView,
   type ConversationAccessMode,
   type Theme,
+  type DeviceSummary,
 } from "@nuntius/shared";
 import { api } from "../api";
 import { useAccessMode, useSession, useThemeStore } from "../stores";
 import { ConnIndicator, TopBar } from "../components";
+import { RenameDeviceSheet } from "../sheets/RenameDeviceSheet";
 
 export function SettingsPage() {
   const toast = useToast();
@@ -31,6 +33,7 @@ export function SettingsPage() {
   const { confirm, node: confirmNode } = useConfirmAction();
   const [pairing, setPairing] = useState<PairingCodeView | null>(null);
   const [busyPairing, setBusyPairing] = useState(false);
+  const [renaming, setRenaming] = useState<DeviceSummary | null>(null);
 
   const info = useQuery({ queryKey: ["info"], queryFn: api.info, staleTime: 60_000 });
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
@@ -169,9 +172,14 @@ export function SettingsPage() {
                       <span className={`row-state-dot ${d.status}`} role="img" aria-label={statusLabel(d.status)} title={statusLabel(d.status)} />
                     ) : null}
                     {d.status !== "revoked" ? (
-                      <button className="btn danger sm" onClick={() => revoke(d.id, d.displayName)}>
-                        撤销
-                      </button>
+                      <>
+                        <button className="btn quiet sm" onClick={() => setRenaming(d)}>
+                          重命名
+                        </button>
+                        <button className="btn danger sm" onClick={() => revoke(d.id, d.displayName)}>
+                          撤销
+                        </button>
+                      </>
                     ) : null}
                   </div>
                 </div>
@@ -217,6 +225,7 @@ export function SettingsPage() {
           </div>
         </div>
       </div>
+      <RenameDeviceSheet device={renaming} open={renaming !== null} onClose={() => setRenaming(null)} />
       {confirmNode}
     </div>
   );

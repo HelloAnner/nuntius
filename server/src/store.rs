@@ -504,6 +504,20 @@ impl ServerStore {
         Ok(found.is_some())
     }
 
+    pub async fn device_display_name(
+        &self,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT display_name FROM devices WHERE id=? AND user_id=? AND status='active'",
+        )
+        .bind(device_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     pub async fn rename_device(
         &self,
         user_id: &str,
@@ -1520,6 +1534,46 @@ mod tests {
             .expect("persisted session should remain valid after reopening SQLite");
         assert_eq!(session.id, session_id);
         assert_eq!(session.login_name, "owner");
+    }
+
+    #[tokio::test]
+    async fn renamed_device_name_is_the_reconnect_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ServerStore::open(temp.path()).await.unwrap();
+        let user = store.create_owner("owner", "test-hash").await.unwrap();
+        store
+            .create_pairing_code(&user.id, "pair-hash", 10)
+            .await
+            .unwrap();
+        let device_id = store
+            .pair_device(
+                &PairDeviceRequest {
+                    code: "unused".into(),
+                    display_name: "Old name".into(),
+                    public_key: "key".into(),
+                    agent_version: "test".into(),
+                    os_family: "test".into(),
+                    architecture: "test".into(),
+                },
+                "pair-hash",
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .rename_device(&user.id, &device_id, "Studio Mac")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .device_display_name(&user.id, &device_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("Studio Mac")
+        );
     }
 
     #[tokio::test]

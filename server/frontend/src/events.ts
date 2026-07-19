@@ -139,6 +139,19 @@ export function startEvents(qc: QueryClient): () => void {
     const type = event.eventType;
     liveStore.apply(event);
 
+    if (type === "device.renamed") {
+      const displayName = (event.payload as { displayName?: unknown }).displayName;
+      if (typeof displayName === "string") {
+        qc.setQueryData<DeviceSummary[]>(["devices"], (old) =>
+          old?.map((device) =>
+            device.id === event.deviceId ? { ...device, displayName } : device,
+          ),
+        );
+      } else {
+        void qc.invalidateQueries({ queryKey: ["devices"] });
+      }
+      return;
+    }
     if (type === "device.online" || type === "device.offline") {
       qc.setQueryData<DeviceSummary[]>(["devices"], (old) =>
         old?.map((d) =>

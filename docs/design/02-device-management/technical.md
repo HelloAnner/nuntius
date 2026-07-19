@@ -90,7 +90,10 @@ DELETE /api/v1/devices/{device_id}
 GET    /api/v1/devices/{device_id}/diagnostics-summary
 ```
 
-`PATCH` 第一版只允许修改 `display_name`。`DELETE` 表示 revoke，不执行物理删除。
+`PATCH` 第一版只允许修改 `display_name`。Server SQLite 中的名称是权威值：更新成功后发布
+`device.renamed` SSE 事件刷新所有管理页面；支持 `device-display-name-sync.v1` 的在线 Client
+立即收到 `device_config`，离线 Client 则在下一次 Tunnel `welcome` 中取得最新名称，并原子更新
+`~/.nuntius/config.toml`。`DELETE` 表示 revoke，不执行物理删除。
 
 ## 5. Agent 状态上报
 
@@ -144,6 +147,8 @@ Server 产生：
 
 - Presence 内存丢失：Server 重启后设备自动重连重建。
 - Server SQLite 摘要落后：响应同时返回 `freshness` 和 `captured_at`。
+- 设备改名时离线或推送中断：Server 保留权威名称，Client 每次重连都用 `welcome` 快照对账；
+  握手期间发生的改名由连接注册表保留最新待同步值，避免旧快照覆盖新名称。
 - 两条同设备连接：原子替换 current epoch，旧连接只能关闭，不能消费命令。
 - 撤销与重连竞态：认证和每次路由都校验 active device status/key version。
 - heartbeat 写库失败：不影响当前连接，但 health 标记 degraded 并重试摘要持久化。

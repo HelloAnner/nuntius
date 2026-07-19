@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify, broadcast};
+use tokio::sync::{Mutex, Notify, RwLock, broadcast};
 
 #[derive(Clone)]
 pub struct CommandExecutor {
@@ -17,6 +17,7 @@ pub struct CommandExecutor {
     pub store: ClientStore,
     pub app: AppServerRuntime,
     pub device_id: String,
+    pub display_name: Arc<RwLock<String>>,
     pub events: broadcast::Sender<NuntiusEvent>,
     pub command_acks: broadcast::Sender<TunnelFrame>,
     pub command_notify: Arc<Notify>,
@@ -24,6 +25,17 @@ pub struct CommandExecutor {
 }
 
 impl CommandExecutor {
+    pub async fn apply_device_display_name(&self, display_name: &str) -> Result<()> {
+        let desired = display_name.to_owned();
+        let saved =
+            tokio::task::spawn_blocking(move || ClientConfig::update_display_name(&desired))
+                .await
+                .context("device name configuration task failed")??;
+        *self.display_name.write().await = saved.clone();
+        tracing::info!(display_name = %saved, "device display name synchronized");
+        Ok(())
+    }
+
     pub async fn execute(&self, command: &DeviceCommand) -> Result<Value> {
         if command.device_id != self.device_id {
             bail!("command targets a different device")
@@ -1292,6 +1304,7 @@ done
             store,
             app: AppServerRuntime::new(Arc::new(config)),
             device_id: "dev_test".into(),
+            display_name: Arc::new(RwLock::new("Nuntius Device".into())),
             events,
             command_acks,
             command_notify: Arc::new(Notify::new()),

@@ -160,6 +160,7 @@ async fn run() -> Result<()> {
         store,
         app: app.clone(),
         device_id,
+        display_name: Arc::new(tokio::sync::RwLock::new(cfg.display_name.clone())),
         events,
         command_acks,
         command_notify: Arc::new(tokio::sync::Notify::new()),

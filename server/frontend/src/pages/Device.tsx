@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Empty,
+  IconEdit,
   IconFolder,
   IconPlus,
   Spinner,
@@ -15,11 +16,13 @@ import { useNavigate } from "../hooks";
 import { useRoute } from "../stores";
 import { ConnIndicator, ProjectRow, TopBar } from "../components";
 import { DirectoryPicker } from "../sheets/DirectoryPicker";
+import { RenameDeviceSheet } from "../sheets/RenameDeviceSheet";
 
 export function DevicePage({ deviceId }: { deviceId: string }) {
   const navigate = useNavigate();
   const back = useRoute((s) => s.back);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const projects = useQuery({
     queryKey: ["projects", deviceId],
@@ -38,13 +41,14 @@ export function DevicePage({ deviceId }: { deviceId: string }) {
   return (
     <div className="page">
       <TopBar
-        title={device?.displayName ?? "设备"}
+        title={device ? <>{device.displayName}<IconEdit size={13} /></> : "设备"}
         subtitle={device
           ? device.status === "online"
             ? osLabel(device.osFamily, device.architecture)
             : `${statusLabel(device.status)}${device.lastSeenAt ? ` · ${relTime(device.lastSeenAt)}在线` : ""}`
           : undefined}
         onBack={() => back({ name: "devices" })}
+        onTitleClick={device && device.status !== "revoked" ? () => setRenameOpen(true) : undefined}
         trailing={<ConnIndicator />}
       />
       <div className="page-scroll">
@@ -105,6 +109,7 @@ export function DevicePage({ deviceId }: { deviceId: string }) {
         </div>
       </div>
       <DirectoryPicker deviceId={deviceId} open={pickerOpen} onClose={() => setPickerOpen(false)} />
+      <RenameDeviceSheet device={device ?? null} open={renameOpen} onClose={() => setRenameOpen(false)} />
     </div>
   );
 }

@@ -154,6 +154,7 @@ async fn info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiErro
             "sync-snapshot.v1".into(),
             "approvals.v1".into(),
             "server-update-relay.ssh.v1".into(),
+            DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into(),
         ],
     }))
 }
@@ -465,10 +466,10 @@ async fn rename_device(
     Json(request): Json<RenameDeviceRequest>,
 ) -> Result<Json<DeviceSummary>, ApiError> {
     let session = web_mutation(&state, &headers).await?;
-    let display_name = bounded_nonempty("displayName", &request.display_name, 128)?;
+    let display_name = bounded_nonempty("displayName", &request.display_name, 128)?.to_owned();
     if !state
         .store
-        .rename_device(&session.user_id, &device_id, display_name)
+        .rename_device(&session.user_id, &device_id, &display_name)
         .await?
     {
         return Err(ApiError::NotFound);
@@ -479,9 +480,26 @@ async fn rename_device(
             Some(&session.user_id),
             "device.renamed",
             Some(&device_id),
-            &serde_json::json!({}),
+            &serde_json::json!({"displayName": &display_name}),
         )
         .await?;
+    tunnel::publish_device_event(
+        &state,
+        &session.user_id,
+        &device_id,
+        "device.renamed",
+        serde_json::json!({"displayName": &display_name}),
+    )
+    .await?;
+    // The database is authoritative. Updated clients apply this snapshot immediately;
+    // offline and older clients reconcile from Welcome after their next upgrade/connect.
+    if let Err(error) = state
+        .tunnels
+        .sync_display_name(&device_id, &display_name)
+        .await
+    {
+        tracing::warn!(%device_id, error = ?error, "device name push failed; reconnecting for reconciliation");
+    }
     get_device(State(state), headers, Path(device_id)).await
 }
 
