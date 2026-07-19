@@ -157,7 +157,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     const provisionalId = `pending:${newIdemKey()}`;
     liveStore.addOptimistic(threadId, provisionalId, text, attachments, clientMessageId);
     try {
-      await api.startTurn(threadId, text);
+      await api.startTurn(threadId, text, clientMessageId);
       liveStore.applyCommandStatus(provisionalId, "completed");
     } catch (e) {
       const message = e instanceof Error ? e.message : "发送失败";
@@ -210,7 +210,9 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
       body: "归档后会从所有会话页面隐藏，历史记录仍保留在本机和服务器数据库中。",
       confirmLabel: "归档",
       action: async () => {
-        await archiveThread(threadId);
+        if (await archiveThread(threadId)) {
+          navigate({ name: "project", projectId }, { replace: true });
+        }
       },
     });
 
@@ -229,8 +231,8 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
       lockedReason={lockedReason}
       running={running}
       runtimeStatus={thread?.status ?? null}
-      runtimeConnected={providerConnected}
-      busy={busyIds.has(threadId)}
+      runtimeConnected={providerConnected || providerAvailable}
+      busy={busyIds.has(threadId) || sendBusy || interruptBusy}
       onSend={send}
       onRetry={retry}
       onInterrupt={interrupt}

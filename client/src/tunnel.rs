@@ -97,6 +97,7 @@ async fn run_connection(
                 "directory-browser.v1".into(),
                 "project-delete.v1".into(),
                 DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into(),
+                "image-input.v1".into(),
                 "agent-provider.v1".into(),
             ],
         },

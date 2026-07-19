@@ -11,6 +11,7 @@ import {
   Spinner,
   SwipeActionRow,
   compareThreadActivity,
+  newIdemKey,
   useConfirmAction,
   useToast,
   type AgentProvider,
@@ -76,9 +77,10 @@ export function ProjectPage({ projectId }: { projectId: string }) {
       navigate({ name: "thread", projectId, threadId: result.threadId });
       if (text) {
         const optimisticKey = `initial:${Date.now()}`;
-        liveStore.addOptimistic(result.threadId, optimisticKey, text);
+        const clientMessageId = newIdemKey();
+        liveStore.addOptimistic(result.threadId, optimisticKey, text, [], clientMessageId);
         void api
-          .startTurn(result.threadId, text)
+          .startTurn(result.threadId, text, clientMessageId)
           .then(() => {
             liveStore.applyCommandStatus(optimisticKey, "completed");
             void qc.invalidateQueries({ queryKey: ["projectThreads", projectId] });

@@ -491,7 +491,9 @@ components:
       type: object
       required: [text]
       properties:
-        text: {type: string, minLength: 1, maxLength: 262144}
+        text: {type: string, maxLength: 262144, description: 可为空，但 text 与 attachmentIds 至少有一项非空}
+        attachmentIds: {type: array, maxItems: 4, uniqueItems: true, items: {type: string}}
+        clientMessageId: {type: [string, 'null'], minLength: 1, maxLength: 128}
         accessMode: {enum: [full, ask], default: full}
         options: {type: object, additionalProperties: true}
     TextInput:

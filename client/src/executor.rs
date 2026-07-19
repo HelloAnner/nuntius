@@ -1,8 +1,9 @@
 use crate::{
     agent::{AgentRuntimes, AgentThreadState},
     app_server::AppServerCallError,
+    attachments,
     config::ClientConfig,
-    directory,
+    directory, pairing,
     protocol::*,
     store::ClientStore,
 };
@@ -108,7 +109,9 @@ impl CommandExecutor {
             } => {
                 let thread = self.command_thread(thread_id).await?;
                 let state = self.resume_provider_thread(&thread).await?;
-                let input = text_input(&request.text)?;
+                let (input, views) = self
+                    .prepare_user_input(thread_id, &request.text, attachments)
+                    .await?;
                 let result = self
                     .agents
                     .steer_turn(
@@ -121,7 +124,7 @@ impl CommandExecutor {
                         &input,
                         self.store.thread_access_mode(thread_id).await?,
                         &json!({}),
-                        None,
+                        request.client_message_id.as_deref(),
                     )
                     .await?;
                 self.emit(
@@ -129,7 +132,7 @@ impl CommandExecutor {
                     Some(&thread.project_id),
                     Some(thread_id),
                     None,
-                    json!({"text":request.text,"providerResult":result}),
+                    json!({"text":request.text,"attachments":views,"clientMessageId":request.client_message_id,"providerResult":result}),
                     true,
                 )
                 .await?;
@@ -183,11 +186,17 @@ impl CommandExecutor {
                     .claim_provider_request(approval_id)
                     .await?
                     .context("approval is missing or already decided")?;
+                let provider_session_id =
+                    if let Some(thread_id) = self.store.approval_thread(approval_id).await? {
+                        self.thread(&thread_id).await?.app_server_thread_id
+                    } else {
+                        None
+                    };
                 if let Err(error) = self
                     .agents
                     .resolve_approval(
                         provider,
-                        None,
+                        provider_session_id.as_deref(),
                         request_id,
                         &request.decision,
                         request.response.clone(),
@@ -428,6 +437,8 @@ impl CommandExecutor {
         {
             let start = StartTurnRequest {
                 text: text.clone(),
+                attachment_ids: Vec::new(),
+                client_message_id: None,
                 access_mode: request.access_mode,
                 options: Value::Object(Map::new()),
             };
@@ -468,20 +479,31 @@ impl CommandExecutor {
             .await
     }
 
-    async fn start_turn(&self, thread_id: &str, request: &StartTurnRequest) -> Result<Value> {
-        let input = text_input(&request.text)?;
+    async fn start_turn(
+        &self,
+        thread_id: &str,
+        request: &StartTurnRequest,
+        attachments: &[AttachmentRef],
+    ) -> Result<Value> {
+        let (input, attachment_views) = self
+            .prepare_user_input(thread_id, &request.text, attachments)
+            .await?;
         let mut thread = self.command_thread(thread_id).await?;
         // A new App Server thread has no rollout until its first turn starts.
         // Calling thread/resume here is therefore invalid; follow the protocol's
         // thread/start -> turn/start lifecycle directly.
         if !self.store.thread_has_turns(thread_id).await? {
-            return match self.begin_turn(&thread, request, &input).await {
+            return match self
+                .begin_turn(&thread, request, &input, &attachment_views)
+                .await
+            {
                 Ok(result) => Ok(result),
                 Err(error)
                     if thread.provider == AgentProvider::Codex && is_missing_app_thread(&error) =>
                 {
                     thread = self.recreate_empty_app_thread(&thread).await?;
-                    self.begin_turn(&thread, request, &input).await
+                    self.begin_turn(&thread, request, &input, &attachment_views)
+                        .await
                 }
                 Err(error) => Err(error),
             };
@@ -502,7 +524,7 @@ impl CommandExecutor {
                     &input,
                     request.access_mode,
                     &request.options,
-                    None,
+                    request.client_message_id.as_deref(),
                 )
                 .await?;
             self.emit(
@@ -510,7 +532,7 @@ impl CommandExecutor {
                 Some(&thread.project_id),
                 Some(thread_id),
                 None,
-                json!({"text":request.text,"providerResult":result}),
+                json!({"text":request.text,"attachments":attachment_views,"clientMessageId":request.client_message_id,"providerResult":result}),
                 true,
             )
             .await?;
@@ -527,7 +549,48 @@ impl CommandExecutor {
                 state.status
             )
         }
-        self.begin_turn(&thread, request, &input).await
+        self.begin_turn(&thread, request, &input, &attachment_views)
+            .await
+    }
+
+    async fn prepare_user_input(
+        &self,
+        thread_id: &str,
+        text: &str,
+        attachment_refs: &[AttachmentRef],
+    ) -> Result<(Vec<Value>, Vec<AttachmentView>)> {
+        if text.trim().is_empty() && attachment_refs.is_empty() {
+            bail!("a turn requires text or at least one image")
+        }
+        let mut input = Vec::with_capacity(attachment_refs.len() + 1);
+        if !text.trim().is_empty() {
+            input.push(json!({"type":"text","text":text}));
+        }
+        let mut views = Vec::with_capacity(attachment_refs.len());
+        let access_token = if attachment_refs.is_empty() {
+            None
+        } else {
+            Some(pairing::access_token(&self.config).await?)
+        };
+        for attachment in attachment_refs {
+            let local_path = attachments::ensure_local(
+                &self.config,
+                thread_id,
+                attachment,
+                access_token
+                    .as_deref()
+                    .expect("token exists for image input"),
+            )
+            .await
+            .with_context(|| format!("cannot receive attachment {}", attachment.id))?;
+            let view = self
+                .store
+                .upsert_attachment(thread_id, attachment, &local_path)
+                .await?;
+            input.push(json!({"type":"localImage","path":local_path,"detail":"auto"}));
+            views.push(view);
+        }
+        Ok((input, views))
     }
 
     async fn begin_turn(
@@ -535,6 +598,7 @@ impl CommandExecutor {
         thread: &ThreadSummary,
         request: &StartTurnRequest,
         input: &[Value],
+        attachments: &[AttachmentView],
     ) -> Result<Value> {
         let result = self
             .agents
@@ -547,7 +611,7 @@ impl CommandExecutor {
                 input,
                 request.access_mode,
                 &request.options,
-                None,
+                request.client_message_id.as_deref(),
             )
             .await?;
         let provider_turn = extract_id(
@@ -556,7 +620,12 @@ impl CommandExecutor {
         );
         let local_turn = self
             .store
-            .record_user_turn(&thread.id, provider_turn.as_deref(), &request.text)
+            .record_user_turn(
+                &thread.id,
+                provider_turn.as_deref(),
+                &request.text,
+                attachments,
+            )
             .await?;
         self.sync_thread(&thread.id).await?;
         self.emit_thread_summary(&thread.id).await?;
@@ -565,7 +634,7 @@ impl CommandExecutor {
             Some(&thread.project_id),
             Some(&thread.id),
             Some(&local_turn),
-            json!({"text":request.text,"providerResult":result}),
+            json!({"text":request.text,"attachments":attachments,"clientMessageId":request.client_message_id,"providerResult":result}),
             true,
         )
         .await?;
@@ -1302,6 +1371,8 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
                 request_id,
                 method,
                 &event_params,
+                project_id.as_deref(),
+                thread_id.as_deref(),
             )
             .await?;
         executor
@@ -1481,6 +1552,8 @@ async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Resul
                 &json!({"approvalId":provider_approval_id,"sessionId":session_id}),
                 "kimi/approval",
                 &payload,
+                Some(&thread.project_id),
+                Some(&thread_id),
             )
             .await?;
         executor
@@ -1564,13 +1637,6 @@ fn kimi_event_id(payload: &Value, key: &str) -> Option<String> {
             .or_else(|| value.as_i64().map(|value| value.to_string()))
             .or_else(|| value.as_u64().map(|value| value.to_string()))
     })
-}
-
-fn text_input(text: &str) -> Result<Vec<Value>> {
-    if text.trim().is_empty() {
-        bail!("turn text cannot be empty")
-    }
-    Ok(vec![json!({"type":"text","text":text})])
 }
 
 fn object(value: Value) -> Map<String, Value> {
@@ -1916,6 +1982,8 @@ done
                 "thr_test",
                 &StartTurnRequest {
                     text: "retry".into(),
+                    attachment_ids: Vec::new(),
+                    client_message_id: None,
                     access_mode: ConversationAccessMode::Full,
                     options: json!({}),
                 },

@@ -300,7 +300,6 @@ export function startEvents(qc: QueryClient): () => void {
       ready = true;
       retryDelay = 1_000;
       useSse.getState().set("live");
-      everLive = true;
       // The server starts a fresh browser at the event-log head. Refreshing
       // after the subscription opens makes the REST snapshot and subsequent
       // event stream a gap-free pair.

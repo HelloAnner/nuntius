@@ -32,6 +32,7 @@ export interface LiveItem {
   kind: LiveKind;
   title: string;
   text: string;
+  attachments: AttachmentView[];
   status: LiveStatus;
   files: LiveFile[];
   occurredAt: string;
@@ -149,7 +150,9 @@ export class ThreadLiveStore {
         (turn) =>
           !turn.id.startsWith("local:") &&
           !claimed.has(turn.id) &&
-          turn.userText === text &&
+          (clientMessageId
+            ? turn.clientMessageId === clientMessageId
+            : turn.userText === text) &&
           Number.isFinite(Date.parse(turn.startedAt)) &&
           Math.abs(now - Date.parse(turn.startedAt)) < 120_000,
       )
@@ -229,7 +232,12 @@ export class ThreadLiveStore {
   }
 
   /** optimistic echo for a steer sent mid-turn; rendered inline in order */
-  appendSteerEcho(threadId: string, text: string) {
+  appendSteerEcho(
+    threadId: string,
+    text: string,
+    attachments: AttachmentView[] = [],
+    clientMessageId: string | null = null,
+  ) {
     const occurredAt = new Date().toISOString();
     const turn =
       this.currentTurn(threadId, null) ?? this.ensureTurn(threadId, null, occurredAt, 0);
@@ -279,11 +287,12 @@ export class ThreadLiveStore {
     threadId: string,
     realTurnId: string,
     text: string | null,
+    clientMessageId: string | null,
     occurredAt: string,
     sequence: number,
   ): LiveTurn {
     const live = this.get(threadId);
-    if (text) {
+    if (text || clientMessageId) {
       const pendingIds = new Set(
         [...this.pending.values()]
           .filter((location) => location.threadId === threadId)
@@ -293,7 +302,9 @@ export class ThreadLiveStore {
         .filter(
           (turn) =>
             turn.id.startsWith("local:") &&
-            turn.userText === text &&
+            (clientMessageId
+              ? turn.clientMessageId === clientMessageId
+              : turn.userText === text) &&
             turn.items.length === 0 &&
             !["failed", "rejected", "unknown", "expired"].includes(turn.sendState ?? ""),
         )
@@ -372,11 +383,14 @@ export class ThreadLiveStore {
         threadId,
         turnId,
         p?.text ?? null,
+        p?.clientMessageId ?? null,
         event.occurredAt,
         event.seq,
       );
       turn.status = "running";
       if (p?.text) turn.userText = p.text;
+      if (p?.attachments) turn.userAttachments = p.attachments;
+      if (p?.clientMessageId) turn.clientMessageId = p.clientMessageId;
       turn.startedAt = event.occurredAt;
       turn.startedSequence = event.seq;
       turn.sendState = "completed";
@@ -409,7 +423,12 @@ export class ThreadLiveStore {
     }
     if (type.startsWith("agent.")) {
       const method = type.slice("agent.".length).toLowerCase();
-      const turn = this.ensureTurn(threadId, event.turnId ?? str(payload.turnId));
+      const turn = this.ensureTurn(
+        threadId,
+        event.turnId ?? str(payload.turnId),
+        event.occurredAt,
+        event.seq,
+      );
       if (method === "turn.started") {
         turn.status = "running";
         this.bump();
@@ -441,6 +460,8 @@ export class ThreadLiveStore {
           turn,
           `${event.turnId ?? "current"}:${method}`,
           method === "thinking.delta" ? "reasoning" : "agent",
+          event.occurredAt,
+          event.seq,
         );
         item.text += delta;
         item.status = "running";
@@ -449,7 +470,13 @@ export class ThreadLiveStore {
       }
       if (method === "tool.call.started" || method === "tool.progress" || method === "tool.result") {
         const key = str(payload.toolCallId) ?? `tool:${event.eventId}`;
-        const item = this.ensureItem(turn, key, "tool");
+        const item = this.ensureItem(
+          turn,
+          key,
+          "tool",
+          event.occurredAt,
+          event.seq,
+        );
         item.title = str(payload.name) ?? (item.title || "工具");
         const detail = method === "tool.call.started"
           ? str(payload.description) ?? printable(payload.args)
@@ -596,6 +623,7 @@ export class ThreadLiveStore {
       threadId,
       hint ?? `anon:${Date.now()}`,
       null,
+      null,
       occurredAt,
       sequence,
     );
@@ -624,6 +652,7 @@ export class ThreadLiveStore {
       kind,
       title: "",
       text: "",
+      attachments: [],
       status: "running",
       files: [],
       occurredAt,

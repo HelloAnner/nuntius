@@ -433,6 +433,10 @@ pub struct CreateThreadRequest {
 pub struct StartTurnRequest {
     pub text: String,
     #[serde(default)]
+    pub attachment_ids: Vec<String>,
+    #[serde(default)]
+    pub client_message_id: Option<String>,
+    #[serde(default)]
     pub access_mode: ConversationAccessMode,
     #[serde(default)]
     pub options: Value,

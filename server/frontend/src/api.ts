@@ -1,6 +1,7 @@
 /* Remote console API client (public server, /api/v1). */
 import {
   newIdemKey,
+  type AttachmentView,
   type AgentProvider,
   type ConversationAccessMode,
   type CommandReceipt,
@@ -168,10 +169,36 @@ export const api = {
   historyItems: (turnId: string, limit = 500) =>
     req<HistoryItemView[]>("GET", `/turns/${turnId}/items?limit=${limit}`),
 
-  startTurn: (threadId: string, text: string, accessMode: ConversationAccessMode, idemKey: string) =>
-    req<CommandReceipt>("POST", `/threads/${threadId}/turns`, { text, accessMode, options: {} }, { idemKey }),
-  steerTurn: (threadId: string, text: string, idemKey: string) =>
-    req<CommandReceipt>("POST", `/threads/${threadId}/steer`, { text }, { idemKey }),
+  uploadAttachment,
+  deleteAttachment: (attachmentId: string) =>
+    req<void>("DELETE", `/attachments/${attachmentId}`),
+  startTurn: (
+    threadId: string,
+    text: string,
+    attachmentIds: string[],
+    clientMessageId: string,
+    accessMode: ConversationAccessMode,
+    idemKey: string,
+  ) =>
+    req<CommandReceipt>(
+      "POST",
+      `/threads/${threadId}/turns`,
+      { text, attachmentIds, clientMessageId, accessMode, options: {} },
+      { idemKey },
+    ),
+  steerTurn: (
+    threadId: string,
+    text: string,
+    attachmentIds: string[],
+    clientMessageId: string,
+    idemKey: string,
+  ) =>
+    req<CommandReceipt>(
+      "POST",
+      `/threads/${threadId}/steer`,
+      { text, attachmentIds, clientMessageId },
+      { idemKey },
+    ),
   interruptTurn: (threadId: string) =>
     req<CommandReceipt>("POST", `/threads/${threadId}/interrupt`),
   archiveThread: (threadId: string, archived = true, idemKey?: string) =>

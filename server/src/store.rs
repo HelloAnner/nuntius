@@ -1408,6 +1408,30 @@ impl ServerStore {
                     sqlx::query("INSERT INTO items(id,turn_id,ordinal,kind,status,revision,content_hash,content_text,structured_detail,is_truncated,occurred_at,completed_at,snapshot_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ordinal=excluded.ordinal,kind=excluded.kind,status=excluded.status,revision=excluded.revision,content_hash=excluded.content_hash,content_text=excluded.content_text,structured_detail=excluded.structured_detail,is_truncated=excluded.is_truncated,occurred_at=excluded.occurred_at,completed_at=excluded.completed_at,snapshot_revision=excluded.snapshot_revision WHERE excluded.revision>=items.revision")
                         .bind(&item.id).bind(&item.turn_id).bind(item.ordinal).bind(&item.kind).bind(&item.status).bind(item.revision)
                         .bind(content_hash).bind(&item.content_text).bind(detail).bind(item.is_truncated).bind(&item.occurred_at).bind(&item.completed_at).bind(batch.inventory_revision).execute(&mut *tx).await?;
+                    sqlx::query("DELETE FROM item_attachments WHERE item_id=?")
+                        .bind(&item.id)
+                        .execute(&mut *tx)
+                        .await?;
+                    for (index, attachment) in item.attachments.iter().enumerate() {
+                        let stored = sqlx::query("SELECT * FROM attachments WHERE id=? AND user_id=? AND device_id=? AND thread_id=? AND status<>'deleted'")
+                            .bind(&attachment.id)
+                            .bind(user_id)
+                            .bind(&batch.device_id)
+                            .bind(&batch.thread_id)
+                            .fetch_optional(&mut *tx)
+                            .await?
+                            .context("history references an unavailable attachment")?;
+                        let stored = attachment_view_from_row(&stored);
+                        if &stored != attachment {
+                            bail!("history attachment metadata mismatch");
+                        }
+                        sqlx::query("INSERT INTO item_attachments(item_id,attachment_id,ordinal) VALUES(?,?,?)")
+                            .bind(&item.id)
+                            .bind(&attachment.id)
+                            .bind(index as i64 + 1)
+                            .execute(&mut *tx)
+                            .await?;
+                    }
                 } else {
                     // Presence in the authoritative snapshot is independent of
                     // content revision. Keep the newer server copy, but mark it

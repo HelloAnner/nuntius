@@ -139,7 +139,6 @@ export function startEvents(qc: QueryClient): () => void {
       ready = true;
       retryDelay = 1_000;
       useSse.getState().set("live");
-      everLive = true;
       // Establish the stream first, then refresh SQLite-backed queries. This
       // closes the initial snapshot/subscription race without replaying an
       // entire historical journal into the transient live store.

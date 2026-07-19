@@ -240,6 +240,8 @@ export function ThreadPage({
       const receipt = await api.startTurn(
         threadId,
         text,
+        attachments.map((attachment) => attachment.id),
+        clientMessageId,
         accessMode,
         idemKey,
       );
@@ -333,8 +335,8 @@ export function ThreadPage({
       lockedReason={lockedReason}
       running={running}
       runtimeStatus={thread?.status ?? null}
-      runtimeConnected={online && providerConnected}
-      busy={busyIds.has(threadId)}
+      runtimeConnected={online && providerAvailable}
+      busy={busyIds.has(threadId) || sendBusy || interruptBusy}
       onSend={send}
       onUpload={(file, onProgress) => api.uploadAttachment(threadId, file, onProgress)}
       onDeleteAttachment={api.deleteAttachment}

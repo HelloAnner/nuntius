@@ -8,7 +8,6 @@ import type {
   ProjectSummary,
   SyncSnapshot,
   ThreadSummary,
-  AgentProvider,
 } from "@nuntius/shared";
 
 export class ApiError extends Error {
@@ -73,9 +72,11 @@ export const api = {
     ),
   threads: () => req<ThreadSummary[]>("GET", "/threads"),
   history: (threadId: string) => req<HistoryRecord[]>("GET", `/threads/${threadId}/history`),
-  startTurn: (threadId: string, text: string) =>
+  startTurn: (threadId: string, text: string, clientMessageId?: string) =>
     req<{ operation: "start" | "steer"; turnId?: string }>("POST", `/threads/${threadId}/turns`, {
       text,
+      attachmentIds: [],
+      clientMessageId,
       accessMode: "full",
       options: {},
     }),

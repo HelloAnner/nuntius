@@ -1391,28 +1391,13 @@ impl ClientStore {
         project_id: Option<&str>,
         thread_id: Option<&str>,
     ) -> Result<()> {
-        self.save_provider_request(
-            AgentProvider::Codex,
-            approval_id,
-            request_id,
-            method,
-            params,
-        )
-        .await
-    }
-    pub async fn save_provider_request(
-        &self,
-        provider: AgentProvider,
-        approval_id: &str,
-        request_id: &Value,
-        method: &str,
-        params: &Value,
-    ) -> Result<()> {
-        sqlx::query("INSERT OR IGNORE INTO pending_app_requests(approval_id,app_request_id,method,params,status,created_at,provider) VALUES(?,?,?,?,'pending',?,?)")
+        sqlx::query("INSERT OR IGNORE INTO pending_app_requests(approval_id,app_request_id,method,params,project_id,thread_id,status,created_at,provider) VALUES(?,?,?,?,?,?,'pending',?,?)")
             .bind(approval_id)
             .bind(request_id.to_string())
             .bind(method)
             .bind(serde_json::to_string(params)?)
+            .bind(project_id)
+            .bind(thread_id)
             .bind(now())
             .bind(provider.as_str())
             .execute(&self.pool)

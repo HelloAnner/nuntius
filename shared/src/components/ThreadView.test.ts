@@ -18,6 +18,7 @@ function item(key: string, kind: LiveItem["kind"], text: string): LiveItem {
     kind,
     text,
     title: "",
+    attachments: [],
     status: "completed",
     files: [],
     occurredAt: "2026-07-19T10:00:01.000Z",
@@ -64,6 +65,7 @@ function historyGroup(
         text,
         status: "completed",
         occurredAt: startedAt ?? "2026-07-19T10:00:00.000Z",
+        attachments: [],
       },
       ...agentTexts.map((agentText, index) => ({
         id: `itm_agent_${index}`,
@@ -74,6 +76,7 @@ function historyGroup(
         occurredAt: new Date(
           Date.parse(startedAt ?? "2026-07-19T10:00:00.000Z") + (index + 1) * 1_000,
         ).toISOString(),
+        attachments: [],
       })),
     ],
   };
@@ -203,6 +206,7 @@ describe("ThreadView live/history reconciliation", () => {
       text: "first",
       status: "completed",
       occurredAt: "2026-07-19T09:59:59.000Z",
+      attachments: [],
     });
 
     const ordered = orderedHistory([later, earlier]);

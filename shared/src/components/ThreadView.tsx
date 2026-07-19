@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { CommandStatus } from "../types";
+import type { AttachmentView, CommandStatus } from "../types";
 import {
   compareChronology,
   compareLiveTurns,
@@ -73,11 +73,13 @@ export function visibleLiveItems(
       }
       return true;
     }
-    if (item.kind !== "user" || !item.text) return false;
-    const persisted = remainingUsers.get(item.text) ?? 0;
-    if (persisted > 0) {
-      remainingUsers.set(item.text, persisted - 1);
-      return false;
+    if (item.kind !== "user" || (!item.text && item.attachments.length === 0)) return false;
+    if (item.text) {
+      const persisted = remainingUsers.get(item.text) ?? 0;
+      if (persisted > 0) {
+        remainingUsers.set(item.text, persisted - 1);
+        return false;
+      }
     }
     if (
       !skippedInitialEcho &&
@@ -120,6 +122,10 @@ export function optimisticEchoIsInHistory(turn: LiveTurn, history: HistoryGroup[
 
 function normalizedMessage(text: string): string {
   return text.replace(/\r\n/g, "\n").trim();
+}
+
+function attachmentIds(attachments: AttachmentView[]): string {
+  return attachments.map((attachment) => attachment.id).join(",");
 }
 
 /** Keep durable items in their recorded chronology and never collapse two
@@ -271,7 +277,11 @@ export function freshLiveTurnsForHistory(
 }
 
 export function liveTurnHasTranscript(turn: LiveTurn): boolean {
-  return Boolean(turn.userText || visibleLiveItems(turn).length > 0);
+  return Boolean(
+    turn.userText ||
+    turn.userAttachments.length > 0 ||
+    visibleLiveItems(turn).length > 0
+  );
 }
 
 export function ThreadView({
@@ -476,8 +486,35 @@ export function ThreadView({
 
   useLayoutEffect(() => {
     if (loading) return;
-    followLatest(false);
-  }, [draftKey, followLatest, loading]);
+    const el = scrollRef.current;
+    if (!el) return;
+    const key = `nuntius:scroll:${draftKey}`;
+    let restored = false;
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (raw) {
+        const saved = JSON.parse(raw) as { top?: number; following?: boolean };
+        if (saved.following === false && typeof saved.top === "number") {
+          el.scrollTop = Math.max(0, Math.min(saved.top, el.scrollHeight - el.clientHeight));
+          setFollowing(false);
+          restored = true;
+        }
+      }
+    } catch {
+      /* unavailable or malformed session storage */
+    }
+    if (!restored) followLatest(false);
+    return () => {
+      try {
+        sessionStorage.setItem(
+          key,
+          JSON.stringify({ top: el.scrollTop, following: stickRef.current }),
+        );
+      } catch {
+        /* unavailable session storage */
+      }
+    };
+  }, [draftKey, followLatest, loading, setFollowing]);
 
   const sendAndFollow = useCallback((text: string, attachments: AttachmentView[], clientMessageId: string) => {
     followLatest(false);

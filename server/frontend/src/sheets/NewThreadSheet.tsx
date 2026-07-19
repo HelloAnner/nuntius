@@ -123,6 +123,8 @@ export function NewThreadSheet({
           .startTurn(
             created.threadId,
             text,
+            [],
+            firstTurnKey,
             accessMode,
             firstTurnKey,
           )
