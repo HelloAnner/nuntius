@@ -847,7 +847,10 @@ mod tests {
         let result = prepare_relayed_update(
             &config,
             &"a".repeat(40),
-            1,
+            // Sequence zero is the legacy-relay compatibility path and deliberately bypasses
+            // monotonic ordering, allowing this test to reach the digest validation even when
+            // CI embeds a large NUNTIUS_BUILD_SEQUENCE in the test binary.
+            0,
             &"b".repeat(64),
             b"not the expected archive",
         )
