@@ -33,3 +33,11 @@ cargo test --workspace
 - 两端 OpenAPI 定义在 `*/api/openapi.yaml`，二进制内嵌于 `/api/v1/openapi.yaml`。
 - Server 数据目录由 `--data-dir` 指定；Client 固定 `~/.nuntius/`。测试时用 `HOME=/tmp/xxx` 隔离。
 - 不要提交 `node_modules/`；密钥、令牌不进日志与仓库。
+
+## Git 工作流
+
+- 每一个独立的大功能开发完成并通过相关检查后，不需要等待用户再次提醒，自动创建一个语义清晰的 Git commit，并自动 push 到当前分支对应的远端；当前分支尚无 upstream 时，设置并 push 到 `origin` 的同名分支。
+- commit 只包含该功能范围内的代码、测试、生成物和文档。工作区中用户已有或与本功能无关的改动必须保留，不得顺带提交、覆盖或丢弃。
+- commit 前运行与改动风险相匹配的格式化、测试、类型检查或构建；如果检查失败，不得把功能宣称为完成，应先修复，确实无法修复时向用户报告阻塞。
+- push 后确认远端已包含该 commit；如果 CI 会被触发，应提供 commit、分支或 CI 链接。push 失败时保留本地 commit，并明确报告失败原因。
+- 用户明确要求暂不 commit、暂不 push 或采用其他 Git 流程时，以用户当次要求为准。密钥、令牌、生产配置和其他敏感信息始终不得进入 commit。
