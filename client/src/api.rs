@@ -109,7 +109,7 @@ async fn ready(State(executor): State<CommandExecutor>) -> Result<Json<Value>, A
 async fn info(State(executor): State<CommandExecutor>) -> Result<Json<Value>, ApiError> {
     let (projects, inbox, outbox, active) = executor.store.counts().await?;
     Ok(Json(
-        json!({"apiVersion":"v1","clientVersion":env!("CARGO_PKG_VERSION"),"deviceId":executor.device_id,"paired":executor.config.device_id.is_some(),"localBind":executor.config.local_bind,"appServerRunning":executor.app.is_running().await,"projects":projects,"pendingCommands":inbox,"pendingEvents":outbox,"activeTurns":active,"capabilities":["local-console.v1","directory-browser.v1","app-server.v1","sse.v1"]}),
+        json!({"apiVersion":"v1","clientVersion":env!("CARGO_PKG_VERSION"),"buildSha":nuntius_updater::build_sha(),"deviceId":executor.device_id,"paired":executor.config.device_id.is_some(),"localBind":executor.config.local_bind,"appServerRunning":executor.app.is_running().await,"projects":projects,"pendingCommands":inbox,"pendingEvents":outbox,"activeTurns":active,"capabilities":["local-console.v1","directory-browser.v1","app-server.v1","sse.v1"]}),
     ))
 }
 async fn openapi() -> Response {

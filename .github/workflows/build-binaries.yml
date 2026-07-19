@@ -15,8 +15,42 @@ env:
   RUST_VERSION: "1.94.0"
 
 jobs:
-  server-linux-x86_64:
-    name: Server · Linux x86_64
+  frontend:
+    name: Frontend · build and typecheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck frontends
+        run: bun run typecheck
+
+      - name: Build frontends
+        run: bun run build
+
+      - name: Upload embedded frontends
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: |
+            client/frontend/dist
+            server/frontend/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  test:
+    name: Rust · workspace tests
+    needs: frontend
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -24,16 +58,64 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v6
 
+      - name: Restore embedded frontends
+        uses: actions/download-artifact@v5
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: .
+
       - name: Install Rust
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal
           rustup default "$RUST_VERSION"
 
-      - name: Verify runner architecture
-        run: test "$(uname -m)" = "x86_64"
+      - name: Run workspace tests
+        run: cargo test --locked --workspace
 
-      - name: Build server
-        run: cargo build --locked --release --package nuntius-server
+  server-linux-x86_64:
+    name: Server · CentOS 7 x86_64
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Restore embedded frontends
+        uses: actions/download-artifact@v5
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: .
+
+      - name: Build native CentOS 7 server
+        run: |
+          docker run --rm \
+            -e RUST_VERSION="$RUST_VERSION" \
+            -e NUNTIUS_BUILD_SHA="$GITHUB_SHA" \
+            -e NUNTIUS_BUILD_TARGET="x86_64-unknown-linux-gnu" \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            quay.io/pypa/manylinux2014_x86_64 \
+            /bin/bash -lc '
+              set -euo pipefail
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"
+              source "$HOME/.cargo/env"
+              cargo build --locked --release --package nuntius-server
+              target/release/nuntius-server build-info
+            '
+
+      - name: Verify CentOS compatibility
+        run: |
+          test "$(uname -m)" = "x86_64"
+          file target/release/nuntius-server
+          max_glibc="$(strings target/release/nuntius-server \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+            | sort -Vu \
+            | tail -1)"
+          highest="$(printf '%s\n' "$max_glibc" 'GLIBC_2.17' | sort -V | tail -1)"
+          test "$highest" = "GLIBC_2.17"
 
       - name: Package server
         run: |
@@ -52,13 +134,13 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Add download link to summary
+      - name: Add server download link to summary
         env:
           ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
           ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
         run: |
           {
-            echo "## Server · Linux x86_64"
+            echo "## Server · CentOS 7 x86_64"
             echo
             echo "[Download nuntius-server-linux-x86_64.tar.gz]($ARTIFACT_URL)"
             echo
@@ -69,12 +151,22 @@ jobs:
 
   client-macos-arm64:
     name: Client · macOS ARM64
+    needs: test
     runs-on: macos-14
-    timeout-minutes: 30
+    timeout-minutes: 40
+    env:
+      NUNTIUS_BUILD_SHA: ${{ github.sha }}
+      NUNTIUS_BUILD_TARGET: aarch64-apple-darwin
 
     steps:
       - name: Check out source
         uses: actions/checkout@v6
+
+      - name: Restore embedded frontends
+        uses: actions/download-artifact@v5
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: .
 
       - name: Install Rust
         run: |
@@ -85,7 +177,9 @@ jobs:
         run: test "$(uname -m)" = "arm64"
 
       - name: Build client
-        run: cargo build --locked --release --package nuntius-client
+        run: |
+          cargo build --locked --release --package nuntius-client
+          target/release/nuntius-client build-info
 
       - name: Package client
         run: |
@@ -104,7 +198,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Add download link to summary
+      - name: Add client download link to summary
         env:
           ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
           ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
@@ -117,4 +211,90 @@ jobs:
             echo "Artifact SHA-256: \`$ARTIFACT_DIGEST\`"
             echo
             echo "Source commit: \`$GITHUB_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-continuous:
+    name: Publish · continuous self-update channel
+    needs: [server-linux-x86_64, client-macos-arm64]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Download server artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: nuntius-server-linux-x86_64-${{ github.sha }}
+          path: release
+
+      - name: Download client artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: nuntius-client-macos-arm64-${{ github.sha }}
+          path: release
+
+      - name: Build signed-by-checksum update manifest
+        working-directory: release
+        run: |
+          server_sha="$(sha256sum nuntius-server-linux-x86_64.tar.gz | cut -d' ' -f1)"
+          client_sha="$(sha256sum nuntius-client-macos-arm64.tar.gz | cut -d' ' -f1)"
+          jq -n \
+            --arg commitSha "$GITHUB_SHA" \
+            --arg serverSha "$server_sha" \
+            --arg clientSha "$client_sha" \
+            '{
+              schemaVersion: 1,
+              commitSha: $commitSha,
+              server: {
+                url: "https://github.com/HelloAnner/nuntius/releases/download/continuous/nuntius-server-linux-x86_64.tar.gz",
+                sha256: $serverSha,
+                target: "x86_64-unknown-linux-gnu"
+              },
+              client: {
+                url: "https://github.com/HelloAnner/nuntius/releases/download/continuous/nuntius-client-macos-arm64.tar.gz",
+                sha256: $clientSha,
+                target: "aarch64-apple-darwin"
+              }
+            }' > manifest.json
+
+      - name: Create continuous release when absent
+        run: |
+          if ! gh release view continuous --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create continuous \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Continuous build" \
+              --notes "Rolling self-update channel. Assets are replaced after every successful main build." \
+              --prerelease \
+              --latest=false
+          fi
+
+      - name: Publish binaries then manifest
+        run: |
+          gh release upload continuous \
+            release/nuntius-server-linux-x86_64.tar.gz \
+            release/nuntius-client-macos-arm64.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          gh release upload continuous \
+            release/manifest.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          gh release edit continuous \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Continuous build · $GITHUB_SHA" \
+            --notes "Rolling self-update channel for commit $GITHUB_SHA. Assets are replaced, not accumulated."
+
+      - name: Add continuous channel to summary
+        run: |
+          {
+            echo "## Continuous self-update channel"
+            echo
+            echo "[Open rolling release](https://github.com/$GITHUB_REPOSITORY/releases/tag/continuous)"
+            echo
+            echo "Published commit: \`$GITHUB_SHA\`"
           } >> "$GITHUB_STEP_SUMMARY"

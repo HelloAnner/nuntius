@@ -23,6 +23,7 @@ hex.workspace = true
 libc.workspace = true
 mime_guess.workspace = true
 nix.workspace = true
+nuntius-updater = { path = "../updater" }
 rand.workspace = true
 reqwest.workspace = true
 rust-embed.workspace = true

@@ -63,9 +63,9 @@ target/release/nuntius-server
 - `nuntius-server-linux-x86_64.tar.gz`：Linux AMD64 Server
 - `nuntius-client-macos-arm64.tar.gz`：macOS Apple Silicon Client
 
-打开最新一次成功的运行即可在任务摘要中下载。构建产物使用 GitHub Actions
-Artifact 保存，不创建 Release；Artifact 保留 14 天后自动删除，下载时需要登录
-GitHub。也可以使用 GitHub CLI 下载最新一次成功构建：
+Server 在 CentOS 7 / glibc 2.17 基线上构建，Client 在 macOS ARM64 runner
+上构建。打开最新一次成功的运行即可在任务摘要中下载；按提交保存的 Actions
+Artifact 保留 14 天。也可以使用 GitHub CLI 下载最新一次成功构建：
 
 ```bash
 run_id="$(gh run list \
@@ -76,6 +76,20 @@ run_id="$(gh run list \
   --json databaseId \
   --jq '.[0].databaseId')"
 gh run download "$run_id" --repo HelloAnner/nuntius
+```
+
+`main` 分支全部测试和构建成功后，还会覆盖
+[continuous](https://github.com/HelloAnner/nuntius/releases/tag/continuous) 滚动通道中的
+Server、Client 和 `manifest.json` 三个资产。该通道只保留最新资产，不会按提交累积
+Release。两个二进制内置自更新器：Server 默认每 60 秒检查一次，Client 默认每
+300 秒检查一次；Client 会等待 Server 运行同一 commit 后再升级。下载内容通过
+SHA-256 和内嵌构建身份校验，替换失败或新版本未能完成启动时回滚到 `.previous`。
+
+可在各自 `config.toml` 中控制：
+
+```toml
+auto_update = true
+update_interval_seconds = 60 # Client 默认是 300
 ```
 
 远程控制页（`server/frontend`）面向手机、平板和桌面，相关设计系统、

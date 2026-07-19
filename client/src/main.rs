@@ -16,11 +16,13 @@ use clap::{Parser, Subcommand};
 use config::ClientConfig;
 use executor::CommandExecutor;
 use fs2::FileExt;
+use nuntius_updater::{BuildInfo, UpdateConfig, UpdateRole};
 use std::{
     fs::{self, OpenOptions},
     path::PathBuf,
     process::{Command as ProcessCommand, Stdio},
     sync::Arc,
+    time::Duration,
 };
 use store::ClientStore;
 use tower_http::{catch_panic::CatchPanicLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
@@ -57,6 +59,7 @@ enum Command {
     Status,
     Backup,
     Paths,
+    BuildInfo,
 }
 
 #[tokio::main]
@@ -86,7 +89,10 @@ async fn main() -> Result<()> {
             println!("paired device {device_id}");
             Ok(())
         }
-        Command::Run => run().await,
+        Command::Run => {
+            nuntius_updater::handle_startup(&config::data_dir()?)?;
+            run().await
+        }
         Command::Start => start(),
         Command::Stop => stop(),
         Command::Status => status(),
@@ -99,6 +105,16 @@ async fn main() -> Result<()> {
                 config::data_dir()?.join(config::DATABASE_FILE).display()
             );
             println!("log: {}", config::log_path()?.display());
+            Ok(())
+        }
+        Command::BuildInfo => {
+            println!(
+                "{}",
+                serde_json::to_string(&BuildInfo::current(
+                    "nuntius-client",
+                    env!("CARGO_PKG_VERSION")
+                ))?
+            );
             Ok(())
         }
     }
@@ -170,10 +186,56 @@ async fn run() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(cfg.local_bind)
         .await
         .with_context(|| format!("cannot bind local console {}", cfg.local_bind))?;
+    let health_data_dir = root.clone();
+    let health_marker_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        if let Err(error) = nuntius_updater::mark_healthy(&health_data_dir) {
+            tracing::warn!(error=?error, "cannot mark self-update healthy");
+        }
+    });
     tracing::info!(bind=%cfg.local_bind,paired=cfg.device_id.is_some(),"Nuntius client running");
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(1);
+    let update_task = cfg.auto_update.then(|| {
+        let mut update = UpdateConfig::production(
+            UpdateRole::Client,
+            "nuntius-client",
+            "aarch64-apple-darwin",
+            root.clone(),
+            Duration::from_secs(cfg.update_interval_seconds),
+        );
+        update.required_server_info_url = url::Url::parse(&cfg.server_url)
+            .and_then(|base| base.join("/api/v1/info"))
+            .map(|url| url.to_string())
+            .ok();
+        nuntius_updater::spawn_update_loop(update, update_tx)
+    });
+    let (graceful_tx, graceful_rx) = tokio::sync::oneshot::channel();
+    let mut graceful_tx = Some(graceful_tx);
+    let server = std::future::IntoFuture::into_future(
+        axum::serve(listener, router).with_graceful_shutdown(async move {
+            let _ = graceful_rx.await;
+        }),
+    );
+    tokio::pin!(server);
+    let external_shutdown = shutdown_signal();
+    tokio::pin!(external_shutdown);
+    let mut prepared_update = None;
+    tokio::select! {
+        result = &mut server => result?,
+        _ = &mut external_shutdown => {
+            if let Some(tx) = graceful_tx.take() { let _ = tx.send(()); }
+            (&mut server).await?;
+        }
+        update = update_rx.recv(), if update_task.is_some() => {
+            prepared_update = update;
+            if let Some(tx) = graceful_tx.take() { let _ = tx.send(()); }
+            (&mut server).await?;
+        }
+    }
+    if let Some(task) = update_task {
+        task.abort();
+    }
+    health_marker_task.abort();
     if let Some(task) = tunnel_task {
         task.abort()
     }
@@ -181,6 +243,10 @@ async fn run() -> Result<()> {
     discovery_task.abort();
     app_events_task.abort();
     maintenance_task.abort();
+    if let Some(update) = prepared_update {
+        tracing::info!(target=%update.target_sha(), "activating self-update");
+        update.activate()?;
+    }
     Ok(())
 }
 

@@ -23,6 +23,8 @@ pub struct ServerConfig {
     pub pairing_code_ttl_minutes: i64,
     pub event_retention_hours: i64,
     pub log_format: String,
+    pub auto_update: bool,
+    pub update_interval_seconds: u64,
 }
 
 impl Default for ServerConfig {
@@ -36,6 +38,8 @@ impl Default for ServerConfig {
             pairing_code_ttl_minutes: 10,
             event_retention_hours: 24,
             log_format: "pretty".into(),
+            auto_update: true,
+            update_interval_seconds: 60,
         }
     }
 }
@@ -74,6 +78,9 @@ impl ServerConfig {
             || self.event_retention_hours <= 0
         {
             bail!("token TTL values must be positive");
+        }
+        if self.auto_update && self.update_interval_seconds < 60 {
+            bail!("update_interval_seconds must be at least 60");
         }
         Ok(())
     }

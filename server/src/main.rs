@@ -12,8 +12,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use config::{ServerConfig, initialize_data_dir};
 use event_hub::EventHub;
+use nuntius_updater::{BuildInfo, UpdateConfig, UpdateRole};
 use protocol::TransportSecurity;
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use store::ServerStore;
 use tower_http::{catch_panic::CatchPanicLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
@@ -26,7 +27,7 @@ use tracing_subscriber::EnvFilter;
 )]
 struct Cli {
     #[arg(long, env = "NUNTIUS_SERVER_DATA_DIR")]
-    data_dir: PathBuf,
+    data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -39,6 +40,7 @@ enum Command {
     },
     Serve,
     Backup,
+    BuildInfo,
 }
 
 #[derive(Clone)]
@@ -65,7 +67,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { force } => {
-            let result = initialize_data_dir(&cli.data_dir, force)?;
+            let data_dir = required_data_dir(cli.data_dir)?;
+            let result = initialize_data_dir(&data_dir, force)?;
             ServerStore::open(&result.data_dir)
                 .await
                 .context("initialize server SQLite")?;
@@ -77,9 +80,27 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Serve => serve(cli.data_dir).await,
-        Command::Backup => backup(cli.data_dir).await,
+        Command::Serve => {
+            let data_dir = required_data_dir(cli.data_dir)?;
+            nuntius_updater::handle_startup(&data_dir)?;
+            serve(data_dir).await
+        }
+        Command::Backup => backup(required_data_dir(cli.data_dir)?).await,
+        Command::BuildInfo => {
+            println!(
+                "{}",
+                serde_json::to_string(&BuildInfo::current(
+                    "nuntius-server",
+                    env!("CARGO_PKG_VERSION")
+                ))?
+            );
+            Ok(())
+        }
     }
+}
+
+fn required_data_dir(data_dir: Option<PathBuf>) -> Result<PathBuf> {
+    data_dir.context("--data-dir or NUNTIUS_SERVER_DATA_DIR is required for this command")
 }
 
 async fn backup(data_dir: PathBuf) -> Result<()> {
@@ -107,7 +128,7 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
         .context("open server SQLite")?;
     let state = AppState {
         config: Arc::new(config.clone()),
-        data_dir: Arc::new(data_dir),
+        data_dir: Arc::new(data_dir.clone()),
         store,
         events: EventHub::new(4096),
         tunnels: tunnel::TunnelRegistry::new(),
@@ -129,11 +150,59 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
         .layer(CatchPanicLayer::new())
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    let health_data_dir = data_dir.clone();
+    let health_marker_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        if let Err(error) = nuntius_updater::mark_healthy(&health_data_dir) {
+            tracing::warn!(error=?error, "cannot mark self-update healthy");
+        }
+    });
     tracing::info!(bind=%config.bind,public_base_url=%config.public_base_url,secure=config.is_secure(),"nuntius server listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(1);
+    let update_task = config.auto_update.then(|| {
+        nuntius_updater::spawn_update_loop(
+            UpdateConfig::production(
+                UpdateRole::Server,
+                "nuntius-server",
+                "x86_64-unknown-linux-gnu",
+                data_dir.clone(),
+                Duration::from_secs(config.update_interval_seconds),
+            ),
+            update_tx,
+        )
+    });
+    let (graceful_tx, graceful_rx) = tokio::sync::oneshot::channel();
+    let mut graceful_tx = Some(graceful_tx);
+    let server = std::future::IntoFuture::into_future(
+        axum::serve(listener, app).with_graceful_shutdown(async move {
+            let _ = graceful_rx.await;
+        }),
+    );
+    tokio::pin!(server);
+    let external_shutdown = shutdown_signal();
+    tokio::pin!(external_shutdown);
+    let mut prepared_update = None;
+    tokio::select! {
+        result = &mut server => result?,
+        _ = &mut external_shutdown => {
+            if let Some(tx) = graceful_tx.take() { let _ = tx.send(()); }
+            (&mut server).await?;
+        }
+        update = update_rx.recv(), if update_task.is_some() => {
+            prepared_update = update;
+            if let Some(tx) = graceful_tx.take() { let _ = tx.send(()); }
+            (&mut server).await?;
+        }
+    }
+    if let Some(task) = update_task {
+        task.abort();
+    }
+    health_marker_task.abort();
     maintenance_task.abort();
+    if let Some(update) = prepared_update {
+        tracing::info!(target=%update.target_sha(), "activating self-update");
+        update.activate()?;
+    }
     Ok(())
 }
 

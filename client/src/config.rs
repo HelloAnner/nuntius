@@ -25,6 +25,8 @@ pub struct ClientConfig {
     pub codex_command: String,
     pub codex_args: Vec<String>,
     pub log_format: String,
+    pub auto_update: bool,
+    pub update_interval_seconds: u64,
 }
 
 impl Default for ClientConfig {
@@ -45,6 +47,8 @@ impl Default for ClientConfig {
             codex_command: "codex".into(),
             codex_args: vec!["app-server".into()],
             log_format: "pretty".into(),
+            auto_update: true,
+            update_interval_seconds: 300,
         }
     }
 }
@@ -100,6 +104,9 @@ impl ClientConfig {
         }
         if self.allowed_roots.iter().any(|root| !root.is_absolute()) {
             bail!("every allowed_roots entry must be an absolute path")
+        }
+        if self.auto_update && self.update_interval_seconds < 60 {
+            bail!("update_interval_seconds must be at least 60")
         }
         Ok(())
     }

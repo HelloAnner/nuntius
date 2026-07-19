@@ -127,6 +127,7 @@ async fn info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiErro
     Ok(Json(ServerInfo {
         api_version: "v1".into(),
         server_version: env!("CARGO_PKG_VERSION").into(),
+        build_sha: nuntius_updater::build_sha().into(),
         transport_security: state.transport_security(),
         initialized: state.store.initialized().await?,
         capabilities: vec![

@@ -32,6 +32,7 @@ pub enum TransportSecurity {
 pub struct ServerInfo {
     pub api_version: String,
     pub server_version: String,
+    pub build_sha: String,
     pub transport_security: TransportSecurity,
     pub initialized: bool,
     pub capabilities: Vec<String>,

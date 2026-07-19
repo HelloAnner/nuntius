@@ -271,10 +271,11 @@ components:
   schemas:
     ServerInfo:
       type: object
-      required: [apiVersion, serverVersion, transportSecurity, initialized, capabilities]
+      required: [apiVersion, serverVersion, buildSha, transportSecurity, initialized, capabilities]
       properties:
         apiVersion: {type: string}
         serverVersion: {type: string}
+        buildSha: {type: string}
         transportSecurity: {enum: [secure, insecure, local]}
         initialized: {type: boolean}
         capabilities: {type: array, items: {type: string}}

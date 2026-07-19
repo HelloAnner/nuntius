@@ -6,6 +6,7 @@ export type TransportSecurity = "secure" | "insecure" | "local";
 export interface ServerInfo {
   apiVersion: string;
   serverVersion: string;
+  buildSha: string;
   transportSecurity: TransportSecurity;
   initialized: boolean;
   capabilities: string[];
@@ -14,6 +15,7 @@ export interface ServerInfo {
 export interface ClientInfo {
   apiVersion: string;
   clientVersion: string;
+  buildSha: string;
   deviceId: string;
   paired: boolean;
   localBind: string;
