@@ -300,10 +300,9 @@ export function startEvents(qc: QueryClient): () => void {
       ready = true;
       retryDelay = 1_000;
       useSse.getState().set("live");
-      // The server starts a fresh browser at the event-log head. Refreshing
-      // after the subscription opens makes the REST snapshot and subsequent
-      // event stream a gap-free pair.
-      resync();
+      // Do not resync here: resync() creates this stream. The snapshot cursor
+      // was captured before its reads, so replaying from it already closes the
+      // snapshot/subscription race without starting a connect/resync loop.
     };
     es.addEventListener("nuntius", (e) => {
       try {

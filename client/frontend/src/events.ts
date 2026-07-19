@@ -139,10 +139,9 @@ export function startEvents(qc: QueryClient): () => void {
       ready = true;
       retryDelay = 1_000;
       useSse.getState().set("live");
-      // Establish the stream first, then refresh SQLite-backed queries. This
-      // closes the initial snapshot/subscription race without replaying an
-      // entire historical journal into the transient live store.
-      resync();
+      // Do not resync here: resync() creates this stream. The snapshot cursor
+      // was captured before its reads, so replaying from it already closes the
+      // snapshot/subscription race without starting a connect/resync loop.
     };
     es.addEventListener("nuntius", (e) => {
       try {
