@@ -6,11 +6,13 @@ import {
   IconArchive,
   IconChat,
   IconPlus,
+  ProviderPicker,
   Sheet,
   Spinner,
   SwipeActionRow,
   useConfirmAction,
   useToast,
+  type AgentProvider,
 } from "@nuntius/shared";
 import { api } from "../api";
 import { useArchiveThreadAction, useNavigate } from "../hooks";
@@ -26,6 +28,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
   const { confirm, node: confirmNode } = useConfirmAction();
   const [creating, setCreating] = useState(false);
   const [firstMessage, setFirstMessage] = useState("");
+  const [provider, setProvider] = useState<AgentProvider>("codex");
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -39,13 +42,20 @@ export function ProjectPage({ projectId }: { projectId: string }) {
   const project = projects.data?.find((p) => p.id === projectId);
 
   useEffect(() => {
+    if (creating) setProvider("codex");
+  }, [creating]);
+
+  useEffect(() => {
     if (!deleting && (projects.isError || (projects.isSuccess && !project))) {
       navigate({ name: "overview" }, { replace: true });
     }
   }, [deleting, navigate, project, projects.isError, projects.isSuccess]);
 
   const unassigned = project?.kind === "system_unassigned";
-  const canCreate = Boolean(info.data?.appServerRunning && !unassigned);
+  const providerStatuses = info.data?.providers ?? [];
+  const selectedProviderAvailable =
+    providerStatuses.find((status) => status.provider === provider)?.available ?? provider === "codex";
+  const canCreate = Boolean(!unassigned && providerStatuses.some((status) => status.available));
   const sorted = [...(threads.data ?? [])].sort(
     (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
   );
@@ -58,6 +68,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
       const result = await api.createThread(
         projectId,
         text ? Array.from(text).slice(0, 48).join("") : null,
+        provider,
       );
       setCreating(false);
       setFirstMessage("");
@@ -93,7 +104,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
     if (!project || unassigned || deleting) return;
     confirm({
       title: `删除「${project.displayName}」？`,
-      body: `会从本机 Nuntius 删除项目登记及 ${project.threadCount} 个会话记录，并在设备重新连上服务器后同步删除。不会删除磁盘上的项目文件或 Codex 原始会话文件。`,
+      body: `会从本机 Nuntius 删除项目登记及 ${project.threadCount} 个会话记录，并在设备重新连上服务器后同步删除。不会删除磁盘上的项目文件或代理原始会话文件。`,
       confirmLabel: "删除项目",
       danger: true,
       action: async () => {
@@ -135,7 +146,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
       <div className="page-scroll">
         <div className="page-col">
           {!canCreate && !info.isLoading ? (
-            <div className="notice-banner warn compact">Codex App Server 未运行</div>
+            <div className="notice-banner warn compact">本机没有可用的编码代理</div>
           ) : null}
           {threads.isLoading ? (
             <div style={{ display: "grid", placeItems: "center", padding: 48 }}>
@@ -193,18 +204,28 @@ export function ProjectPage({ projectId }: { projectId: string }) {
 
       <Sheet open={creating} onClose={() => setCreating(false)} title="新建会话">
         <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+          <ProviderPicker
+            value={provider}
+            onChange={setProvider}
+            statuses={providerStatuses}
+            disabled={busy}
+          />
           <div className="field">
             <label htmlFor="first-msg">第一条消息（可选）</label>
             <textarea
               id="first-msg"
               rows={4}
               style={{ resize: "vertical", minHeight: 96 }}
-              placeholder="描述一下想让 Codex 做什么…"
+              placeholder={`描述一下想让 ${provider === "kimi" ? "Kimi" : "Codex"} 做什么…`}
               value={firstMessage}
               onChange={(e) => setFirstMessage(e.target.value)}
             />
           </div>
-          <button className="btn primary block" onClick={create} disabled={busy}>
+          <button
+            className="btn primary block"
+            onClick={create}
+            disabled={busy || !selectedProviderAvailable}
+          >
             开始对话
           </button>
         </div>

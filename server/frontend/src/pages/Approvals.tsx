@@ -57,8 +57,14 @@ export function ApprovalsPage() {
     }
   };
 
-  const online = (deviceId: string) =>
-    devices.data?.find((d) => d.id === deviceId)?.status === "online";
+  const approvalConnected = (approval: ApprovalView) => {
+    const device = devices.data?.find((candidate) => candidate.id === approval.deviceId);
+    if (device?.status !== "online") return false;
+    const provider = threads.data?.find((thread) => thread.id === approval.threadId)?.provider ?? "codex";
+    const providers = device.providers ?? [];
+    const providerStatus = providers.find((status) => status.provider === provider);
+    return providerStatus?.status === "online" || (provider === "codex" && providers.length === 0);
+  };
 
   return (
     <div className="page">
@@ -82,7 +88,7 @@ export function ApprovalsPage() {
                         <ApprovalCard
                           approval={enriched}
                           onDecide={(d) => void decide(a, d)}
-                          locked={!online(a.deviceId)}
+                          locked={!approvalConnected(a)}
                         />
                         {a.threadId ? (
                           <button

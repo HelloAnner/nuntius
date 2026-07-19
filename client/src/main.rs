@@ -1,3 +1,4 @@
+mod agent;
 mod api;
 mod app_server;
 mod assets;
@@ -7,14 +8,15 @@ mod directory;
 mod error;
 mod executor;
 mod history_monitor;
+mod kimi;
 mod pairing;
 mod protocol;
 mod store;
 mod tunnel;
 mod update_relay;
 
+use agent::AgentRuntimes;
 use anyhow::{Context, Result, bail};
-use app_server::AppServerRuntime;
 use clap::{Parser, Subcommand};
 use config::ClientConfig;
 use executor::CommandExecutor;
@@ -153,12 +155,12 @@ async fn run() -> Result<()> {
     store.recover_process_state().await?;
     let (events, _) = tokio::sync::broadcast::channel(4096);
     let (command_acks, _) = tokio::sync::broadcast::channel(1024);
-    let app = AppServerRuntime::new(cfg.clone());
+    let agents = AgentRuntimes::new(cfg.clone());
     let device_id = cfg.device_id.clone().unwrap_or_else(|| "unpaired".into());
     let executor = CommandExecutor {
         config: cfg.clone(),
         store,
-        app: app.clone(),
+        agents: agents.clone(),
         device_id,
         events,
         command_acks,
@@ -178,13 +180,15 @@ async fn run() -> Result<()> {
         }
     });
     let app_events_task = tokio::spawn(executor::process_app_events(executor.clone()));
+    let kimi_event_stream_task = tokio::spawn(agents.kimi.clone().run_event_stream());
+    let kimi_events_task = tokio::spawn(executor::process_kimi_events(executor.clone()));
     let history_monitor_task = tokio::spawn(history_monitor::run(executor.clone()));
     let discovery = executor.clone();
     let discovery_task = tokio::spawn(async move {
         match discovery.discover_all().await {
-            Ok(count) => tracing::info!(count, "Codex history discovery completed"),
+            Ok(count) => tracing::info!(count, "agent history discovery completed"),
             Err(error) => {
-                tracing::warn!(error=?error, "Codex history discovery unavailable; local API remains online")
+                tracing::warn!(error=?error, "agent history discovery unavailable; local API remains online")
             }
         }
     });
@@ -264,12 +268,14 @@ async fn run() -> Result<()> {
     if let Some(task) = tunnel_task {
         task.abort()
     }
-    app.shutdown().await?;
     discovery_task.abort();
     history_monitor_task.abort();
     app_events_task.abort();
+    kimi_event_stream_task.abort();
+    kimi_events_task.abort();
     command_queue_task.abort();
     maintenance_task.abort();
+    agents.shutdown().await?;
     if let Some(update) = prepared_update {
         tracing::info!(target=%update.target_sha(), "activating self-update");
         update.activate()?;

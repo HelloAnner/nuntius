@@ -328,7 +328,7 @@ components:
         architecture: {type: string, maxLength: 64}
     Device:
       type: object
-      required: [id, displayName, status, projectCount, activeTurnCount, pendingApprovalCount, historyCompleteness, inboxDepth, outboxDepth, historyBackfillDepth]
+      required: [id, displayName, status, projectCount, activeTurnCount, pendingApprovalCount, historyCompleteness, inboxDepth, outboxDepth, historyBackfillDepth, providers]
       properties:
         id: {type: string}
         displayName: {type: string}
@@ -349,6 +349,17 @@ components:
         inboxDepth: {type: integer}
         outboxDepth: {type: integer}
         historyBackfillDepth: {type: integer}
+        providers:
+          type: array
+          items:
+            type: object
+            required: [provider, label, available, status]
+            properties:
+              provider: {enum: [codex, kimi]}
+              label: {type: string}
+              available: {type: boolean}
+              status: {type: string}
+              version: {type: [string, 'null']}
     Project:
       type: object
       required: [id, deviceId, kind, displayName, status, threadCount]
@@ -363,11 +374,12 @@ components:
         lastActivityAt: {type: [string, 'null'], format: date-time}
     Thread:
       type: object
-      required: [id, deviceId, projectId, title, status, archived, historyCompleteness]
+      required: [id, deviceId, projectId, provider, title, status, archived, historyCompleteness]
       properties:
         id: {type: string}
         deviceId: {type: string}
         projectId: {type: string}
+        provider: {enum: [codex, kimi], default: codex}
         appServerThreadId: {type: [string, 'null']}
         title: {type: string}
         status: {type: string}
@@ -397,12 +409,15 @@ components:
       properties:
         title: {type: [string, 'null'], maxLength: 256}
         firstMessage: {type: [string, 'null'], maxLength: 262144}
+        provider: {enum: [codex, kimi], default: codex}
+        accessMode: {enum: [full, ask], default: full}
         options: {type: object, additionalProperties: true}
     StartTurn:
       type: object
       required: [text]
       properties:
         text: {type: string, minLength: 1, maxLength: 262144}
+        accessMode: {enum: [full, ask], default: full}
         options: {type: object, additionalProperties: true}
     TextInput:
       type: object

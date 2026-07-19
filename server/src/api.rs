@@ -150,6 +150,7 @@ async fn info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiErro
             "device-tunnel.v1".into(),
             "history.v1".into(),
             "directory-browser.v1".into(),
+            "agent-provider.v1".into(),
             "project-delete.v1".into(),
             "sync-snapshot.v1".into(),
             "approvals.v1".into(),

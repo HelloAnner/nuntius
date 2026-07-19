@@ -1,12 +1,12 @@
 /* Reusable new-thread flow for project lists and wide conversation layouts. */
-import { useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ProviderPicker,
   Sheet,
   newIdemKey,
-  threadOptionsForAccess,
-  turnOptionsForAccess,
   useToast,
+  type AgentProvider,
   type ThreadSummary,
 } from "@nuntius/shared";
 import { api, ApiError } from "../api";
@@ -74,8 +74,17 @@ export function NewThreadSheet({
   const toast = useToast();
   const qc = useQueryClient();
   const accessMode = useAccessMode((state) => state.mode);
+  const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const [firstMessage, setFirstMessage] = useState("");
+  const [provider, setProvider] = useState<AgentProvider>("codex");
   const [busy, setBusy] = useState(false);
+  const providerStatuses = devices.data?.find((device) => device.id === deviceId)?.providers ?? [];
+  const providerAvailable =
+    providerStatuses.find((status) => status.provider === provider)?.available ?? provider === "codex";
+
+  useEffect(() => {
+    if (open) setProvider("codex");
+  }, [open]);
 
   const create = async () => {
     const text = firstMessage.trim();
@@ -88,7 +97,8 @@ export function NewThreadSheet({
         projectId,
         text ? Array.from(text).slice(0, 48).join("") : null,
         null,
-        threadOptionsForAccess(accessMode),
+        provider,
+        accessMode,
         idemKey,
       );
       trackCommand(qc, receipt.commandId, undefined, "thread.create");
@@ -113,7 +123,7 @@ export function NewThreadSheet({
           .startTurn(
             created.threadId,
             text,
-            turnOptionsForAccess(accessMode),
+            accessMode,
             firstTurnKey,
           )
           .then((turnReceipt) => {
@@ -147,18 +157,24 @@ export function NewThreadSheet({
   return (
     <Sheet open={open} onClose={onClose} title="新建会话">
       <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+        <ProviderPicker
+          value={provider}
+          onChange={setProvider}
+          statuses={providerStatuses}
+          disabled={busy}
+        />
         <div className="field">
           <label htmlFor={`first-msg-${projectId}`}>第一条消息（可选）</label>
           <textarea
             id={`first-msg-${projectId}`}
             rows={4}
             style={{ resize: "vertical", minHeight: 96 }}
-            placeholder="描述一下想让 Codex 做什么…"
+            placeholder={`描述一下想让 ${provider === "kimi" ? "Kimi" : "Codex"} 做什么…`}
             value={firstMessage}
             onChange={(event) => setFirstMessage(event.target.value)}
           />
         </div>
-        <button className="btn primary block" onClick={create} disabled={busy}>
+        <button className="btn primary block" onClick={create} disabled={busy || !providerAvailable}>
           {busy ? "正在创建…" : "开始对话"}
         </button>
       </div>

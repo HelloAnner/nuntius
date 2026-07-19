@@ -260,6 +260,66 @@ export class ThreadLiveStore {
       this.bump();
       return;
     }
+    if (type.startsWith("agent.")) {
+      const method = type.slice("agent.".length).toLowerCase();
+      const turn = this.ensureTurn(threadId, event.turnId ?? str(payload.turnId));
+      if (method === "turn.started") {
+        turn.status = "running";
+        this.bump();
+        return;
+      }
+      if (method === "turn.ended") {
+        const reason = str(payload.reason)?.toLowerCase();
+        this.finalizeTurn(
+          turn,
+          reason === "cancelled"
+            ? "interrupted"
+            : reason === "failed" || reason === "blocked"
+              ? "failed"
+              : "completed",
+        );
+        this.bump();
+        return;
+      }
+      if (method === "event.session.work_changed") {
+        if (payload.busy === true) turn.status = "running";
+        else this.finalizeTurn(turn, "completed");
+        this.bump();
+        return;
+      }
+      if (method === "assistant.delta" || method === "thinking.delta") {
+        const delta = str(payload.delta) ?? "";
+        if (!delta) return;
+        const item = this.ensureItem(
+          turn,
+          `${event.turnId ?? "current"}:${method}`,
+          method === "thinking.delta" ? "reasoning" : "agent",
+        );
+        item.text += delta;
+        item.status = "running";
+        this.scheduleBump();
+        return;
+      }
+      if (method === "tool.call.started" || method === "tool.progress" || method === "tool.result") {
+        const key = str(payload.toolCallId) ?? `tool:${event.eventId}`;
+        const item = this.ensureItem(turn, key, "tool");
+        item.title = str(payload.name) ?? (item.title || "工具");
+        const detail = method === "tool.call.started"
+          ? str(payload.description) ?? printable(payload.args)
+          : method === "tool.progress"
+            ? printable(payload.update)
+            : printable(payload.output) ?? printable(payload.result);
+        if (detail) {
+          item.text = method === "tool.progress"
+            ? `${item.text}${item.text ? "\n" : ""}${detail}`
+            : detail;
+        }
+        item.status = method === "tool.result" ? "completed" : "running";
+        this.bump();
+        return;
+      }
+      return;
+    }
     if (!type.startsWith("app_server.")) return;
 
     const method = type.slice("app_server.".length).toLowerCase();
@@ -413,6 +473,16 @@ function str(v: unknown, ...path: string[]): string | null {
   }
   if (typeof cur === "string" && cur) return cur;
   return null;
+}
+
+function printable(value: unknown): string | null {
+  if (typeof value === "string") return value || null;
+  if (value === null || value === undefined) return null;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function kindOfItem(item: Record<string, unknown>, method: string): LiveKind {

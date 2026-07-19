@@ -24,6 +24,9 @@ pub struct ClientConfig {
     pub allowed_roots: Vec<PathBuf>,
     pub codex_command: String,
     pub codex_args: Vec<String>,
+    pub kimi_command: String,
+    pub kimi_args: Vec<String>,
+    pub kimi_server_url: String,
     pub log_format: String,
     pub auto_update: bool,
     pub update_interval_seconds: u64,
@@ -51,6 +54,14 @@ impl Default for ClientConfig {
             allowed_roots: vec![home],
             codex_command: "codex".into(),
             codex_args: vec!["app-server".into()],
+            kimi_command: "kimi".into(),
+            kimi_args: vec![
+                "web".into(),
+                "--no-open".into(),
+                "--port".into(),
+                "58627".into(),
+            ],
+            kimi_server_url: "http://127.0.0.1:58627".into(),
             log_format: "pretty".into(),
             auto_update: true,
             update_interval_seconds: 300,
@@ -114,6 +125,20 @@ impl ClientConfig {
         }
         if self.allowed_roots.iter().any(|root| !root.is_absolute()) {
             bail!("every allowed_roots entry must be an absolute path")
+        }
+        let kimi_url = Url::parse(&self.kimi_server_url).context("kimi_server_url is invalid")?;
+        if kimi_url.scheme() != "http"
+            || !matches!(kimi_url.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
+        {
+            bail!("kimi_server_url must be a loopback HTTP URL")
+        }
+        if self.kimi_command.trim().is_empty()
+            || self
+                .kimi_args
+                .iter()
+                .any(|argument| argument.is_empty() || argument.contains('\0'))
+        {
+            bail!("kimi_command and kimi_args must not contain empty or NUL arguments")
         }
         if (self.auto_update || self.server_update_relay) && self.update_interval_seconds < 60 {
             bail!("update_interval_seconds must be at least 60")

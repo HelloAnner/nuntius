@@ -11,6 +11,7 @@ import {
   IconGit,
   IconShield,
   relTime,
+  providerLabel,
   statusLabel,
   truncateMiddle,
   type ConnState,
@@ -185,7 +186,7 @@ export function ThreadRow({
     !thread.archived && !["active", "completed", "idle"].includes(thread.status)
       ? statusLabel(thread.status)
       : null;
-  const details = [context, thread.archived ? "已归档" : secondaryStatus].filter(Boolean) as string[];
+  const details = [context, providerLabel(thread.provider), thread.archived ? "已归档" : secondaryStatus].filter(Boolean) as string[];
   return (
     <button className="list-row" onClick={onClick}>
       <span className={`row-glyph thread${thread.archived ? " muted" : ""}`}>

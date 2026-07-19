@@ -90,6 +90,7 @@ async fn run_connection(executor: CommandExecutor) -> Result<()> {
                 "history.v1".into(),
                 "directory-browser.v1".into(),
                 "project-delete.v1".into(),
+                "agent-provider.v1".into(),
             ],
         },
     )
@@ -151,7 +152,7 @@ async fn run_connection(executor: CommandExecutor) -> Result<()> {
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
             },
-            _=heartbeat.tick()=>{let(project_count,inbox_depth,outbox_depth,active)=executor.store.counts().await?;let health=DeviceHealth{app_server_status:if executor.app.is_running().await{"online".into()}else{"stopped".into()},storage_status:"ok".into(),inbox_depth,outbox_depth,history_backfill_depth:executor.store.pending_history(1000).await?.len() as i64,active_turn_count:active,pending_approval_count:executor.store.pending_approval_count().await?,project_count,codex_version:None};send(&mut socket,&TunnelFrame::Heartbeat{sent_at:now(),health}).await?;},
+            _=heartbeat.tick()=>{let(project_count,inbox_depth,outbox_depth,active)=executor.store.counts().await?;let providers=executor.agents.statuses().await;let codex=providers.iter().find(|status|status.provider==AgentProvider::Codex);let health=DeviceHealth{app_server_status:codex.map(|status|status.status.clone()).unwrap_or_else(||"unavailable".into()),storage_status:"ok".into(),inbox_depth,outbox_depth,history_backfill_depth:executor.store.pending_history(1000).await?.len() as i64,active_turn_count:active,pending_approval_count:executor.store.pending_approval_count().await?,project_count,codex_version:codex.and_then(|status|status.version.clone()),providers};send(&mut socket,&TunnelFrame::Heartbeat{sent_at:now(),health}).await?;},
             _=flush.tick()=>send_pending(&executor,&mut socket).await?,
             _=tokio::time::sleep_until(watchdog_deadline)=>return Err(anyhow!("server heartbeat acknowledgement timed out")),
         }

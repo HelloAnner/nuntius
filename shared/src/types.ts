@@ -2,6 +2,15 @@
  * Field names match the camelCase JSON produced by the Rust backends. */
 
 export type TransportSecurity = "secure" | "insecure" | "local";
+export type AgentProvider = "codex" | "kimi";
+
+export interface AgentProviderStatus {
+  provider: AgentProvider;
+  label: string;
+  available: boolean;
+  status: string;
+  version: string | null;
+}
 
 export interface ServerInfo {
   apiVersion: string;
@@ -20,6 +29,7 @@ export interface ClientInfo {
   paired: boolean;
   localBind: string;
   appServerRunning: boolean;
+  providers: AgentProviderStatus[];
   projects: number;
   pendingCommands: number;
   pendingEvents: number;
@@ -71,6 +81,7 @@ export interface DeviceSummary {
   historyCompleteness: HistoryCompleteness;
   historyLastSyncedAt: string | null;
   transportSecurity: TransportSecurity | null;
+  providers: AgentProviderStatus[];
 }
 
 export type ProjectKind = "workspace" | "system_unassigned";
@@ -93,6 +104,7 @@ export interface ThreadSummary {
   id: string;
   deviceId: string;
   projectId: string;
+  provider: AgentProvider;
   appServerThreadId: string | null;
   title: string;
   status: string;

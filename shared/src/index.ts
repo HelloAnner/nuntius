@@ -9,3 +9,4 @@ export * from "./components/items";
 export * from "./components/Composer";
 export * from "./components/ThreadView";
 export * from "./components/DirectoryBrowser";
+export * from "./components/ProviderPicker";

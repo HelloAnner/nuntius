@@ -473,6 +473,8 @@ impl ServerStore {
                 inbox_depth: r.get("inbox_depth"),
                 outbox_depth: r.get("outbox_depth"),
                 history_backfill_depth: r.get("history_backfill_depth"),
+                providers: serde_json::from_str(&r.get::<String, _>("provider_statuses_json"))
+                    .unwrap_or_default(),
             })
             .collect())
     }
@@ -485,10 +487,14 @@ impl ServerStore {
         health: Option<&DeviceHealth>,
     ) -> Result<()> {
         let codex = health.and_then(|h| h.codex_version.as_deref());
-        sqlx::query("UPDATE devices SET last_seen_at=?,agent_version=?,codex_version=COALESCE(?,codex_version),transport_security=?,active_turn_count=COALESCE(?,active_turn_count),pending_approval_count=COALESCE(?,pending_approval_count),app_server_status=COALESCE(?,app_server_status),storage_status=COALESCE(?,storage_status),inbox_depth=COALESCE(?,inbox_depth),outbox_depth=COALESCE(?,outbox_depth),history_backfill_depth=COALESCE(?,history_backfill_depth) WHERE id=? AND status='active'")
+        let providers = health
+            .map(|health| serde_json::to_string(&health.providers))
+            .transpose()?;
+        sqlx::query("UPDATE devices SET last_seen_at=?,agent_version=?,codex_version=COALESCE(?,codex_version),transport_security=?,active_turn_count=COALESCE(?,active_turn_count),pending_approval_count=COALESCE(?,pending_approval_count),app_server_status=COALESCE(?,app_server_status),storage_status=COALESCE(?,storage_status),inbox_depth=COALESCE(?,inbox_depth),outbox_depth=COALESCE(?,outbox_depth),history_backfill_depth=COALESCE(?,history_backfill_depth),provider_statuses_json=COALESCE(?,provider_statuses_json) WHERE id=? AND status='active'")
             .bind(now()).bind(agent_version).bind(codex).bind(transport_string(security)).bind(health.map(|value|value.active_turn_count)).bind(health.map(|value|value.pending_approval_count))
             .bind(health.map(|value|value.app_server_status.as_str())).bind(health.map(|value|value.storage_status.as_str()))
             .bind(health.map(|value|value.inbox_depth)).bind(health.map(|value|value.outbox_depth)).bind(health.map(|value|value.history_backfill_depth))
+            .bind(providers)
             .bind(device_id).execute(&self.pool).await?;
         Ok(())
     }
@@ -627,11 +633,12 @@ impl ServerStore {
         if project_exists.is_none() {
             bail!("created thread references an unavailable project")
         }
-        sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,app_server_thread_id,title,status,archived,history_completeness,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,last_activity_at=COALESCE(excluded.last_activity_at,threads.last_activity_at) WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id")
+        sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,status,archived,history_completeness,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,last_activity_at=COALESCE(excluded.last_activity_at,threads.last_activity_at) WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id")
             .bind(&thread.id)
             .bind(user_id)
             .bind(&thread.device_id)
             .bind(&thread.project_id)
+            .bind(thread.provider.as_str())
             .bind(&thread.app_server_thread_id)
             .bind(&thread.title)
             .bind(&thread.status)
@@ -1158,8 +1165,8 @@ impl ServerStore {
                     &fallback_project
                 };
                 if !stale {
-                    sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,app_server_thread_id,title,status,archived,history_completeness,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,'backfilling',?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,last_synced_at=excluded.last_synced_at,last_activity_at=excluded.last_activity_at,history_revision=excluded.history_revision WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id AND excluded.history_revision>=threads.history_revision")
-                    .bind(&thread.id).bind(user_id).bind(&batch.device_id).bind(project_id).bind(&thread.app_server_thread_id).bind(&thread.title).bind(&thread.status).bind(thread.archived)
+                    sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,status,archived,history_completeness,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,'backfilling',?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,last_synced_at=excluded.last_synced_at,last_activity_at=excluded.last_activity_at,history_revision=excluded.history_revision WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id AND excluded.history_revision>=threads.history_revision")
+                    .bind(&thread.id).bind(user_id).bind(&batch.device_id).bind(project_id).bind(thread.provider.as_str()).bind(&thread.app_server_thread_id).bind(&thread.title).bind(&thread.status).bind(thread.archived)
                     .bind(&thread.last_synced_at).bind(&thread.last_activity_at).bind(batch.inventory_revision).execute(&mut *tx).await?;
                 }
             }
@@ -1383,6 +1390,11 @@ fn thread_from_row(r: sqlx::sqlite::SqliteRow) -> ThreadSummary {
         id: r.get("id"),
         device_id: r.get("device_id"),
         project_id: r.get("project_id"),
+        provider: if r.get::<String, _>("provider") == "kimi" {
+            AgentProvider::Kimi
+        } else {
+            AgentProvider::Codex
+        },
         app_server_thread_id: r.get("app_server_thread_id"),
         title: r.get("title"),
         status: r.get("status"),
@@ -1572,6 +1584,7 @@ mod tests {
                     id: "thr_remove".into(),
                     device_id: device_id.clone(),
                     project_id: "prj_remove".into(),
+                    provider: AgentProvider::Codex,
                     app_server_thread_id: Some("app_remove".into()),
                     title: "Old thread".into(),
                     status: "idle".into(),
@@ -1786,6 +1799,7 @@ mod tests {
                     id: "thr_history".into(),
                     device_id: device_id.clone(),
                     project_id: "unknown-local-project".into(),
+                    provider: AgentProvider::Codex,
                     app_server_thread_id: Some("app_history".into()),
                     title: "Imported".into(),
                     status: "idle".into(),
@@ -1906,6 +1920,7 @@ mod tests {
                     id: "thr_history_second".into(),
                     device_id: second_device.clone(),
                     project_id: "unknown-second-project".into(),
+                    provider: AgentProvider::Codex,
                     app_server_thread_id: Some("app_history".into()),
                     title: "Second imported thread".into(),
                     status: "idle".into(),

@@ -247,10 +247,11 @@ impl ClientStore {
             bail!("项目中仍有运行中的会话，请先中断或等待会话结束");
         }
         let canonical_path: String = project.get("canonical_path");
-        let threads = sqlx::query("SELECT id,app_server_thread_id FROM threads WHERE project_id=?")
-            .bind(id)
-            .fetch_all(&mut *tx)
-            .await?;
+        let threads =
+            sqlx::query("SELECT id,provider,app_server_thread_id FROM threads WHERE project_id=?")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?;
         let thread_count = threads.len() as i64;
 
         sqlx::query("INSERT INTO removed_project_paths(canonical_path,project_id,removed_at) VALUES(?,?,?) ON CONFLICT(canonical_path) DO UPDATE SET project_id=excluded.project_id,removed_at=excluded.removed_at")
@@ -261,15 +262,19 @@ impl ClientStore {
             .await?;
         for thread in &threads {
             let thread_id: String = thread.get("id");
+            let provider: String = thread.get("provider");
             if let Some(app_thread_id) = thread.get::<Option<String>, _>("app_server_thread_id") {
-                sqlx::query("INSERT INTO removed_app_threads(app_server_thread_id,canonical_path,removed_at) VALUES(?,?,?) ON CONFLICT(app_server_thread_id) DO UPDATE SET canonical_path=excluded.canonical_path,removed_at=excluded.removed_at")
+                sqlx::query("INSERT INTO removed_app_threads(app_server_thread_id,canonical_path,removed_at,provider) VALUES(?,?,?,?) ON CONFLICT(app_server_thread_id) DO UPDATE SET canonical_path=excluded.canonical_path,removed_at=excluded.removed_at,provider=excluded.provider")
                     .bind(&app_thread_id)
                     .bind(&canonical_path)
                     .bind(&stamp)
+                    .bind(&provider)
                     .execute(&mut *tx)
                     .await?;
                 sqlx::query("DELETE FROM runtime_state WHERE key=?")
-                    .bind(format!("app_thread_fingerprint:{app_thread_id}"))
+                    .bind(format!(
+                        "provider_thread_fingerprint:{provider}:{app_thread_id}"
+                    ))
                     .execute(&mut *tx)
                     .await?;
             }
@@ -312,11 +317,22 @@ impl ClientStore {
     }
 
     pub async fn app_thread_removed(&self, app_thread_id: &str) -> Result<bool> {
-        let removed: Option<i64> =
-            sqlx::query_scalar("SELECT 1 FROM removed_app_threads WHERE app_server_thread_id=?")
-                .bind(app_thread_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        self.provider_thread_removed(AgentProvider::Codex, app_thread_id)
+            .await
+    }
+
+    pub async fn provider_thread_removed(
+        &self,
+        provider: AgentProvider,
+        app_thread_id: &str,
+    ) -> Result<bool> {
+        let removed: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM removed_app_threads WHERE provider=? AND app_server_thread_id=?",
+        )
+        .bind(provider.as_str())
+        .bind(app_thread_id)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(removed.is_some())
     }
 
@@ -370,8 +386,29 @@ impl ClientStore {
         title: &str,
         app_server_options: &Value,
     ) -> Result<()> {
+        self.create_provider_thread(
+            id,
+            project_id,
+            AgentProvider::Codex,
+            app_id,
+            title,
+            ConversationAccessMode::Full,
+            app_server_options,
+        )
+        .await
+    }
+    pub async fn create_provider_thread(
+        &self,
+        id: &str,
+        project_id: &str,
+        provider: AgentProvider,
+        app_id: &str,
+        title: &str,
+        access_mode: ConversationAccessMode,
+        app_server_options: &Value,
+    ) -> Result<()> {
         let stamp = now();
-        sqlx::query("INSERT INTO threads(id,project_id,app_server_thread_id,title,app_server_options,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id).bind(project_id).bind(app_id).bind(title).bind(serde_json::to_string(app_server_options)?).bind(&stamp).bind(&stamp).bind(&stamp).execute(&self.pool).await?;
+        sqlx::query("INSERT INTO threads(id,project_id,provider,app_server_thread_id,title,access_mode,app_server_options,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(id).bind(project_id).bind(provider.as_str()).bind(app_id).bind(title).bind(access_mode.as_str()).bind(serde_json::to_string(app_server_options)?).bind(&stamp).bind(&stamp).bind(&stamp).execute(&self.pool).await?;
         Ok(())
     }
     pub async fn thread_has_turns(&self, id: &str) -> Result<bool> {
@@ -388,6 +425,17 @@ impl ClientStore {
                 .fetch_one(&self.pool)
                 .await?;
         Ok(serde_json::from_str(&encoded).unwrap_or_else(|_| Value::Object(Default::default())))
+    }
+    pub async fn thread_access_mode(&self, id: &str) -> Result<ConversationAccessMode> {
+        let mode: String = sqlx::query_scalar("SELECT access_mode FROM threads WHERE id=?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(if mode == "ask" {
+            ConversationAccessMode::Ask
+        } else {
+            ConversationAccessMode::Full
+        })
     }
     pub async fn rebind_app_server_thread(&self, id: &str, app_id: &str) -> Result<()> {
         sqlx::query(
@@ -429,11 +477,22 @@ impl ClientStore {
         Ok(())
     }
     pub async fn local_thread_id(&self, app_thread_id: &str) -> Result<Option<String>> {
+        self.local_provider_thread_id(AgentProvider::Codex, app_thread_id)
+            .await
+    }
+    pub async fn local_provider_thread_id(
+        &self,
+        provider: AgentProvider,
+        app_thread_id: &str,
+    ) -> Result<Option<String>> {
         Ok(
-            sqlx::query_scalar("SELECT id FROM threads WHERE app_server_thread_id=?")
-                .bind(app_thread_id)
-                .fetch_optional(&self.pool)
-                .await?,
+            sqlx::query_scalar(
+                "SELECT id FROM threads WHERE provider=? AND app_server_thread_id=?",
+            )
+            .bind(provider.as_str())
+            .bind(app_thread_id)
+            .fetch_optional(&self.pool)
+            .await?,
         )
     }
     pub async fn record_user_turn(
@@ -669,11 +728,20 @@ impl ClientStore {
         Ok(())
     }
     pub async fn import_app_thread(&self, project_id: &str, thread: &Value) -> Result<String> {
+        self.import_provider_thread(AgentProvider::Codex, project_id, thread)
+            .await
+    }
+    pub async fn import_provider_thread(
+        &self,
+        provider: AgentProvider,
+        project_id: &str,
+        thread: &Value,
+    ) -> Result<String> {
         let app_id = thread
             .get("id")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("App Server thread has no id"))?;
-        if let Some(id) = self.local_thread_id(app_id).await? {
+        if let Some(id) = self.local_provider_thread_id(provider, app_id).await? {
             self.update_imported_thread(&id, thread).await?;
             return Ok(id);
         }
@@ -681,8 +749,8 @@ impl ClientStore {
         let title = imported_thread_title(thread);
         let stamp = unix_value_to_rfc3339(thread.get("updatedAt")).unwrap_or_else(now);
         let status = value_status(thread.get("status"), "idle");
-        sqlx::query("INSERT INTO threads(id,project_id,app_server_thread_id,title,status,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
-            .bind(&id).bind(project_id).bind(app_id).bind(title).bind(status).bind(&stamp).bind(&stamp).bind(&stamp)
+        sqlx::query("INSERT INTO threads(id,project_id,provider,app_server_thread_id,title,status,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
+            .bind(&id).bind(project_id).bind(provider.as_str()).bind(app_id).bind(title).bind(status).bind(&stamp).bind(&stamp).bind(&stamp)
             .execute(&self.pool).await?;
         Ok(id)
     }
@@ -1114,10 +1182,44 @@ impl ClientStore {
         method: &str,
         params: &Value,
     ) -> Result<()> {
-        sqlx::query("INSERT OR IGNORE INTO pending_app_requests(approval_id,app_request_id,method,params,status,created_at) VALUES(?,?,?,?,'pending',?)").bind(approval_id).bind(request_id.to_string()).bind(method).bind(serde_json::to_string(params)?).bind(now()).execute(&self.pool).await?;
+        self.save_provider_request(
+            AgentProvider::Codex,
+            approval_id,
+            request_id,
+            method,
+            params,
+        )
+        .await
+    }
+    pub async fn save_provider_request(
+        &self,
+        provider: AgentProvider,
+        approval_id: &str,
+        request_id: &Value,
+        method: &str,
+        params: &Value,
+    ) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO pending_app_requests(approval_id,app_request_id,method,params,status,created_at,provider) VALUES(?,?,?,?,'pending',?,?)")
+            .bind(approval_id)
+            .bind(request_id.to_string())
+            .bind(method)
+            .bind(serde_json::to_string(params)?)
+            .bind(now())
+            .bind(provider.as_str())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
     pub async fn claim_app_request(&self, approval_id: &str) -> Result<Option<(Value, String)>> {
+        Ok(self
+            .claim_provider_request(approval_id)
+            .await?
+            .map(|(_, request_id, method)| (request_id, method)))
+    }
+    pub async fn claim_provider_request(
+        &self,
+        approval_id: &str,
+    ) -> Result<Option<(AgentProvider, Value, String)>> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let claimed = sqlx::query("UPDATE pending_app_requests SET status='responding' WHERE approval_id=? AND status='pending'")
             .bind(approval_id).execute(&mut *tx).await?.rows_affected();
@@ -1126,7 +1228,7 @@ impl ClientStore {
             return Ok(None);
         }
         let row = sqlx::query(
-            "SELECT app_request_id,method FROM pending_app_requests WHERE approval_id=?",
+            "SELECT provider,app_request_id,method FROM pending_app_requests WHERE approval_id=?",
         )
         .bind(approval_id)
         .fetch_optional(&mut *tx)
@@ -1134,6 +1236,7 @@ impl ClientStore {
         tx.commit().await?;
         row.map(|r| {
             Ok((
+                provider_from_str(&r.get::<String, _>("provider")),
                 serde_json::from_str(&r.get::<String, _>("app_request_id"))?,
                 r.get("method"),
             ))
@@ -1209,6 +1312,7 @@ fn thread_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ThreadSummary
         id: r.get("id"),
         device_id: device_id.into(),
         project_id: r.get("project_id"),
+        provider: provider_from_str(&r.get::<String, _>("provider")),
         app_server_thread_id: r.get("app_server_thread_id"),
         title: r.get("title"),
         status: r.get("status"),
@@ -1216,6 +1320,14 @@ fn thread_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ThreadSummary
         history_completeness: HistoryCompleteness::Complete,
         last_synced_at: None,
         last_activity_at: r.get("last_activity_at"),
+    }
+}
+
+fn provider_from_str(value: &str) -> AgentProvider {
+    if value == "kimi" {
+        AgentProvider::Kimi
+    } else {
+        AgentProvider::Codex
     }
 }
 
