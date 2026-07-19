@@ -7,6 +7,7 @@ import {
   SwipeActionRow,
   ThreadView,
   newIdemKey,
+  providerLabel,
   useConfirmAction,
   useToast,
   type ApprovalView,
@@ -106,19 +107,21 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     [approvals, threadId, project, thread],
   );
 
-  const appRunning = info.data?.appServerRunning ?? false;
+  const providerStatus = info.data?.providers.find((status) => status.provider === thread?.provider);
+  const providerAvailable = providerStatus?.available ?? thread?.provider === "codex";
+  const providerConnected = providerStatus?.status === "online";
   const archived = thread?.archived ?? false;
   // SQLite is authoritative. Live events render output but never manufacture
   // the execution state shown to the user.
   const running = thread?.status === "active";
 
-  const canSend = Boolean(appRunning && !archived && thread);
+  const canSend = Boolean(providerAvailable && !archived && thread);
   const lockedReason = !thread
     ? "会话加载中…"
     : archived
       ? "已归档"
-      : !appRunning
-        ? "Codex App Server 未运行"
+      : !providerAvailable
+        ? `${providerLabel(thread.provider)} 未安装或不可用`
         : null;
 
   const send = async (text: string) => {
@@ -187,13 +190,13 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
       live={live}
       approvals={threadApprovals}
       onDecide={decide}
-      approvalsLocked={!appRunning}
+      approvalsLocked={!providerConnected}
       draftKey={threadId}
       canSend={canSend}
       lockedReason={lockedReason}
       running={running}
       runtimeStatus={thread?.status ?? null}
-      runtimeConnected={appRunning}
+      runtimeConnected={providerConnected}
       busy={busyIds.has(threadId)}
       onSend={send}
       onRetry={retry}
@@ -204,7 +207,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
   const topbar = (
     <TopBar
       title={thread?.title ?? "会话"}
-      subtitle={project?.displayName}
+      subtitle={thread ? `${project?.displayName ?? "项目"} · ${providerLabel(thread.provider)}` : project?.displayName}
       onBack={() => back({ name: "project", projectId })}
       trailing={
         <>

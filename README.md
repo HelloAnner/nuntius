@@ -1,6 +1,6 @@
 # Nuntius
 
-Nuntius 把多台工作电脑上的 Codex App Server 接入同一台公网 Server，并提供两套彼此独立的浏览器页面：
+Nuntius 把多台工作电脑上的本地编码代理（Codex、Kimi）接入同一台公网 Server，并提供两套彼此独立的浏览器页面：
 
 - `client`：安装在工作电脑上的单二进制后台 Agent，同时提供只监听 loopback 的本地管理页。
 - `server`：部署在公网服务器上的单二进制控制服务，同时提供手机、平板访问的远程控制页。
@@ -181,7 +181,9 @@ nuntius-client status
 
 停服后可运行 `nuntius-client backup`，一致性备份会写入 `~/.nuntius/backups/`。
 
-前台调试使用 `nuntius-client run`；后台日志位于 `~/.nuntius/logs/nuntius-client.log`，本地页面默认访问 `http://127.0.0.1:7331/`。Client 通过 stdio JSONL 管理 `codex app-server`，不会把 App Server 本身暴露到网络。
+前台调试使用 `nuntius-client run`；后台日志位于 `~/.nuntius/logs/nuntius-client.log`，本地页面默认访问 `http://127.0.0.1:7331/`。Client 通过 provider 层管理 `codex app-server`，并通过带 bearer token 的 loopback REST/WebSocket 连接 `kimi web`；两者都不会直接暴露到公网。
+
+每个新会话可在页面选择 Codex（默认）或 Kimi。Kimi 默认由 `kimi web --no-open --port 58627` 按需启动，地址可用 `kimi_server_url` 配置，命令和参数可用 `kimi_command`、`kimi_args` 覆盖；地址必须保持为 loopback HTTP。Client 同时兼容前台常驻和后台守护两类 `kimi web` 版本；由 Client 持有的前台子进程会在退出时一并清理，已经独立运行的 Kimi 服务不会受影响。
 
 若 Server 是非 loopback HTTP，配对前还需显式允许：
 

@@ -351,6 +351,7 @@ async fn run_socket(
                     "directory-browser.v1".into(),
                     "project-delete.v1".into(),
                     DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into(),
+                    "agent-provider.v1".into(),
                 ],
                 display_name: Some(display_name.clone()),
             })

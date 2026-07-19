@@ -1,5 +1,6 @@
 use crate::{
-    app_server::{AppServerCallError, AppServerRuntime},
+    agent::{AgentRuntimes, AgentThreadState},
+    app_server::AppServerCallError,
     config::ClientConfig,
     directory,
     protocol::*,
@@ -15,7 +16,7 @@ use tokio::sync::{Mutex, Notify, RwLock, broadcast};
 pub struct CommandExecutor {
     pub config: Arc<ClientConfig>,
     pub store: ClientStore,
-    pub app: AppServerRuntime,
+    pub agents: AgentRuntimes,
     pub device_id: String,
     pub display_name: Arc<RwLock<String>>,
     pub events: broadcast::Sender<NuntiusEvent>,
@@ -60,17 +61,19 @@ impl CommandExecutor {
                 archived,
             } => {
                 let thread = self.command_thread(thread_id).await?;
-                let app_result = if thread.archived == *archived {
+                let provider_result = if thread.archived == *archived {
                     json!({"alreadyInRequestedState":true})
                 } else {
-                    let method = if *archived {
-                        "thread/archive"
-                    } else {
-                        "thread/unarchive"
-                    };
                     let result = self
-                        .app
-                        .call(method, json!({"threadId":thread.app_server_thread_id}))
+                        .agents
+                        .archive_session(
+                            thread.provider,
+                            thread
+                                .app_server_thread_id
+                                .as_deref()
+                                .context("thread has no provider session id")?,
+                            *archived,
+                        )
                         .await?;
                     self.store.set_thread_archived(thread_id, *archived).await?;
                     result
@@ -86,7 +89,7 @@ impl CommandExecutor {
                     "threadId": thread_id,
                     "archived": archived,
                     "thread": updated,
-                    "appServerResult": app_result,
+                    "providerResult": provider_result,
                 }))
             }
             DeviceCommandKind::TurnStart { thread_id, request } => {
@@ -94,27 +97,58 @@ impl CommandExecutor {
             }
             DeviceCommandKind::TurnSteer { thread_id, request } => {
                 let thread = self.command_thread(thread_id).await?;
-                let state = self.resume_app_thread(&thread).await?;
-                let app_turn = state.active_turn_id.context("no active turn to steer")?;
-                self.app.call("turn/steer",json!({"threadId":thread.app_server_thread_id,"expectedTurnId":app_turn,"input":[{"type":"text","text":request.text}]})).await
+                let state = self.resume_provider_thread(&thread).await?;
+                let input = text_input(&request.text)?;
+                let result = self
+                    .agents
+                    .steer_turn(
+                        thread.provider,
+                        thread
+                            .app_server_thread_id
+                            .as_deref()
+                            .context("thread has no provider session id")?,
+                        state.active_turn_id.as_deref(),
+                        &input,
+                        self.store.thread_access_mode(thread_id).await?,
+                        &json!({}),
+                        None,
+                    )
+                    .await?;
+                self.emit(
+                    "turn.steered",
+                    Some(&thread.project_id),
+                    Some(thread_id),
+                    None,
+                    json!({"text":request.text,"providerResult":result}),
+                    true,
+                )
+                .await?;
+                Ok(result)
             }
             DeviceCommandKind::TurnInterrupt { thread_id } => {
                 let thread = self.command_thread(thread_id).await?;
-                let state = self.resume_app_thread(&thread).await?;
-                let Some(app_turn) = state.active_turn_id else {
+                let state = self.resume_provider_thread(&thread).await?;
+                let provider_turn = state.active_turn_id;
+                if provider_turn.is_none()
+                    && !(thread.provider == AgentProvider::Kimi && state.status == "active")
+                {
                     if state.status == "active" {
-                        bail!("active App Server turn identity is unavailable")
+                        bail!("active provider turn identity is unavailable")
                     }
                     self.store.touch_thread(thread_id, "idle").await?;
                     self.sync_thread(thread_id).await?;
                     self.emit_thread_summary(thread_id).await?;
                     return Ok(json!({"alreadyTerminal":true}));
-                };
+                }
                 let result = self
-                    .app
-                    .call(
-                        "turn/interrupt",
-                        json!({"threadId":thread.app_server_thread_id,"turnId":app_turn}),
+                    .agents
+                    .interrupt(
+                        thread.provider,
+                        thread
+                            .app_server_thread_id
+                            .as_deref()
+                            .context("thread has no provider session id")?,
+                        provider_turn.as_deref(),
                     )
                     .await?;
                 self.store.touch_thread(thread_id, "interrupted").await?;
@@ -134,21 +168,22 @@ impl CommandExecutor {
                 {
                     bail!("unsupported approval decision")
                 };
-                let (request_id, _method) = self
+                let (provider, request_id, _method) = self
                     .store
-                    .claim_app_request(approval_id)
+                    .claim_provider_request(approval_id)
                     .await?
                     .context("approval is missing or already decided")?;
-                let app_decision = if request.decision == "accept_for_session" {
-                    "acceptForSession"
-                } else {
-                    request.decision.as_str()
-                };
-                let response = request
-                    .response
-                    .clone()
-                    .unwrap_or_else(|| json!({"decision":app_decision}));
-                if let Err(error) = self.app.respond(request_id, response).await {
+                if let Err(error) = self
+                    .agents
+                    .resolve_approval(
+                        provider,
+                        None,
+                        request_id,
+                        &request.decision,
+                        request.response.clone(),
+                    )
+                    .await
+                {
                     self.store
                         .finish_app_request(approval_id, "unknown")
                         .await?;
@@ -243,10 +278,6 @@ impl CommandExecutor {
         project_id: &str,
         request: &CreateThreadRequest,
     ) -> Result<Value> {
-        let app_id = self
-            .start_app_thread(project_id, request.options.clone())
-            .await?;
-        let id = new_id("thr");
         let title = request
             .title
             .clone()
@@ -258,8 +289,26 @@ impl CommandExecutor {
                     .map(derive_title)
                     .unwrap_or_else(|| "新对话".into())
             });
+        let provider_session_id = self
+            .start_provider_thread(
+                request.provider,
+                project_id,
+                &title,
+                request.access_mode,
+                request.options.clone(),
+            )
+            .await?;
+        let id = new_id("thr");
         self.store
-            .create_thread(&id, project_id, &app_id, &title, &request.options)
+            .create_provider_thread(
+                &id,
+                project_id,
+                request.provider,
+                &provider_session_id,
+                &title,
+                request.access_mode,
+                &request.options,
+            )
             .await?;
         self.sync_thread(&id).await?;
         if let Some(text) = request
@@ -269,6 +318,7 @@ impl CommandExecutor {
         {
             let start = StartTurnRequest {
                 text: text.clone(),
+                access_mode: request.access_mode,
                 options: Value::Object(Map::new()),
             };
             let _ = self.start_turn(&id, &start).await?;
@@ -277,11 +327,19 @@ impl CommandExecutor {
         Ok(json!({
             "threadId": id,
             "appServerThreadId": thread.app_server_thread_id,
+            "provider": thread.provider,
             "thread": thread
         }))
     }
 
-    async fn start_app_thread(&self, project_id: &str, options: Value) -> Result<String> {
+    async fn start_provider_thread(
+        &self,
+        provider: AgentProvider,
+        project_id: &str,
+        title: &str,
+        access_mode: ConversationAccessMode,
+        options: Value,
+    ) -> Result<String> {
         let project = self
             .store
             .project(project_id, &self.device_id)
@@ -289,72 +347,106 @@ impl CommandExecutor {
             .context("project not found")?;
         let mut params = object(project.defaults.clone());
         params.extend(object(options));
-        params.insert("cwd".into(), json!(project.canonical_path));
-        let result = self.app.call("thread/start", Value::Object(params)).await?;
-        extract_id(&result, &["thread/id", "threadId", "id"])
-            .context("thread/start response has no thread id")
+        self.agents
+            .create_session(
+                provider,
+                &project.canonical_path,
+                title,
+                access_mode,
+                Value::Object(params),
+            )
+            .await
     }
 
     async fn start_turn(&self, thread_id: &str, request: &StartTurnRequest) -> Result<Value> {
-        if request.text.trim().is_empty() {
-            bail!("turn text cannot be empty")
-        };
+        let input = text_input(&request.text)?;
         let mut thread = self.command_thread(thread_id).await?;
         // A new App Server thread has no rollout until its first turn starts.
         // Calling thread/resume here is therefore invalid; follow the protocol's
         // thread/start -> turn/start lifecycle directly.
         if !self.store.thread_has_turns(thread_id).await? {
-            return match self.begin_turn(&thread, request).await {
+            return match self.begin_turn(&thread, request, &input).await {
                 Ok(result) => Ok(result),
-                Err(error) if is_missing_app_thread(&error) => {
+                Err(error)
+                    if thread.provider == AgentProvider::Codex && is_missing_app_thread(&error) =>
+                {
                     thread = self.recreate_empty_app_thread(&thread).await?;
-                    self.begin_turn(&thread, request).await
+                    self.begin_turn(&thread, request, &input).await
                 }
                 Err(error) => Err(error),
             };
         }
-        let state = self.resume_app_thread(&thread).await?;
-        if let Some(app_turn) = state.active_turn_id {
+        let state = self.resume_provider_thread(&thread).await?;
+        if state.active_turn_id.is_some()
+            || (thread.provider == AgentProvider::Kimi && state.status == "active")
+        {
             let result = self
-                .app
-                .call(
-                    "turn/steer",
-                    json!({
-                        "threadId":thread.app_server_thread_id,
-                        "expectedTurnId":app_turn,
-                        "input":[{"type":"text","text":request.text}]
-                    }),
+                .agents
+                .steer_turn(
+                    thread.provider,
+                    thread
+                        .app_server_thread_id
+                        .as_deref()
+                        .context("thread has no provider session id")?,
+                    state.active_turn_id.as_deref(),
+                    &input,
+                    request.access_mode,
+                    &request.options,
+                    None,
                 )
                 .await?;
+            self.emit(
+                "turn.steered",
+                Some(&thread.project_id),
+                Some(thread_id),
+                None,
+                json!({"text":request.text,"providerResult":result}),
+                true,
+            )
+            .await?;
             return Ok(
-                json!({"operation":"steer","appServerTurnId":app_turn,"appServerResult":result}),
+                json!({"operation":"steer","providerTurnId":state.active_turn_id,"providerResult":result}),
             );
         }
         if state.status == "active" {
-            bail!("active App Server turn identity is unavailable")
+            bail!("active provider turn identity is unavailable")
         }
         if state.status == "systemError" || state.status == "notLoaded" {
             bail!(
-                "App Server thread cannot accept input while status is {}",
+                "provider thread cannot accept input while status is {}",
                 state.status
             )
         }
-        self.begin_turn(&thread, request).await
+        self.begin_turn(&thread, request, &input).await
     }
 
     async fn begin_turn(
         &self,
         thread: &ThreadSummary,
         request: &StartTurnRequest,
+        input: &[Value],
     ) -> Result<Value> {
-        let mut params = object(request.options.clone());
-        params.insert("threadId".into(), json!(thread.app_server_thread_id));
-        params.insert("input".into(), json!([{"type":"text","text":request.text}]));
-        let result = self.app.call("turn/start", Value::Object(params)).await?;
-        let app_turn = extract_id(&result, &["turn/id", "turnId", "id"]);
+        let result = self
+            .agents
+            .start_turn(
+                thread.provider,
+                thread
+                    .app_server_thread_id
+                    .as_deref()
+                    .context("thread has no provider session id")?,
+                input,
+                request.access_mode,
+                &request.options,
+                None,
+            )
+            .await?;
+        let provider_turn = extract_id(
+            &result,
+            &["turn/id", "turnId", "id", "prompt_id", "prompt/prompt_id"],
+        );
         let local_turn = self
             .store
-            .record_user_turn(&thread.id, app_turn.as_deref(), &request.text)
+            .record_user_turn(&thread.id, provider_turn.as_deref(), &request.text)
             .await?;
         self.sync_thread(&thread.id).await?;
         self.emit_thread_summary(&thread.id).await?;
@@ -363,19 +455,31 @@ impl CommandExecutor {
             Some(&thread.project_id),
             Some(&thread.id),
             Some(&local_turn),
-            json!({"text":request.text,"appServerResult":result}),
+            json!({"text":request.text,"providerResult":result}),
             true,
         )
         .await?;
-        Ok(json!({"operation":"start","turnId":local_turn,"appServerResult":result}))
+        Ok(json!({"operation":"start","turnId":local_turn,"providerResult":result}))
     }
 
     async fn recreate_empty_app_thread(&self, thread: &ThreadSummary) -> Result<ThreadSummary> {
         if self.store.thread_has_turns(&thread.id).await? {
             bail!("refusing to replace an App Server thread that already has local history")
         }
+        if thread.provider != AgentProvider::Codex {
+            bail!("only an empty Codex thread can be recreated")
+        }
         let options = self.store.app_server_options(&thread.id).await?;
-        let app_id = self.start_app_thread(&thread.project_id, options).await?;
+        let access_mode = self.store.thread_access_mode(&thread.id).await?;
+        let app_id = self
+            .start_provider_thread(
+                AgentProvider::Codex,
+                &thread.project_id,
+                &thread.title,
+                access_mode,
+                options,
+            )
+            .await?;
         self.store
             .rebind_app_server_thread(&thread.id, &app_id)
             .await?;
@@ -388,50 +492,22 @@ impl CommandExecutor {
         self.command_thread(&thread.id).await
     }
 
-    async fn resume_app_thread(&self, thread: &ThreadSummary) -> Result<ResumedThreadState> {
+    async fn resume_provider_thread(&self, thread: &ThreadSummary) -> Result<AgentThreadState> {
         let app_thread_id = thread
             .app_server_thread_id
             .as_deref()
-            .context("thread has no App Server id")?;
-        let result = self
-            .app
-            .call(
-                "thread/resume",
-                json!({
-                    "threadId": app_thread_id,
-                    "initialTurnsPage": {
-                        "limit": 1,
-                        "sortDirection": "desc",
-                        "itemsView": "notLoaded"
-                    }
-                }),
-            )
+            .context("thread has no provider session id")?;
+        let mut state = self
+            .agents
+            .thread_state(thread.provider, app_thread_id)
             .await?;
-        let app_thread = result.get("thread").unwrap_or(&result);
-        let status = app_thread_status(app_thread).to_owned();
-        let mut active_turn_id = result
-            .pointer("/initialTurnsPage/data")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .chain(
-                app_thread
-                    .get("turns")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten(),
-            )
-            .find(|turn| turn.get("status").and_then(Value::as_str) == Some("inProgress"))
-            .and_then(|turn| turn.get("id"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        if active_turn_id.is_none() && status == "active" {
-            active_turn_id = self.store.active_app_turn_id(&thread.id).await?;
+        if thread.provider == AgentProvider::Codex
+            && state.active_turn_id.is_none()
+            && state.status == "active"
+        {
+            state.active_turn_id = self.store.active_app_turn_id(&thread.id).await?;
         }
-        Ok(ResumedThreadState {
-            status,
-            active_turn_id,
-        })
+        Ok(state)
     }
 
     async fn thread(&self, id: &str) -> Result<ThreadSummary> {
@@ -517,22 +593,19 @@ impl CommandExecutor {
         let app_thread_id = thread
             .app_server_thread_id
             .as_deref()
-            .context("thread has no App Server id")?;
-        let response = self
-            .app
-            .call_with_timeout(
-                "thread/read",
-                json!({"threadId":app_thread_id,"includeTurns":true}),
-                std::time::Duration::from_secs(180),
-            )
+            .context("thread has no provider session id")?;
+        let provider_thread = self
+            .agents
+            .read_thread(thread.provider, app_thread_id)
             .await?;
-        let app_thread = response.get("thread").unwrap_or(&response);
-        self.store.import_app_history(thread_id, app_thread).await?;
+        self.store
+            .import_app_history(thread_id, &provider_thread)
+            .await?;
         self.sync_thread(thread_id).await?;
         self.store
             .state_set(
-                &thread_fingerprint_key(app_thread_id),
-                &thread_fingerprint(app_thread)?,
+                &thread_fingerprint_key(thread.provider, app_thread_id),
+                &thread_fingerprint(&provider_thread)?,
             )
             .await
     }
@@ -541,7 +614,8 @@ impl CommandExecutor {
     /// created by a different CLI/App Server process on this workstation.
     pub async fn reconcile_recent(&self, archived: bool) -> Result<usize> {
         let response = self
-            .app
+            .agents
+            .codex
             .call(
                 "thread/list",
                 json!({
@@ -569,12 +643,19 @@ impl CommandExecutor {
             let Some(app_id) = app_thread.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            if self.app_thread_is_removed(app_thread).await? {
+            if self
+                .provider_thread_is_removed(AgentProvider::Codex, app_thread)
+                .await?
+            {
                 continue;
             }
             let fingerprint = thread_fingerprint(app_thread)?;
-            let key = thread_fingerprint_key(app_id);
-            let missing = self.store.local_thread_id(app_id).await?.is_none();
+            let key = thread_fingerprint_key(AgentProvider::Codex, app_id);
+            let missing = self
+                .store
+                .local_provider_thread_id(AgentProvider::Codex, app_id)
+                .await?
+                .is_none();
             let active = app_thread_status(app_thread) == "active";
             if !missing
                 && !active
@@ -592,13 +673,83 @@ impl CommandExecutor {
         Ok(refreshed)
     }
 
+    /// Reconcile Kimi sessions created or changed outside Nuntius. Kimi's web
+    /// service owns the durable session index, so there is no rollout-file
+    /// watcher equivalent to Codex's.
+    pub async fn reconcile_kimi_recent(&self, archived: bool) -> Result<usize> {
+        let threads = self
+            .agents
+            .list_threads(AgentProvider::Kimi, None, archived)
+            .await?;
+        let mut refreshed = 0;
+        for provider_thread in threads {
+            let Some(session_id) = provider_thread.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if self
+                .provider_thread_is_removed(AgentProvider::Kimi, &provider_thread)
+                .await?
+            {
+                continue;
+            }
+            let fingerprint = thread_fingerprint(&provider_thread)?;
+            let key = thread_fingerprint_key(AgentProvider::Kimi, session_id);
+            let local_thread_id = self
+                .store
+                .local_provider_thread_id(AgentProvider::Kimi, session_id)
+                .await?;
+            let active = app_thread_status(&provider_thread) == "active";
+            if local_thread_id.is_some()
+                && !active
+                && self.store.state_get(&key).await?.as_deref() == Some(&fingerprint)
+            {
+                continue;
+            }
+            let project_id = if let Some(local_thread_id) = local_thread_id.as_deref() {
+                self.thread(local_thread_id).await?.project_id
+            } else {
+                self.project_for_app_thread(None, &provider_thread).await?
+            };
+            let local_thread_id = self
+                .store
+                .import_provider_thread(AgentProvider::Kimi, &project_id, &provider_thread)
+                .await?;
+            match self
+                .import_and_sync_thread(AgentProvider::Kimi, &local_thread_id, &provider_thread)
+                .await
+            {
+                Ok(()) => {
+                    self.store.state_set(&key, &fingerprint).await?;
+                    if let Some(project) = self.store.project(&project_id, &self.device_id).await? {
+                        self.emit(
+                            "project.summary",
+                            Some(&project_id),
+                            Some(&local_thread_id),
+                            None,
+                            serde_json::to_value(&project.summary)?,
+                            true,
+                        )
+                        .await?;
+                    }
+                    self.emit_thread_summary(&local_thread_id).await?;
+                    refreshed += 1;
+                }
+                Err(error) => {
+                    tracing::warn!(%session_id,error=?error,"recent Kimi session reconciliation failed")
+                }
+            }
+        }
+        Ok(refreshed)
+    }
+
     /// Force a single App Server thread into the local durable history outbox.
     /// Used by the rollout-file monitor so external terminal activity does not
     /// depend on this App Server instance receiving runtime notifications.
     pub async fn reconcile_app_thread(&self, app_id: &str) -> Result<()> {
         let _guard = self.history_import_lock.lock().await;
         let response = self
-            .app
+            .agents
+            .codex
             .call_with_timeout(
                 "thread/read",
                 json!({"threadId":app_id,"includeTurns":true}),
@@ -607,17 +758,24 @@ impl CommandExecutor {
             .await
             .with_context(|| format!("cannot read changed Codex thread {app_id}"))?;
         let app_thread = response.get("thread").unwrap_or(&response);
-        if self.app_thread_is_removed(app_thread).await? {
+        if self
+            .provider_thread_is_removed(AgentProvider::Codex, app_thread)
+            .await?
+        {
             return Ok(());
         }
-        let project_id = if let Some(local_id) = self.store.local_thread_id(app_id).await? {
+        let project_id = if let Some(local_id) = self
+            .store
+            .local_provider_thread_id(AgentProvider::Codex, app_id)
+            .await?
+        {
             self.thread(&local_id).await?.project_id
         } else {
             self.project_for_app_thread(None, app_thread).await?
         };
         let local_thread = self
             .store
-            .import_app_thread(&project_id, app_thread)
+            .import_provider_thread(AgentProvider::Codex, &project_id, app_thread)
             .await?;
         self.store
             .import_app_history(&local_thread, app_thread)
@@ -625,7 +783,7 @@ impl CommandExecutor {
         self.sync_thread(&local_thread).await?;
         self.store
             .state_set(
-                &thread_fingerprint_key(app_id),
+                &thread_fingerprint_key(AgentProvider::Codex, app_id),
                 &thread_fingerprint(app_thread)?,
             )
             .await?;
@@ -649,8 +807,24 @@ impl CommandExecutor {
             .project(project_id, &self.device_id)
             .await?
             .context("project not found")?;
-        self.discover_pages(Some(project_id), Some(&project.canonical_path), false)
-            .await
+        let mut imported = 0;
+        for provider in [AgentProvider::Codex, AgentProvider::Kimi] {
+            match self
+                .discover_pages(
+                    provider,
+                    Some(project_id),
+                    Some(&project.canonical_path),
+                    false,
+                )
+                .await
+            {
+                Ok(count) => imported += count,
+                Err(error) => {
+                    tracing::warn!(provider=provider.as_str(),error=?error,"provider project discovery unavailable")
+                }
+            }
+        }
+        Ok(imported)
     }
     pub async fn discover_all(&self) -> Result<usize> {
         self.store
@@ -659,8 +833,17 @@ impl CommandExecutor {
         self.store
             .state_set("history_completion_announced", "false")
             .await?;
-        let mut imported = self.discover_pages(None, None, false).await?;
-        imported += self.discover_pages(None, None, true).await?;
+        let mut imported = 0;
+        for provider in [AgentProvider::Codex, AgentProvider::Kimi] {
+            for archived in [false, true] {
+                match self.discover_pages(provider, None, None, archived).await {
+                    Ok(count) => imported += count,
+                    Err(error) => {
+                        tracing::warn!(provider=provider.as_str(),archived,error=?error,"provider history discovery unavailable")
+                    }
+                }
+            }
+        }
         self.store
             .state_set("history_discovery_complete", "true")
             .await?;
@@ -700,6 +883,7 @@ impl CommandExecutor {
     }
     async fn discover_pages(
         &self,
+        provider: AgentProvider,
         fixed_project_id: Option<&str>,
         cwd: Option<&std::path::Path>,
         archived: bool,
@@ -708,79 +892,58 @@ impl CommandExecutor {
             .store
             .ensure_unassigned_project(&self.device_id)
             .await?;
-        let mut cursor: Option<String> = None;
-        let mut seen_cursors = std::collections::HashSet::new();
         let mut imported = 0_usize;
-        for _ in 0..100 {
-            let mut params = json!({"limit":100,"archived":archived,"cursor":cursor});
-            if let Some(path) = cwd {
-                params["cwd"] = json!(path);
+        let threads = self.agents.list_threads(provider, cwd, archived).await?;
+        for app_thread in threads {
+            if self
+                .provider_thread_is_removed(provider, &app_thread)
+                .await?
+            {
+                continue;
             }
-            let response = self.app.call("thread/list", params).await?;
-            let threads = response
-                .get("data")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            for app_thread in threads {
-                if self.app_thread_is_removed(&app_thread).await? {
+            let project_id = self
+                .project_for_app_thread_with_unassigned(
+                    fixed_project_id,
+                    &app_thread,
+                    &unassigned_project,
+                )
+                .await?;
+            let app_id = match app_thread.get("id").and_then(Value::as_str) {
+                Some(id) => id,
+                None => {
+                    tracing::warn!("thread/list returned a thread without an id");
                     continue;
                 }
-                let project_id = self
-                    .project_for_app_thread_with_unassigned(
-                        fixed_project_id,
-                        &app_thread,
-                        &unassigned_project,
-                    )
-                    .await?;
-                let app_id = match app_thread.get("id").and_then(Value::as_str) {
-                    Some(id) => id,
-                    None => {
-                        tracing::warn!("thread/list returned a thread without an id");
-                        continue;
-                    }
-                };
-                let was_missing = self.store.local_thread_id(app_id).await?.is_none();
-                let local_thread = self
-                    .store
-                    .import_app_thread(&project_id, &app_thread)
-                    .await?;
-                let fingerprint = thread_fingerprint(&app_thread)?;
-                let key = thread_fingerprint_key(app_id);
-                let active = app_thread_status(&app_thread) == "active";
-                if was_missing
-                    || active
-                    || self.store.state_get(&key).await?.as_deref() != Some(&fingerprint)
+            };
+            let was_missing = self
+                .store
+                .local_provider_thread_id(provider, app_id)
+                .await?
+                .is_none();
+            let local_thread = self
+                .store
+                .import_provider_thread(provider, &project_id, &app_thread)
+                .await?;
+            let fingerprint = thread_fingerprint(&app_thread)?;
+            let key = thread_fingerprint_key(provider, app_id);
+            let active = app_thread_status(&app_thread) == "active";
+            if was_missing
+                || active
+                || self.store.state_get(&key).await?.as_deref() != Some(&fingerprint)
+            {
+                match self
+                    .import_and_sync_thread(provider, &local_thread, &app_thread)
+                    .await
                 {
-                    match self
-                        .import_and_sync_thread(&local_thread, &app_thread)
-                        .await
-                    {
-                        Ok(()) => {
-                            self.store.state_set(&key, &fingerprint).await?;
-                            imported += 1;
-                        }
-                        Err(error) => {
-                            tracing::warn!(%app_id,error=?error,"historical Codex thread import failed; continuing discovery");
-                        }
+                    Ok(()) => {
+                        self.store.state_set(&key, &fingerprint).await?;
+                        imported += 1;
+                    }
+                    Err(error) => {
+                        tracing::warn!(provider=provider.as_str(),%app_id,error=?error,"historical provider thread import failed; continuing discovery");
                     }
                 }
             }
-            cursor = response
-                .get("nextCursor")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            if let Some(next) = &cursor
-                && !seen_cursors.insert(next.clone())
-            {
-                bail!("thread/list returned a repeated cursor")
-            }
-            if cursor.is_none() {
-                break;
-            }
-        }
-        if cursor.is_some() {
-            bail!("thread/list pagination exceeded the 10,000-thread safety limit")
         }
         for project in self.store.list_projects(&self.device_id).await? {
             self.emit(
@@ -796,9 +959,13 @@ impl CommandExecutor {
         Ok(imported)
     }
 
-    async fn app_thread_is_removed(&self, app_thread: &Value) -> Result<bool> {
+    async fn provider_thread_is_removed(
+        &self,
+        provider: AgentProvider,
+        app_thread: &Value,
+    ) -> Result<bool> {
         if let Some(app_id) = app_thread.get("id").and_then(Value::as_str)
-            && self.store.app_thread_removed(app_id).await?
+            && self.store.provider_thread_removed(provider, app_id).await?
         {
             return Ok(true);
         }
@@ -859,23 +1026,28 @@ impl CommandExecutor {
         Ok(id)
     }
 
-    async fn import_and_sync_thread(&self, local_thread: &str, app_thread: &Value) -> Result<()> {
+    async fn import_and_sync_thread(
+        &self,
+        provider: AgentProvider,
+        local_thread: &str,
+        app_thread: &Value,
+    ) -> Result<()> {
         let _guard = self.history_import_lock.lock().await;
         let app_id = app_thread
             .get("id")
             .and_then(Value::as_str)
             .context("listed thread has no id")?;
         let detail = self
-            .app
-            .call_with_timeout(
-                "thread/read",
-                json!({"threadId":app_id,"includeTurns":true}),
-                std::time::Duration::from_secs(180),
-            )
+            .agents
+            .read_thread(provider, app_id)
             .await
-            .with_context(|| format!("cannot read historical thread {app_id}"))?;
-        let detail = detail.get("thread").unwrap_or(&detail);
-        self.store.import_app_history(local_thread, detail).await?;
+            .with_context(|| {
+                format!(
+                    "cannot read historical {} thread {app_id}",
+                    provider.as_str()
+                )
+            })?;
+        self.store.import_app_history(local_thread, &detail).await?;
         self.sync_thread(local_thread).await
     }
     pub async fn emit_inventory(&self) -> Result<()> {
@@ -935,7 +1107,7 @@ impl CommandExecutor {
 }
 
 pub async fn process_app_events(executor: CommandExecutor) {
-    let mut receiver = executor.app.subscribe();
+    let mut receiver = executor.agents.codex.subscribe();
     loop {
         match receiver.recv().await {
             Ok(message) => {
@@ -966,7 +1138,10 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
     let event_params = bounded_event_payload(&params, 256 * 1024);
     let app_thread = find_string(&params, &["threadId", "thread/id"]);
     let thread_id = if let Some(id) = app_thread.as_deref() {
-        executor.store.local_thread_id(id).await?
+        executor
+            .store
+            .local_provider_thread_id(AgentProvider::Codex, id)
+            .await?
     } else {
         None
     };
@@ -986,7 +1161,13 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
         let approval_id = new_id("apr");
         executor
             .store
-            .save_app_request(&approval_id, request_id, method, &event_params)
+            .save_provider_request(
+                AgentProvider::Codex,
+                &approval_id,
+                request_id,
+                method,
+                &event_params,
+            )
             .await?;
         executor
             .emit(
@@ -1099,12 +1280,165 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
     Ok(())
 }
 
+pub async fn process_kimi_events(executor: CommandExecutor) {
+    let mut receiver = executor.agents.kimi.subscribe();
+    loop {
+        match receiver.recv().await {
+            Ok(message) => {
+                if let Err(error) = process_kimi_event(&executor, message).await {
+                    tracing::warn!(error=?error, "failed to process Kimi event")
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::warn!(skipped, "Kimi event processor lagged; reconciling history");
+                if let Err(error) = executor.discover_all().await {
+                    tracing::warn!(error=?error, "history reconciliation after Kimi event loss failed");
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Result<()> {
+    let event_type = message
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let session_id = message
+        .get("session_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            message
+                .pointer("/payload/sessionId")
+                .and_then(Value::as_str)
+        })
+        .context("Kimi event has no session id")?;
+    let Some(thread_id) = executor
+        .store
+        .local_provider_thread_id(AgentProvider::Kimi, session_id)
+        .await?
+    else {
+        return Ok(());
+    };
+    let thread = executor.thread(&thread_id).await?;
+    let payload = message.get("payload").cloned().unwrap_or(Value::Null);
+    let turn_id = kimi_event_id(&payload, "turnId");
+
+    if event_type == "nuntius.resync_required" {
+        executor.refresh_thread_history(&thread_id).await?;
+        executor.emit_thread_summary(&thread_id).await?;
+        return Ok(());
+    }
+
+    if event_type == "event.approval.requested" {
+        let provider_approval_id = payload
+            .get("approval_id")
+            .and_then(Value::as_str)
+            .context("Kimi approval event has no approval_id")?;
+        let approval_id = format!("apr_kimi_{provider_approval_id}");
+        executor
+            .store
+            .save_provider_request(
+                AgentProvider::Kimi,
+                &approval_id,
+                &json!({"approvalId":provider_approval_id,"sessionId":session_id}),
+                "kimi/approval",
+                &payload,
+            )
+            .await?;
+        executor
+            .emit(
+                "approval.requested",
+                Some(&thread.project_id),
+                Some(&thread_id),
+                turn_id.as_deref(),
+                json!({"approvalId":approval_id,"method":"kimi/approval","params":payload}),
+                true,
+            )
+            .await?;
+        return Ok(());
+    }
+
+    match event_type {
+        "turn.started" => {
+            executor
+                .store
+                .mark_app_turn_started(&thread_id, None)
+                .await?;
+            executor.sync_thread(&thread_id).await?;
+            executor.emit_thread_summary(&thread_id).await?;
+        }
+        "turn.ended" => {
+            let reason = payload
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("completed");
+            let status = match reason {
+                "cancelled" => "interrupted",
+                "failed" | "blocked" => "failed",
+                _ => "completed",
+            };
+            executor
+                .store
+                .complete_app_turn(&thread_id, None, status)
+                .await?;
+            executor.sync_thread(&thread_id).await?;
+            executor.emit_thread_summary(&thread_id).await?;
+        }
+        "event.session.work_changed" => {
+            if payload.get("busy").and_then(Value::as_bool) == Some(true) {
+                executor.store.touch_thread(&thread_id, "active").await?;
+            } else {
+                executor
+                    .store
+                    .complete_app_turn(&thread_id, None, "completed")
+                    .await?;
+            }
+            executor.sync_thread(&thread_id).await?;
+            executor.emit_thread_summary(&thread_id).await?;
+        }
+        _ => {}
+    }
+
+    let durable = message.get("volatile").and_then(Value::as_bool) != Some(true);
+    executor
+        .emit(
+            &format!("agent.{event_type}"),
+            Some(&thread.project_id),
+            Some(&thread_id),
+            turn_id.as_deref(),
+            payload,
+            durable,
+        )
+        .await?;
+
+    if event_type == "turn.ended" {
+        executor.refresh_thread_history(&thread_id).await?;
+        executor.emit_thread_summary(&thread_id).await?;
+    }
+    Ok(())
+}
+
+fn kimi_event_id(payload: &Value, key: &str) -> Option<String> {
+    payload.get(key).and_then(|value| {
+        value
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| value.as_i64().map(|value| value.to_string()))
+            .or_else(|| value.as_u64().map(|value| value.to_string()))
+    })
+}
+
+fn text_input(text: &str) -> Result<Vec<Value>> {
+    if text.trim().is_empty() {
+        bail!("turn text cannot be empty")
+    }
+    Ok(vec![json!({"type":"text","text":text})])
+}
+
 fn object(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
-}
-struct ResumedThreadState {
-    status: String,
-    active_turn_id: Option<String>,
 }
 fn is_missing_app_thread(error: &anyhow::Error) -> bool {
     error
@@ -1124,8 +1458,11 @@ fn app_thread_status(thread: &Value) -> &str {
         })
         .unwrap_or("idle")
 }
-fn thread_fingerprint_key(app_thread_id: &str) -> String {
-    format!("app_thread_fingerprint:{app_thread_id}")
+fn thread_fingerprint_key(provider: AgentProvider, app_thread_id: &str) -> String {
+    format!(
+        "provider_thread_fingerprint:{}:{app_thread_id}",
+        provider.as_str()
+    )
 }
 fn thread_fingerprint(thread: &Value) -> Result<String> {
     let identity = json!({
@@ -1302,7 +1639,7 @@ done
         CommandExecutor {
             config: Arc::new(config.clone()),
             store,
-            app: AppServerRuntime::new(Arc::new(config)),
+            agents: AgentRuntimes::new(Arc::new(config)),
             device_id: "dev_test".into(),
             display_name: Arc::new(RwLock::new("Nuntius Device".into())),
             events,
@@ -1323,6 +1660,8 @@ done
                 &CreateThreadRequest {
                     title: None,
                     first_message: Some("hello".into()),
+                    provider: AgentProvider::Codex,
+                    access_mode: ConversationAccessMode::Full,
                     options: json!({"sandbox":"danger-full-access"}),
                 },
             )
@@ -1334,7 +1673,7 @@ done
         assert!(calls.contains("\"method\":\"thread/start\""));
         assert!(calls.contains("\"method\":\"turn/start\""));
         assert!(!calls.contains("\"method\":\"thread/resume\""));
-        executor.app.shutdown().await.unwrap();
+        executor.agents.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -1358,6 +1697,7 @@ done
                 "thr_test",
                 &StartTurnRequest {
                     text: "retry".into(),
+                    access_mode: ConversationAccessMode::Full,
                     options: json!({}),
                 },
             )
@@ -1370,6 +1710,6 @@ done
         assert_eq!(calls.matches("\"method\":\"turn/start\"").count(), 2);
         assert_eq!(calls.matches("\"method\":\"thread/start\"").count(), 1);
         assert!(!calls.contains("\"method\":\"thread/resume\""));
-        executor.app.shutdown().await.unwrap();
+        executor.agents.shutdown().await.unwrap();
     }
 }

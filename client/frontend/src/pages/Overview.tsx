@@ -22,8 +22,9 @@ export function OverviewPage() {
   const down = info.isError;
   const data = info.data;
   const queueBusy = Boolean(data && (data.pendingCommands > 0 || data.pendingEvents > 0));
+  const hasProvider = Boolean(data?.providers.some((provider) => provider.available));
   const issueCount = data
-    ? Number(!data.appServerRunning) + Number(!data.paired) + Number(queueBusy)
+    ? Number(!hasProvider) + Number(!data.paired) + Number(queueBusy)
     : 0;
 
   return (
@@ -63,8 +64,8 @@ export function OverviewPage() {
                 <>
                   <div className="section-label micro">需要处理 · {issueCount}</div>
                   <div className="list-group">
-                    {!data.appServerRunning ? (
-                      <IssueRow title="Codex App Server 未运行" detail="请确认已安装 Codex" />
+                    {!hasProvider ? (
+                      <IssueRow title="没有可用的编码代理" detail="请安装 Codex 或 Kimi CLI" />
                     ) : null}
                     {!data.paired ? (
                       <IssueRow title="尚未配对" detail="可在远程控制台的设置页获取配对码" />

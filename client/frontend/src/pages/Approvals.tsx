@@ -25,6 +25,10 @@ export function ApprovalsPage() {
     ...a,
     threadTitle: threads.data?.find((t) => t.id === a.threadId)?.title,
   });
+  const approvalProviderConnected = (approval: ApprovalView) => {
+    const provider = threads.data?.find((thread) => thread.id === approval.threadId)?.provider ?? "codex";
+    return info.data?.providers.find((status) => status.provider === provider)?.status === "online";
+  };
 
   const { pending, decided } = useMemo(() => {
     const all = order
@@ -69,7 +73,7 @@ export function ApprovalsPage() {
                       <ApprovalCard
                         approval={enrich(a)}
                         onDecide={(d) => void decide(a, d)}
-                        locked={!(info.data?.appServerRunning ?? false)}
+                        locked={!approvalProviderConnected(a)}
                       />
                       {a.threadId ? (
                         <button

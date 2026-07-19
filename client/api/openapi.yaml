@@ -3,7 +3,7 @@ info:
   title: Nuntius Client Local API
   version: 0.1.0
   description: |
-    当前工作电脑的 loopback-only 管理 API，直接控制本机 Codex App Server。
+    当前工作电脑的 loopback-only 管理 API，通过统一 provider 层控制本机 Codex 或 Kimi。
     服务仅允许 127.0.0.1/localhost/[::1] Host；带 Origin 时也必须是本机 HTTP
     Origin。请求体上限 1 MiB。该 API 不代理其他设备。
 servers:
@@ -75,7 +75,7 @@ paths:
     post:
       operationId: createLocalThread
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateThread'}}}}
-      responses: {'200': {description: Codex Thread 已创建, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, '400': {$ref: '#/components/responses/BadRequest'}}
+      responses: {'200': {description: Provider 会话已创建, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, '400': {$ref: '#/components/responses/BadRequest'}}
   /threads:
     get:
       operationId: listLocalThreads
@@ -94,7 +94,7 @@ paths:
       description: 将输入写入本地持久化队列；恢复会话后自动选择启动新 Turn 或转向当前活动 Turn。
       parameters: [{$ref: '#/components/parameters/ThreadId'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartTurn'}}}}
-      responses: {'200': {description: Turn 已提交给 App Server, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, '400': {$ref: '#/components/responses/BadRequest'}}
+      responses: {'200': {description: Turn 已提交给所选 provider, content: {application/json: {schema: {type: object, additionalProperties: true}}}}, '400': {$ref: '#/components/responses/BadRequest'}}
   /threads/{threadId}/steer:
     post:
       operationId: steerLocalTurn
@@ -167,11 +167,12 @@ components:
         lastActivityAt: {type: [string, 'null'], format: date-time}
     Thread:
       type: object
-      required: [id, deviceId, projectId, title, status, archived, historyCompleteness]
+      required: [id, deviceId, projectId, provider, title, status, archived, historyCompleteness]
       properties:
         id: {type: string}
         deviceId: {type: string}
         projectId: {type: string}
+        provider: {enum: [codex, kimi], default: codex}
         appServerThreadId: {type: [string, 'null']}
         title: {type: string}
         status: {type: string}
@@ -191,12 +192,15 @@ components:
       properties:
         title: {type: [string, 'null'], maxLength: 256}
         firstMessage: {type: [string, 'null'], maxLength: 262144}
+        provider: {enum: [codex, kimi], default: codex}
+        accessMode: {enum: [full, ask], default: full}
         options: {type: object, additionalProperties: true}
     StartTurn:
       type: object
       required: [text]
       properties:
         text: {type: string, minLength: 1, maxLength: 262144}
+        accessMode: {enum: [full, ask], default: full}
         options: {type: object, additionalProperties: true}
     TextInput:
       type: object

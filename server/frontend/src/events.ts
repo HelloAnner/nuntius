@@ -231,6 +231,18 @@ export function startEvents(qc: QueryClient): () => void {
       markThreadDirty(event.threadId);
       return;
     }
+    if (
+      type === "agent.turn.started" ||
+      type === "agent.turn.ended" ||
+      type === "agent.event.session.work_changed"
+    ) {
+      if (type === "agent.turn.ended" && event.threadId) {
+        useApprovals.getState().cancelForThread(event.threadId);
+      }
+      markThreadDirty(event.threadId);
+      void qc.invalidateQueries({ queryKey: ["devices"] });
+      return;
+    }
     if (type.startsWith("app_server.")) {
       const m = type.slice("app_server.".length).toLowerCase();
       if (

@@ -11,8 +11,8 @@ import {
   SwipeActionRow,
   ThreadView,
   newIdemKey,
+  providerLabel,
   statusLabel,
-  turnOptionsForAccess,
   useConfirmAction,
   useToast,
   type ApprovalView,
@@ -169,13 +169,19 @@ export function ThreadPage({
   );
 
   const online = device?.status === "online";
+  const providerAvailable =
+    device?.providers.find((status) => status.provider === thread?.provider)?.available ??
+    thread?.provider === "codex";
+  const providerConnected =
+    device?.providers.find((status) => status.provider === thread?.provider)?.status === "online" ||
+    (thread?.provider === "codex" && device?.providers.length === 0 && online);
   const unassigned = project?.kind === "system_unassigned";
   const archived = thread?.archived ?? false;
   // The server SQLite projection is authoritative. Browser memory is only a
   // transient rendering layer for streamed output.
   const running = thread?.status === "active";
 
-  const canSend = Boolean(online && !unassigned && !archived && thread);
+  const canSend = Boolean(online && providerAvailable && !unassigned && !archived && thread);
   const lockedReason = !thread
     ? "会话加载中…"
     : archived
@@ -184,6 +190,8 @@ export function ThreadPage({
         ? "未归类，只读"
         : !online
           ? `设备${statusLabel(device?.status ?? "offline")}`
+          : !providerAvailable
+            ? `${providerLabel(thread.provider)} 未安装或不可用`
           : null;
 
   const send = async (text: string) => {
@@ -194,7 +202,7 @@ export function ThreadPage({
       const receipt = await api.startTurn(
         threadId,
         text,
-        turnOptionsForAccess(accessMode),
+        accessMode,
         idemKey,
       );
       liveStore.bindCommand(provisionalId, receipt.commandId);
@@ -279,7 +287,7 @@ export function ThreadPage({
       live={live}
       approvals={threadApprovals}
       onDecide={decide}
-      approvalsLocked={!online}
+      approvalsLocked={!online || !providerConnected}
       hasMoreHistory={history.data?.hasMore}
       loadingMore={history.isFetching && !history.isLoading}
       onLoadOlder={() => setTurnCount((n) => n + 12)}
@@ -288,7 +296,7 @@ export function ThreadPage({
       lockedReason={lockedReason}
       running={running}
       runtimeStatus={thread?.status ?? null}
-      runtimeConnected={online}
+      runtimeConnected={online && providerConnected}
       busy={busyIds.has(threadId)}
       onSend={send}
       onRetry={retry}
@@ -300,7 +308,7 @@ export function ThreadPage({
     <TopBar
       title={thread?.title ?? "会话"}
       subtitle={device && project
-        ? `${online ? device.displayName : statusLabel(device.status)} · ${project.displayName}`
+        ? `${online ? device.displayName : statusLabel(device.status)} · ${project.displayName}${thread ? ` · ${providerLabel(thread.provider)}` : ""}`
         : undefined}
       onBack={() =>
         fromRecents

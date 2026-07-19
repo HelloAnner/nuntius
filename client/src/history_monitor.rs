@@ -72,6 +72,22 @@ pub async fn run(executor: CommandExecutor) {
         {
             tracing::warn!(error=?error,"recent archived Codex reconciliation failed");
         }
+
+        // Kimi keeps its durable history behind the local web service rather
+        // than rollout files, so poll its session inventory at a lower rate.
+        // This also picks up work started from another Kimi CLI on the device.
+        if ticks == 1 || ticks.is_multiple_of(40) {
+            match executor.reconcile_kimi_recent(false).await {
+                Ok(count) if count > 0 => tracing::info!(count, "recent Kimi sessions reconciled"),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(error=?error,"recent Kimi reconciliation failed"),
+            }
+        }
+        if ticks.is_multiple_of(160)
+            && let Err(error) = executor.reconcile_kimi_recent(true).await
+        {
+            tracing::warn!(error=?error,"recent archived Kimi reconciliation failed");
+        }
     }
 }
 
