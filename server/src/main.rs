@@ -20,6 +20,8 @@ use store::ServerStore;
 use tower_http::{catch_panic::CatchPanicLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Parser)]
 #[command(
     name = "nuntius-server",
@@ -206,12 +208,18 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
         result = &mut server => result?,
         _ = &mut external_shutdown => {
             if let Some(tx) = graceful_tx.take() { let _ = tx.send(()); }
-            (&mut server).await?;
+            match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, &mut server).await {
+                Ok(result) => result?,
+                Err(_) => tracing::warn!("forcing shutdown after live connections exceeded drain timeout"),
+            }
         }
         update = update_rx.recv(), if config.auto_update => {
             prepared_update = update;
             if let Some(tx) = graceful_tx.take() { let _ = tx.send(()); }
-            (&mut server).await?;
+            match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, &mut server).await {
+                Ok(result) => result?,
+                Err(_) => tracing::warn!("forcing update after live connections exceeded drain timeout"),
+            }
         }
     }
     if let Some(task) = update_task {
