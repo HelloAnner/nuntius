@@ -24,6 +24,7 @@ pub struct ServerConfig {
     pub event_retention_hours: i64,
     pub log_format: String,
     pub auto_update: bool,
+    pub direct_github_update: bool,
     pub update_interval_seconds: u64,
 }
 
@@ -39,6 +40,7 @@ impl Default for ServerConfig {
             event_retention_hours: 24,
             log_format: "pretty".into(),
             auto_update: true,
+            direct_github_update: true,
             update_interval_seconds: 60,
         }
     }

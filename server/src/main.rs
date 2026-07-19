@@ -176,7 +176,7 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
         }
     });
     tracing::info!(bind=%config.bind,public_base_url=%config.public_base_url,secure=config.is_secure(),"nuntius server listening");
-    let update_task = config.auto_update.then(|| {
+    let update_task = (config.auto_update && config.direct_github_update).then(|| {
         nuntius_updater::spawn_update_loop(
             UpdateConfig::production(
                 UpdateRole::Server,

@@ -29,6 +29,7 @@ pub struct ClientConfig {
     pub update_interval_seconds: u64,
     pub server_update_relay: bool,
     pub server_update_ssh_command: Vec<String>,
+    pub server_update_ssh_timeout_seconds: u64,
     pub server_update_remote_binary: Option<PathBuf>,
     pub server_update_remote_data_dir: Option<PathBuf>,
 }
@@ -55,6 +56,7 @@ impl Default for ClientConfig {
             update_interval_seconds: 300,
             server_update_relay: false,
             server_update_ssh_command: vec!["ssh".into()],
+            server_update_ssh_timeout_seconds: 900,
             server_update_remote_binary: None,
             server_update_remote_data_dir: None,
         }
@@ -137,6 +139,9 @@ impl ClientConfig {
                 bail!(
                     "server_update_ssh_command must contain an SSH executable and destination arguments"
                 )
+            }
+            if !(60..=3600).contains(&self.server_update_ssh_timeout_seconds) {
+                bail!("server_update_ssh_timeout_seconds must be between 60 and 3600")
             }
             validate_remote_path(
                 self.server_update_remote_binary.as_deref(),

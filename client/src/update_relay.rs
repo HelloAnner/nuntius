@@ -73,17 +73,20 @@ async fn upload(config: &ClientConfig, package: RelayPackage) -> Result<()> {
         .spawn()
         .with_context(|| format!("start configured SSH executable {}", command[0]))?;
     let mut stdin = child.stdin.take().context("open SSH update input")?;
-    let output = tokio::time::timeout(Duration::from_secs(180), async move {
-        stdin
-            .write_all(&package.archive)
-            .await
-            .context("stream server update archive over SSH")?;
-        stdin.shutdown().await.context("finish SSH update input")?;
-        child
-            .wait_with_output()
-            .await
-            .context("wait for remote server update receiver")
-    })
+    let output = tokio::time::timeout(
+        Duration::from_secs(config.server_update_ssh_timeout_seconds),
+        async move {
+            stdin
+                .write_all(&package.archive)
+                .await
+                .context("stream server update archive over SSH")?;
+            stdin.shutdown().await.context("finish SSH update input")?;
+            child
+                .wait_with_output()
+                .await
+                .context("wait for remote server update receiver")
+        },
+    )
     .await
     .context("SSH server update relay timed out")??;
     if !output.status.success() {
