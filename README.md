@@ -55,6 +55,29 @@ target/release/nuntius-client
 target/release/nuntius-server
 ```
 
+## 自动构建与下载
+
+每次代码推送到 GitHub 后，[Build binaries](https://github.com/HelloAnner/nuntius/actions/workflows/build-binaries.yml)
+会自动生成以下两个压缩包：
+
+- `nuntius-server-linux-x86_64.tar.gz`：Linux AMD64 Server
+- `nuntius-client-macos-arm64.tar.gz`：macOS Apple Silicon Client
+
+打开最新一次成功的运行即可在任务摘要中下载。构建产物使用 GitHub Actions
+Artifact 保存，不创建 Release；Artifact 保留 14 天后自动删除，下载时需要登录
+GitHub。也可以使用 GitHub CLI 下载最新一次成功构建：
+
+```bash
+run_id="$(gh run list \
+  --repo HelloAnner/nuntius \
+  --workflow build-binaries.yml \
+  --status success \
+  --limit 1 \
+  --json databaseId \
+  --jq '.[0].databaseId')"
+gh run download "$run_id" --repo HelloAnner/nuntius
+```
+
 远程控制页（`server/frontend`）面向手机、平板和桌面，相关设计系统、
 协议类型、SSE 归并器和消息组件全部收在该项目内部。Client 本地页将按
 本地 API 单独实现，不建立跨项目的前端源码依赖。
