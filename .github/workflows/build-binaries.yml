@@ -11,7 +11,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: "1.90.0"
+  # Cargo.lock currently includes SQLx 0.9, whose MSRV is Rust 1.94.
+  RUST_VERSION: "1.94.0"
 
 jobs:
   server-linux-x86_64:
