@@ -60,6 +60,15 @@ enum Command {
         #[arg(long)]
         allow_insecure_http: bool,
     },
+    /// Initialize, pair, and start this device using a securely prompted one-time code.
+    Setup {
+        #[arg(long)]
+        server_url: String,
+        #[arg(long)]
+        allow_insecure_http: bool,
+        #[arg(long)]
+        display_name: Option<String>,
+    },
     Run,
     Start,
     Stop,
@@ -96,6 +105,11 @@ async fn main() -> Result<()> {
             println!("paired device {device_id}");
             Ok(())
         }
+        Command::Setup {
+            server_url,
+            allow_insecure_http,
+            display_name,
+        } => setup_device(server_url, allow_insecure_http, display_name).await,
         Command::Run => {
             nuntius_updater::handle_startup(&config::data_dir()?)?;
             run().await
@@ -124,6 +138,100 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SetupDisposition {
+    Pair,
+    AlreadyPaired(String),
+}
+
+async fn setup_device(
+    server_url: String,
+    allow_insecure_http: bool,
+    display_name: Option<String>,
+) -> Result<()> {
+    let config_path = config::config_path()?;
+    let initialized = !config_path.exists();
+    if initialized {
+        let root = config::initialize(false)?;
+        println!("initialized {}", root.display());
+    }
+
+    let root = config::data_dir()?;
+    ClientStore::open(&root).await?;
+    let mut cfg = ClientConfig::load()?;
+    match configure_setup(
+        &mut cfg,
+        &server_url,
+        allow_insecure_http,
+        display_name.as_deref(),
+    )? {
+        SetupDisposition::AlreadyPaired(device_id) => {
+            println!("device {device_id} is already paired with {server_url}");
+            return start_if_stopped();
+        }
+        SetupDisposition::Pair => {}
+    }
+
+    if running_pid()?.is_some() {
+        println!("stopping the unpaired client before setup");
+        stop()?;
+    }
+    // Persist and fsync the target configuration before consuming the one-time
+    // code. pairing::pair performs a second atomic save with the device id.
+    cfg.save()?;
+
+    println!("请在 Server 的“设置 → 设备配对”中生成一次性验证码。");
+    let code = rpassword::prompt_password("请输入一次性验证码: ")?;
+    if code.trim().is_empty() {
+        bail!("the one-time pairing code cannot be empty")
+    }
+    let device_id = pairing::pair(&mut cfg, &code).await?;
+    println!("paired device {device_id}");
+    start_if_stopped()
+}
+
+fn configure_setup(
+    config: &mut ClientConfig,
+    server_url: &str,
+    allow_insecure_http: bool,
+    display_name: Option<&str>,
+) -> Result<SetupDisposition> {
+    let requested_url = url::Url::parse(server_url).context("server_url is invalid")?;
+    if let Some(device_id) = &config.device_id {
+        let existing_url =
+            url::Url::parse(&config.server_url).context("configured server_url is invalid")?;
+        if existing_url != requested_url {
+            bail!(
+                "this client is already paired with {}; refusing to replace it with {}",
+                config.server_url,
+                server_url
+            )
+        }
+        return Ok(SetupDisposition::AlreadyPaired(device_id.clone()));
+    }
+
+    config.server_url = requested_url.to_string();
+    config.allow_insecure_http = allow_insecure_http;
+    if let Some(display_name) = display_name {
+        let display_name = display_name.trim();
+        if display_name.is_empty() || display_name.len() > 128 {
+            bail!("display_name must contain 1 to 128 bytes")
+        }
+        config.display_name = display_name.into();
+    }
+    config.validate()?;
+    Ok(SetupDisposition::Pair)
+}
+
+fn start_if_stopped() -> Result<()> {
+    if let Some(pid) = running_pid()? {
+        println!("nuntius-client is already running with pid {pid}");
+        Ok(())
+    } else {
+        start()
     }
 }
 
@@ -450,4 +558,83 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
     tokio::select! {_=ctrl_c=>{},_=terminate=>{}}
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+
+    #[test]
+    fn configures_an_unpaired_client() {
+        let mut config = ClientConfig::default();
+
+        let disposition = configure_setup(
+            &mut config,
+            "http://47.97.154.221:8765/",
+            true,
+            Some("Work Mac"),
+        )
+        .unwrap();
+
+        assert_eq!(disposition, SetupDisposition::Pair);
+        assert_eq!(config.server_url, "http://47.97.154.221:8765/");
+        assert!(config.allow_insecure_http);
+        assert_eq!(config.display_name, "Work Mac");
+    }
+
+    #[test]
+    fn preserves_a_pairing_with_the_same_server() {
+        let mut config = ClientConfig {
+            server_url: "http://47.97.154.221:8765".into(),
+            allow_insecure_http: true,
+            device_id: Some("dev_existing".into()),
+            ..ClientConfig::default()
+        };
+
+        let disposition =
+            configure_setup(&mut config, "http://47.97.154.221:8765/", true, None).unwrap();
+
+        assert_eq!(
+            disposition,
+            SetupDisposition::AlreadyPaired("dev_existing".into())
+        );
+    }
+
+    #[test]
+    fn refuses_to_move_an_existing_pairing() {
+        let mut config = ClientConfig {
+            server_url: "https://old.example.com/".into(),
+            device_id: Some("dev_existing".into()),
+            ..ClientConfig::default()
+        };
+
+        let result = configure_setup(&mut config, "https://new.example.com/", false, None);
+
+        assert!(result.is_err());
+        assert_eq!(config.server_url, "https://old.example.com/");
+        assert_eq!(config.device_id.as_deref(), Some("dev_existing"));
+    }
+
+    #[test]
+    fn rejects_an_empty_display_name() {
+        let mut config = ClientConfig::default();
+
+        let result = configure_setup(
+            &mut config,
+            "https://nuntius.example.com/",
+            false,
+            Some("  "),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn requires_explicit_consent_for_public_http() {
+        let mut config = ClientConfig::default();
+
+        let result = configure_setup(&mut config, "http://47.97.154.221:8765/", false, None);
+
+        assert!(result.is_err());
+    }
 }
