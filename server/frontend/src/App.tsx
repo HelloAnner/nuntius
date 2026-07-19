@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Spinner, ToastHost, useTheme } from "@nuntius/shared";
 import { api, setCsrfProvider, ApiError } from "./api";
 import { startEvents } from "./events";
+import { useArchiveOutboxRunner } from "./archiveOutbox";
 import { useRoute, useSession, useThemeStore } from "./stores";
 import { NavRail, TabBar } from "./components";
 import { AuthPage } from "./pages/Auth";
@@ -37,6 +38,7 @@ function Boot() {
   }, [sessionQuery.data, sessionQuery.error, setSession]);
 
   const authed = Boolean(session);
+  useArchiveOutboxRunner(authed);
   useEffect(() => {
     if (!authed) return;
     return startEvents(qc);

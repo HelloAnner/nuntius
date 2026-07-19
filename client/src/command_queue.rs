@@ -169,7 +169,7 @@ async fn execute_one(executor: CommandExecutor, record: InboxRecord) {
         None,
     );
 
-    match executor.execute(&record.command).await {
+    match execute_with_retry(&executor, &record).await {
         Ok(result) => {
             if let Err(error) = executor
                 .store
@@ -225,6 +225,68 @@ async fn execute_one(executor: CommandExecutor, record: InboxRecord) {
         }
     }
     executor.command_notify.notify_one();
+}
+
+async fn execute_with_retry(
+    executor: &CommandExecutor,
+    record: &InboxRecord,
+) -> anyhow::Result<Value> {
+    let retryable_archive = matches!(
+        &record.command.command,
+        DeviceCommandKind::ThreadArchive { .. }
+    );
+    let mut delay = std::time::Duration::from_secs(1);
+    loop {
+        match executor.execute(&record.command).await {
+            Ok(result) => return Ok(result),
+            Err(error) if retryable_archive && archive_error_is_transient(&error) => {
+                let remaining = command_remaining(&record.command);
+                if remaining.is_zero() {
+                    anyhow::bail!("command expired while waiting for App Server recovery");
+                }
+                let sleep_for = delay.min(remaining);
+                tracing::warn!(
+                    command_id=%record.command.command_id,
+                    retry_in_ms=sleep_for.as_millis(),
+                    error=?error,
+                    "archive command waiting for App Server recovery"
+                );
+                tokio::time::sleep(sleep_for).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(30));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn command_remaining(command: &DeviceCommand) -> std::time::Duration {
+    time::OffsetDateTime::parse(
+        &command.expires_at,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .ok()
+    .and_then(|expires_at| {
+        let remaining = expires_at - time::OffsetDateTime::now_utc();
+        std::time::Duration::try_from(remaining).ok()
+    })
+    .unwrap_or_default()
+}
+
+fn archive_error_is_transient(error: &anyhow::Error) -> bool {
+    let lower = format!("{error:#}").to_ascii_lowercase();
+    !lower.contains("not found")
+        && !lower.contains("outside allowed")
+        && !lower.contains("invalid")
+        && !lower.contains("already terminal")
+        && (lower.contains("app server")
+            || lower.contains("codex")
+            || lower.contains("timed out")
+            || lower.contains("outcome is unknown")
+            || lower.contains("writer stopped")
+            || lower.contains("exited before")
+            || lower.contains("connection")
+            || lower.contains("unavailable")
+            || lower.contains("temporarily"))
 }
 
 fn publish_ack(
