@@ -22,7 +22,7 @@ import {
 import { api, ApiError } from "../api";
 import { trackCommand } from "../events";
 import { useArchiveThreadAction, useMedia, useNavigate } from "../hooks";
-import { liveStore, useAccessMode, useApprovals, useRoute, useThreadLive } from "../stores";
+import { liveStore, useAccessMode, useApprovals, useThreadLive } from "../stores";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
 import { ThreadSwitcher } from "../sheets/ThreadSwitcher";
@@ -55,7 +55,6 @@ export function ThreadPage({
   const accessMode = useAccessMode((state) => state.mode);
   const navigate = useNavigate();
   const { archive: archiveThread, busyIds } = useArchiveThreadAction();
-  const back = useRoute((s) => s.back);
   const wide = useMedia("(min-width: 768px)");
   const fromRecents = navigationContext === "recents";
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -304,8 +303,8 @@ export function ThreadPage({
         : undefined}
       onBack={() =>
         fromRecents
-          ? navigate({ name: "recents" })
-          : back({ name: "project", deviceId, projectId })
+          ? navigate({ name: "recents" }, { replace: true })
+          : navigate({ name: "project", deviceId, projectId }, { replace: true })
       }
       onTitleClick={() => setSwitcherOpen(true)}
       trailing={
@@ -362,7 +361,11 @@ export function ThreadPage({
           <TopBar
             title={fromRecents ? "最近会话" : (project?.displayName ?? "项目")}
             subtitle={fromRecents ? `${sidebarThreads.length} 个会话` : device?.displayName}
-            onBack={fromRecents ? undefined : () => back({ name: "device", deviceId })}
+            onBack={
+              fromRecents
+                ? undefined
+                : () => navigate({ name: "device", deviceId }, { replace: true })
+            }
             trailing={
               !fromRecents && !unassigned ? (
                 <button
