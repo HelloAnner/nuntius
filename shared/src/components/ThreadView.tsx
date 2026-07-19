@@ -37,6 +37,54 @@ export interface HistoryGroup {
 }
 
 const SEND_ERROR: CommandStatus[] = ["failed", "rejected", "unknown", "expired"];
+const EMPTY_TEXTS = new Set<string>();
+
+/**
+ * Keep the live transcript stable while App Server events and persisted history
+ * overlap. A turn already renders its initial prompt from `userText`; some App
+ * Server versions also emit that prompt as a user item, which must not become a
+ * second bubble. Mid-turn steering echoes use their own key and remain visible.
+ */
+export function visibleLiveItems(
+  turn: LiveTurn,
+  historyHasAgent = false,
+  historyUsers: ReadonlySet<string> = EMPTY_TEXTS,
+): LiveItem[] {
+  let skippedInitialEcho = false;
+  return turn.items.filter((item) => {
+    if (item.kind === "agent") return !historyHasAgent;
+    if (item.kind !== "user" || !item.text || historyUsers.has(item.text)) return false;
+    if (
+      !skippedInitialEcho &&
+      !item.key.startsWith("steer:") &&
+      turn.userText !== null &&
+      item.text === turn.userText
+    ) {
+      skippedInitialEcho = true;
+      return false;
+    }
+    return true;
+  });
+}
+
+/** Only reconcile an orphan local echo with the corresponding recent turn. */
+export function optimisticEchoIsInHistory(turn: LiveTurn, history: HistoryGroup[]): boolean {
+  if (!turn.id.startsWith("local:") || !turn.userText || turn.items.length > 0) return false;
+  const optimisticAt = Date.parse(turn.startedAt);
+  return history.some((group, index) => {
+    const hasText = group.items.some(
+      (item) => item.kind === "user_message" && item.text === turn.userText,
+    );
+    if (!hasText) return false;
+    const historyAt = group.turn.startedAt ? Date.parse(group.turn.startedAt) : Number.NaN;
+    if (Number.isFinite(optimisticAt) && Number.isFinite(historyAt)) {
+      return Math.abs(optimisticAt - historyAt) < 120_000;
+    }
+    // Timestamps can be absent in imported history. In that case only the
+    // newest turn is a safe fallback; an older identical prompt is unrelated.
+    return index === history.length - 1;
+  });
+}
 
 export function ThreadView({
   history,
@@ -93,35 +141,14 @@ export function ThreadView({
   ): LiveItem[] => {
     const turn = live.byId[turnId];
     if (!turn) return [];
-    return turn.items.filter(
-      (item) =>
-        (item.kind === "user" && !historyUsers.has(item.text)) ||
-        (item.kind === "agent" && !historyHasAgent),
-    );
+    return visibleLiveItems(turn, historyHasAgent, historyUsers);
   };
-
-  const historyUserTexts = useMemo(
-    () =>
-      new Set(
-        history.flatMap((g) =>
-          g.items.filter((i) => i.kind === "user_message").map((i) => i.text),
-        ),
-      ),
-    [history],
-  );
 
   const freshLiveTurns = live.turns.filter((t) => {
     if (historyTurnIds.has(t.id)) return false;
     // orphan optimistic echo: history already persisted this user message
     // under the authoritative turn id (e.g. the live event was missed)
-    if (
-      t.id.startsWith("local:") &&
-      t.userText &&
-      historyUserTexts.has(t.userText) &&
-      t.items.length === 0
-    ) {
-      return false;
-    }
+    if (optimisticEchoIsInHistory(t, history)) return false;
     return true;
   });
 
@@ -200,7 +227,7 @@ export function ThreadView({
             }
           />
         ) : null}
-        {turn.items.filter((item) => item.kind === "agent" || item.kind === "user").map((item) =>
+        {visibleLiveItems(turn).map((item) =>
           item.kind === "agent" ? (
             <AgentMessage
               key={item.key}
