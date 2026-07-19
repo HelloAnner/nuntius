@@ -10,11 +10,14 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest, http::header},
 };
 
-pub async fn run_forever(executor: CommandExecutor) {
+pub async fn run_forever(
+    executor: CommandExecutor,
+    update_trigger: nuntius_updater::UpdateTrigger,
+) {
     let mut backoff = 1_u64;
     loop {
         let attempt_started = tokio::time::Instant::now();
-        match run_connection(executor.clone()).await {
+        match run_connection(executor.clone(), &update_trigger).await {
             Ok(()) => tracing::warn!("device tunnel disconnected"),
             Err(error) => tracing::warn!(error=?error,"device tunnel connection failed"),
         };
@@ -27,7 +30,10 @@ pub async fn run_forever(executor: CommandExecutor) {
     }
 }
 
-async fn run_connection(executor: CommandExecutor) -> Result<()> {
+async fn run_connection(
+    executor: CommandExecutor,
+    update_trigger: &nuntius_updater::UpdateTrigger,
+) -> Result<()> {
     let token = pairing::access_token(&executor.config).await?;
     let mut url = pairing::endpoint(&executor.config, "api/v1/device-tunnel")?;
     match url.scheme() {
@@ -135,7 +141,7 @@ async fn run_connection(executor: CommandExecutor) -> Result<()> {
     loop {
         let watchdog_deadline = last_server_activity + Duration::from_secs(45);
         tokio::select! {
-            incoming=socket.next()=>match incoming{Some(Ok(Message::Text(text)))=>{last_server_activity=tokio::time::Instant::now();let frame: TunnelFrame=serde_json::from_str(&text)?;handle_server_frame(&executor,&out_tx,frame).await?},Some(Ok(Message::Ping(payload)))=>{last_server_activity=tokio::time::Instant::now();socket.send(Message::Pong(payload)).await?;},Some(Ok(Message::Close(_)))|None=>break,Some(Err(error))=>return Err(error.into()),_=>{}},
+            incoming=socket.next()=>match incoming{Some(Ok(Message::Text(text)))=>{last_server_activity=tokio::time::Instant::now();let frame: TunnelFrame=serde_json::from_str(&text)?;handle_server_frame(&executor,&out_tx,frame,update_trigger).await?},Some(Ok(Message::Ping(payload)))=>{last_server_activity=tokio::time::Instant::now();socket.send(Message::Pong(payload)).await?;},Some(Ok(Message::Close(_)))|None=>break,Some(Err(error))=>return Err(error.into()),_=>{}},
             Some(frame)=out_rx.recv()=>send(&mut socket,&frame).await?,
             event=events.recv()=>match event{Ok(event)=>send(&mut socket,&TunnelFrame::Event{event}).await?,Err(broadcast::error::RecvError::Lagged(_))=>send_pending(&executor,&mut socket).await?,Err(broadcast::error::RecvError::Closed)=>break},
             ack=command_acks.recv()=>match ack{
@@ -163,6 +169,7 @@ async fn handle_server_frame(
     executor: &CommandExecutor,
     out: &mpsc::Sender<TunnelFrame>,
     frame: TunnelFrame,
+    update_trigger: &nuntius_updater::UpdateTrigger,
 ) -> Result<()> {
     match frame {
         TunnelFrame::Command {
@@ -231,7 +238,12 @@ async fn handle_server_frame(
         }
         TunnelFrame::HeartbeatAck { .. } => {}
         TunnelFrame::ServerNotice { code, message } => {
-            tracing::warn!(%code,%message,"server notice")
+            if code == "update_available" {
+                tracing::info!(%message, "release notification received from server");
+                update_trigger.notify();
+            } else {
+                tracing::warn!(%code,%message,"server notice")
+            }
         }
         TunnelFrame::Welcome { .. }
         | TunnelFrame::Hello { .. }

@@ -7,6 +7,7 @@ export interface ServerInfo {
   apiVersion: string;
   serverVersion: string;
   buildSha: string;
+  releaseSequence: number;
   transportSecurity: TransportSecurity;
   initialized: boolean;
   capabilities: string[];
@@ -16,6 +17,7 @@ export interface ClientInfo {
   apiVersion: string;
   clientVersion: string;
   buildSha: string;
+  releaseSequence: number;
   deviceId: string;
   paired: boolean;
   localBind: string;

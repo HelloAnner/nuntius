@@ -188,10 +188,12 @@ async fn run() -> Result<()> {
             }
         }
     });
+    let update_trigger = nuntius_updater::UpdateTrigger::new();
+    let tunnel_update_trigger = update_trigger.clone();
     let tunnel_task = cfg
         .device_id
         .as_ref()
-        .map(|_| tokio::spawn(tunnel::run_forever(executor.clone())));
+        .map(|_| tokio::spawn(tunnel::run_forever(executor.clone(), tunnel_update_trigger)));
     let router = api::router(executor)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(CatchPanicLayer::new())
@@ -208,6 +210,7 @@ async fn run() -> Result<()> {
     });
     tracing::info!(bind=%cfg.local_bind,paired=cfg.device_id.is_some(),"Nuntius client running");
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(1);
+    let self_update_trigger = update_trigger.clone();
     let update_task = cfg.auto_update.then(|| {
         let mut update = UpdateConfig::production(
             UpdateRole::Client,
@@ -220,11 +223,11 @@ async fn run() -> Result<()> {
             .and_then(|base| base.join("/api/v1/info"))
             .map(|url| url.to_string())
             .ok();
-        nuntius_updater::spawn_update_loop(update, update_tx)
+        nuntius_updater::spawn_update_loop_triggered(update, update_tx, Some(self_update_trigger))
     });
     let update_relay_task = cfg
         .server_update_relay
-        .then(|| update_relay::spawn(cfg.clone()));
+        .then(|| update_relay::spawn(cfg.clone(), update_trigger));
     let (graceful_tx, graceful_rx) = tokio::sync::oneshot::channel();
     let mut graceful_tx = Some(graceful_tx);
     let server = std::future::IntoFuture::into_future(

@@ -1,10 +1,22 @@
 use crate::{config::ClientConfig, pairing};
 use anyhow::{Context, Result, bail};
-use nuntius_updater::{DEFAULT_MANIFEST_URL, RelayPackage};
+use nuntius_updater::{DEFAULT_MANIFEST_URL, RelayPackage, UpdateTrigger};
+use serde::Deserialize;
 use std::{process::Stdio, sync::Arc, time::Duration};
 use tokio::{io::AsyncWriteExt, process::Command};
 
-pub fn spawn(config: Arc<ClientConfig>) -> tokio::task::JoinHandle<()> {
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerBuildInfo {
+    build_sha: String,
+    #[serde(default)]
+    release_sequence: u64,
+}
+
+pub fn spawn(
+    config: Arc<ClientConfig>,
+    update_trigger: UpdateTrigger,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let manifest_url = std::env::var("NUNTIUS_UPDATE_MANIFEST_URL")
             .unwrap_or_else(|_| DEFAULT_MANIFEST_URL.into());
@@ -19,7 +31,10 @@ pub fn spawn(config: Arc<ClientConfig>) -> tokio::task::JoinHandle<()> {
             tokio::time::interval(Duration::from_secs(config.update_interval_seconds));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = update_trigger.wait() => {}
+            }
             match nuntius_updater::fetch_server_relay_package(
                 &manifest_url,
                 &server_info_url,
@@ -28,8 +43,20 @@ pub fn spawn(config: Arc<ClientConfig>) -> tokio::task::JoinHandle<()> {
             .await
             {
                 Ok(Some(package)) => {
-                    if let Err(error) = upload(&config, package).await {
-                        tracing::warn!(error=?error,"server update relay failed");
+                    let target = package.commit_sha.clone();
+                    let release_sequence = package.release_sequence;
+                    match upload(&config, package).await {
+                        Ok(()) => {
+                            match wait_for_server_build(&server_info_url, &target, release_sequence)
+                                .await
+                            {
+                                Ok(()) => update_trigger.notify(),
+                                Err(error) => {
+                                    tracing::warn!(error=?error,%target,"updated server did not become ready before client update trigger")
+                                }
+                            }
+                        }
+                        Err(error) => tracing::warn!(error=?error,"server update relay failed"),
                     }
                 }
                 Ok(None) => {}
@@ -37,6 +64,33 @@ pub fn spawn(config: Arc<ClientConfig>) -> tokio::task::JoinHandle<()> {
             }
         }
     })
+}
+
+async fn wait_for_server_build(
+    server_info_url: &str,
+    target: &str,
+    release_sequence: u64,
+) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        if let Ok(response) = client.get(server_info_url).send().await
+            && let Ok(response) = response.error_for_status()
+            && let Ok(info) = response.json::<ServerBuildInfo>().await
+            && info.build_sha == target
+            && (release_sequence == 0 || info.release_sequence == release_sequence)
+        {
+            tracing::info!(%target, release_sequence, "server update verified; waking client updater");
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("server did not report target build {target} within 120 seconds");
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 async fn upload(config: &ClientConfig, package: RelayPackage) -> Result<()> {
@@ -62,6 +116,8 @@ async fn upload(config: &ClientConfig, package: RelayPackage) -> Result<()> {
         .arg("receive-update")
         .arg("--commit-sha")
         .arg(&package.commit_sha)
+        .arg("--release-sequence")
+        .arg(package.release_sequence.to_string())
         .arg("--archive-sha256")
         .arg(&package.archive_sha256)
         .arg("--source-device-id")
