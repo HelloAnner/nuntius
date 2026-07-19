@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { useSyncExternalStore } from "react";
 import {
   ThreadLiveStore,
+  type ApprovalSnapshot,
   type ApprovalState,
   type ApprovalView,
   type Theme,
@@ -110,6 +111,7 @@ interface ApprovalsState {
   add: (a: ApprovalView) => void;
   setState: (id: string, state: ApprovalState, decidedAs?: string) => void;
   cancelForThread: (threadId: string) => void;
+  replaceFromSnapshot: (approvals: ApprovalSnapshot[]) => void;
 }
 const APPROVALS_KEY = "nuntius:local-approvals:v1";
 
@@ -176,6 +178,40 @@ export const useApprovals = create<ApprovalsState>((set) => ({
       }
       if (!changed) return s;
       const next = { ...s, items };
+      persist(next);
+      return next;
+    }),
+  replaceFromSnapshot: (approvals) =>
+    set(() => {
+      const items: Record<string, ApprovalView> = {};
+      const order: string[] = [];
+      for (const approval of approvals) {
+        const decision = approval.decision ?? undefined;
+        const state: ApprovalState =
+          approval.status === "pending"
+            ? "pending"
+            : approval.status === "responding"
+              ? "responding"
+              : approval.status === "expired"
+                ? "expired"
+                : approval.status === "unknown" || approval.status === "failed"
+                  ? "unknown"
+                  : decision === "decline" || decision === "cancel"
+                    ? "denied"
+                    : "approved";
+        items[approval.id] = {
+          id: approval.id,
+          method: approval.method,
+          params: approval.params,
+          state,
+          decidedAs: decision,
+          occurredAt: approval.requestedAt,
+          threadId: approval.threadId,
+          deviceId: approval.deviceId,
+        };
+        order.push(approval.id);
+      }
+      const next = { items, order };
       persist(next);
       return next;
     }),

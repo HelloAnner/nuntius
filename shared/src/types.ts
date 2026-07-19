@@ -138,6 +138,17 @@ export interface HistoryItemView {
   isTruncated: boolean;
   occurredAt: string;
   completedAt: string | null;
+  attachments: AttachmentView[];
+}
+
+export interface AttachmentView {
+  id: string;
+  originalName: string;
+  mimeType: string;
+  byteSize: number;
+  sha256: string;
+  width: number;
+  height: number;
 }
 
 export interface HistoryRecord {
@@ -174,6 +185,30 @@ export interface CommandView {
   errorCode: string | null;
   errorMessage: string | null;
   result: unknown;
+}
+
+/** Durable approval projection returned by both local and remote snapshots. */
+export interface ApprovalSnapshot {
+  id: string;
+  deviceId: string;
+  projectId: string | null;
+  threadId: string | null;
+  method: string;
+  params: unknown;
+  status: string;
+  requestedAt: string;
+  decidedAt: string | null;
+  decision: string | null;
+}
+
+/** Database-backed baseline paired with an SSE replay cursor. */
+export interface SyncSnapshot {
+  cursor: number;
+  generatedAt: string;
+  devices: DeviceSummary[];
+  projects: ProjectSummary[];
+  threads: ThreadSummary[];
+  approvals: ApprovalSnapshot[];
 }
 
 export interface DirectoryEntry {
@@ -224,6 +259,8 @@ export interface ApiErrorBody {
 /* payload shapes for well-known events */
 export interface TurnStartedPayload {
   text: string;
+  attachments?: AttachmentView[];
+  clientMessageId?: string | null;
 }
 export interface ApprovalRequestedPayload {
   approvalId: string;

@@ -291,6 +291,33 @@ pub struct HistoryItemView {
     pub is_truncated: bool,
     pub occurred_at: String,
     pub completed_at: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentView {
+    pub id: String,
+    pub original_name: String,
+    pub mime_type: String,
+    pub byte_size: i64,
+    pub sha256: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentRef {
+    pub id: String,
+    pub original_name: String,
+    pub mime_type: String,
+    pub extension: String,
+    pub byte_size: i64,
+    pub sha256: String,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -415,6 +442,10 @@ pub struct StartTurnRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TextInputRequest {
     pub text: String,
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
+    #[serde(default)]
+    pub client_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -496,10 +527,14 @@ pub enum DeviceCommandKind {
     TurnStart {
         thread_id: String,
         request: StartTurnRequest,
+        #[serde(default)]
+        attachments: Vec<AttachmentRef>,
     },
     TurnSteer {
         thread_id: String,
         request: TextInputRequest,
+        #[serde(default)]
+        attachments: Vec<AttachmentRef>,
     },
     TurnInterrupt {
         thread_id: String,

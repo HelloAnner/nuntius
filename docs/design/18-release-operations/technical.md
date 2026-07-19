@@ -137,7 +137,7 @@ supported_app_server_schemas
 
 ## 9. 备份与灾备
 
-- 第一版停服后运行 `nuntius-server --data-dir <dir> backup`，通过 SQLite `VACUUM INTO` 生成一致性备份；数据目录锁会阻止与在线 Server 并发执行。备份落入 `<data-dir>/backups` 后再复制到异地。
+- 停服后运行 `nuntius-server --data-dir <dir> backup`，通过 SQLite `VACUUM INTO` 生成一致性快照并复制图片附件目录；数据目录锁会阻止与在线 Server 并发执行。目录型备份落入 `<data-dir>/backups` 后再复制到异地。
 - 备份包含规范化完整历史及 history checkpoint，并按敏感会话数据加密和限制权限。
 - 配置/签名密钥有独立安全备份。
 - 每月或每个重要发布前恢复演练。

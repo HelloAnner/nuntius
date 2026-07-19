@@ -104,7 +104,7 @@ normal -> warning -> critical -> read_only_degraded
 
 ## 9. Server 备份恢复
 
-- 第一版停服后使用 `nuntius-server --data-dir <dir> backup`（SQLite `VACUUM INTO`）生成一致性快照；禁止仅复制活跃 DB 主文件。未来需要无停机备份时再切换 online backup API。
+- 停服后使用 `nuntius-server --data-dir <dir> backup` 生成目录型备份：SQLite 通过 `VACUUM INTO` 生成一致性快照，同时复制图片附件目录；禁止仅复制活跃 DB 主文件。未来需要无停机备份时再切换 online backup API。
 - 备份包含 schema、用户、设备、命令状态、规范化完整历史和审计元数据。
 - 加密保存，权限最小化。
 - 定期恢复到隔离实例并运行一致性检查。

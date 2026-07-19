@@ -96,10 +96,16 @@ impl CommandExecutor {
                     "providerResult": provider_result,
                 }))
             }
-            DeviceCommandKind::TurnStart { thread_id, request } => {
-                self.start_turn(thread_id, request).await
-            }
-            DeviceCommandKind::TurnSteer { thread_id, request } => {
+            DeviceCommandKind::TurnStart {
+                thread_id,
+                request,
+                attachments,
+            } => self.start_turn(thread_id, request, attachments).await,
+            DeviceCommandKind::TurnSteer {
+                thread_id,
+                request,
+                attachments,
+            } => {
                 let thread = self.command_thread(thread_id).await?;
                 let state = self.resume_provider_thread(&thread).await?;
                 let input = text_input(&request.text)?;
@@ -189,12 +195,17 @@ impl CommandExecutor {
                     .await
                 {
                     self.store
-                        .finish_app_request(approval_id, "unknown")
+                        .finish_app_request(
+                            approval_id,
+                            "unknown",
+                            Some(&request.decision),
+                            Some("app_server_response_outcome_unknown"),
+                        )
                         .await?;
                     return Err(error).context("approval outcome is unknown");
                 }
                 self.store
-                    .finish_app_request(approval_id, "decided")
+                    .finish_app_request(approval_id, "decided", Some(&request.decision), None)
                     .await?;
                 Ok(json!({"approvalId":approval_id,"decision":request.decision}))
             }
@@ -420,7 +431,7 @@ impl CommandExecutor {
                 access_mode: request.access_mode,
                 options: Value::Object(Map::new()),
             };
-            let _ = self.start_turn(&id, &start).await?;
+            let _ = self.start_turn(&id, &start, &[]).await?;
         }
         let thread = self.thread(&id).await?;
         Ok(json!({
@@ -1221,6 +1232,10 @@ impl CommandExecutor {
         if durable {
             self.store.enqueue_event(&event).await?;
         }
+        // Browser replay has a separate bounded journal. It intentionally also
+        // includes transient deltas so a page reload can resume the current item;
+        // maintenance caps the journal and completed items remain in history.
+        self.store.append_browser_event(&event).await?;
         let _ = self.events.send(event.clone());
         Ok(event)
     }
@@ -1645,6 +1660,56 @@ fn bounded_event_payload(value: &Value, limit: usize) -> Value {
 }
 
 fn validate_command(kind: &DeviceCommandKind) -> Result<()> {
+    fn message(
+        text_value: &str,
+        attachment_ids: &[String],
+        client_message_id: Option<&str>,
+        attachments: &[AttachmentRef],
+    ) -> Result<()> {
+        if text_value.trim().is_empty() && attachments.is_empty() {
+            bail!("message requires text or an image")
+        }
+        if text_value.len() > 256 * 1024 || attachments.len() > 4 {
+            bail!("message exceeds the input limit")
+        }
+        if attachment_ids.len() != attachments.len()
+            || attachment_ids
+                .iter()
+                .zip(attachments)
+                .any(|(id, attachment)| id != &attachment.id)
+        {
+            bail!("attachment references do not match the message")
+        }
+        if let Some(client_message_id) = client_message_id {
+            text("clientMessageId", client_message_id, 128)?;
+        }
+        for attachment in attachments {
+            text("attachmentId", &attachment.id, 128)?;
+            text("attachmentName", &attachment.original_name, 180)?;
+            if attachment.sha256.len() != 64
+                || !attachment
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                bail!("attachment checksum is invalid")
+            }
+            if !matches!(
+                (attachment.mime_type.as_str(), attachment.extension.as_str()),
+                ("image/jpeg", "jpg") | ("image/png", "png") | ("image/webp", "webp")
+            ) {
+                bail!("attachment media type is invalid")
+            }
+            if attachment.byte_size <= 0 || attachment.byte_size > 20 * 1024 * 1024 {
+                bail!("attachment size is invalid")
+            }
+            let pixels = u64::from(attachment.width) * u64::from(attachment.height);
+            if pixels == 0 || pixels > 50_000_000 {
+                bail!("attachment dimensions are invalid")
+            }
+        }
+        Ok(())
+    }
     fn text(field: &str, value: &str, maximum: usize) -> Result<()> {
         if value.trim().is_empty() || value.len() > maximum {
             bail!("{field} must contain 1 to {maximum} bytes")
@@ -1675,12 +1740,30 @@ fn validate_command(kind: &DeviceCommandKind) -> Result<()> {
             }
             value("options", &request.options, 64 * 1024)?;
         }
-        DeviceCommandKind::TurnStart { request, .. } => {
-            text("text", &request.text, 256 * 1024)?;
+        DeviceCommandKind::TurnStart {
+            request,
+            attachments,
+            ..
+        } => {
+            message(
+                &request.text,
+                &request.attachment_ids,
+                request.client_message_id.as_deref(),
+                attachments,
+            )?;
             value("options", &request.options, 64 * 1024)?;
         }
-        DeviceCommandKind::TurnSteer { request, .. } => {
-            text("text", &request.text, 256 * 1024)?;
+        DeviceCommandKind::TurnSteer {
+            request,
+            attachments,
+            ..
+        } => {
+            message(
+                &request.text,
+                &request.attachment_ids,
+                request.client_message_id.as_deref(),
+                attachments,
+            )?;
         }
         DeviceCommandKind::ApprovalDecide { request, .. } => {
             if let Some(response) = &request.response {
@@ -1836,6 +1919,7 @@ done
                     access_mode: ConversationAccessMode::Full,
                     options: json!({}),
                 },
+                &[],
             )
             .await
             .unwrap();

@@ -238,7 +238,7 @@ pub fn initialize(force: bool) -> Result<PathBuf> {
     let root = data_dir()?;
     fs::create_dir_all(&root)?;
     private_dir(&root)?;
-    for child in ["logs", "run", "secrets", "backups"] {
+    for child in ["logs", "run", "secrets", "backups", "attachments"] {
         let path = root.join(child);
         fs::create_dir_all(&path)?;
         private_dir(&path)?;
@@ -299,13 +299,13 @@ pub fn log_path() -> Result<PathBuf> {
 }
 
 #[cfg(unix)]
-fn private_dir(path: &Path) -> Result<()> {
+pub(crate) fn private_dir(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 #[cfg(not(unix))]
-fn private_dir(_path: &Path) -> Result<()> {
+pub(crate) fn private_dir(_path: &Path) -> Result<()> {
     Ok(())
 }
 #[cfg(unix)]

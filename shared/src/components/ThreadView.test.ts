@@ -30,6 +30,8 @@ function turn(overrides: Partial<LiveTurn> = {}): LiveTurn {
     id: "trn_live",
     status: "running",
     userText: "帮我检查一下",
+    userAttachments: [],
+    clientMessageId: null,
     sendState: "completed",
     sendErrorCode: null,
     sendErrorMessage: null,
@@ -325,5 +327,39 @@ describe("ThreadLiveStore chronology", () => {
       "earlier",
       "later",
     ]);
+  });
+
+  test("replaces an image steer provisional turn with one inline echo", () => {
+    const store = new ThreadLiveStore();
+    const attachment = {
+      id: "att_one",
+      originalName: "one.png",
+      mimeType: "image/png",
+      byteSize: 123,
+      sha256: "a".repeat(64),
+      width: 20,
+      height: 10,
+    };
+    store.addOptimistic("thr", "pending", "", [attachment], "client-one");
+    store.apply({
+      eventId: "evt-steer",
+      userId: null,
+      deviceId: "dev",
+      projectId: "prj",
+      threadId: "thr",
+      turnId: "turn-active",
+      streamId: "stream",
+      seq: 1,
+      eventType: "turn.steered",
+      durability: "durable",
+      occurredAt: "2026-07-19T10:00:00.000Z",
+      payload: { text: "", attachments: [attachment], clientMessageId: "client-one" },
+    });
+
+    const live = store.get("thr");
+    expect(live.turns).toHaveLength(1);
+    expect(live.turns[0].id.startsWith("local:")).toBe(false);
+    expect(live.turns[0].items).toHaveLength(1);
+    expect(live.turns[0].items[0].attachments).toEqual([attachment]);
   });
 });

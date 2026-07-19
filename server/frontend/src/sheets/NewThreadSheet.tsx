@@ -118,7 +118,7 @@ export function NewThreadSheet({
       onCreated(created.threadId);
       if (text) {
         const firstTurnKey = newIdemKey();
-        liveStore.addOptimistic(created.threadId, firstTurnKey, text);
+        liveStore.addOptimistic(created.threadId, firstTurnKey, text, [], firstTurnKey);
         void api
           .startTurn(
             created.threadId,

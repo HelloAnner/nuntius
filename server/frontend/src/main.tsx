@@ -2,8 +2,11 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import "@nuntius/shared/styles";
+import { applyTheme, type Theme } from "@nuntius/shared";
 import "./app.css";
 import { App } from "./App";
+
+applyTheme((localStorage.getItem("nuntius:theme") as Theme) || "auto");
 
 const queryClient = new QueryClient({
   defaultOptions: {

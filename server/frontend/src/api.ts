@@ -12,6 +12,7 @@ import {
   type PairingCodeView,
   type ProjectSummary,
   type ServerInfo,
+  type SyncSnapshot,
   type ThreadSummary,
   type WebSessionView,
 } from "@nuntius/shared";
@@ -51,6 +52,45 @@ export function setCsrfProvider(fn: CsrfProvider) {
   csrfProvider = fn;
 }
 
+function uploadAttachment(
+  threadId: string,
+  file: File,
+  onProgress: (progress: number) => void,
+): Promise<AttachmentView> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/v1/threads/${encodeURIComponent(threadId)}/attachments`);
+    xhr.withCredentials = true;
+    xhr.timeout = 90_000;
+    const csrf = csrfProvider();
+    if (csrf) xhr.setRequestHeader("x-csrf-token", csrf);
+    xhr.setRequestHeader("idempotency-key", newIdemKey());
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onerror = () => reject(new ApiError(0, "network", "图片上传失败，请检查网络", true));
+    xhr.ontimeout = () => reject(new ApiError(0, "timeout", "图片上传超时，请重试", true));
+    xhr.onload = () => {
+      let body: unknown = null;
+      try { body = JSON.parse(xhr.responseText); } catch { /* handled below */ }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body as AttachmentView);
+        return;
+      }
+      const detail = body as { error?: { code?: string; message?: string; retryable?: boolean } } | null;
+      reject(new ApiError(
+        xhr.status,
+        detail?.error?.code ?? "upload_failed",
+        detail?.error?.message ?? `图片上传失败（${xhr.status}）`,
+        detail?.error?.retryable ?? false,
+      ));
+    };
+    const form = new FormData();
+    form.append("file", file, file.name);
+    xhr.send(form);
+  });
+}
+
 async function req<T>(
   method: string,
   path: string,
@@ -83,6 +123,7 @@ async function req<T>(
 
 export const api = {
   info: () => req<ServerInfo>("GET", "/info"),
+  sync: () => req<SyncSnapshot>("GET", "/sync"),
   session: () => req<WebSessionView>("GET", "/auth/session"),
   login: (loginName: string, password: string) =>
     req<WebSessionView>("POST", "/auth/login", { loginName, password }),

@@ -1,5 +1,5 @@
 use crate::{config::DATABASE_FILE, protocol::*};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{
@@ -688,6 +688,120 @@ impl ServerStore {
         Ok(row.map(|r| (r.get("device_id"), r.get("project_id"))))
     }
 
+    pub async fn insert_attachment(
+        &self,
+        id: &str,
+        user_id: &str,
+        device_id: &str,
+        thread_id: &str,
+        upload_key: &str,
+        original_name: &str,
+        mime_type: &str,
+        extension: &str,
+        byte_size: i64,
+        sha256: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<AttachmentView> {
+        sqlx::query("INSERT INTO attachments(id,user_id,device_id,thread_id,original_name,mime_type,extension,byte_size,sha256,width,height,status,upload_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'ready',?,?)")
+            .bind(id).bind(user_id).bind(device_id).bind(thread_id).bind(original_name)
+            .bind(mime_type).bind(extension).bind(byte_size).bind(sha256)
+            .bind(i64::from(width)).bind(i64::from(height)).bind(upload_key).bind(now())
+            .execute(&self.pool).await?;
+        Ok(AttachmentView {
+            id: id.into(),
+            original_name: original_name.into(),
+            mime_type: mime_type.into(),
+            byte_size,
+            sha256: sha256.into(),
+            width,
+            height,
+        })
+    }
+
+    pub async fn attachment_by_upload_key(
+        &self,
+        user_id: &str,
+        thread_id: &str,
+        upload_key: &str,
+    ) -> Result<Option<AttachmentView>> {
+        let row = sqlx::query("SELECT * FROM attachments WHERE user_id=? AND thread_id=? AND upload_key=? AND status<>'deleted'")
+            .bind(user_id).bind(thread_id).bind(upload_key).fetch_optional(&self.pool).await?;
+        Ok(row.map(|row| attachment_view_from_row(&row)))
+    }
+
+    pub async fn attachment_ref_for_user(
+        &self,
+        user_id: &str,
+        attachment_id: &str,
+    ) -> Result<Option<AttachmentRef>> {
+        let row =
+            sqlx::query("SELECT * FROM attachments WHERE id=? AND user_id=? AND status<>'deleted'")
+                .bind(attachment_id)
+                .bind(user_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|row| attachment_ref_from_row(&row)))
+    }
+
+    pub async fn attachment_ref_for_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        attachment_id: &str,
+    ) -> Result<Option<AttachmentRef>> {
+        let row = sqlx::query("SELECT * FROM attachments WHERE id=? AND user_id=? AND device_id=? AND status<>'deleted'")
+            .bind(attachment_id).bind(user_id).bind(device_id).fetch_optional(&self.pool).await?;
+        Ok(row.map(|row| attachment_ref_from_row(&row)))
+    }
+
+    pub async fn resolve_message_attachments(
+        &self,
+        user_id: &str,
+        thread_id: &str,
+        attachment_ids: &[String],
+    ) -> Result<Vec<AttachmentRef>> {
+        if attachment_ids.len() > crate::attachments::MAX_IMAGES_PER_MESSAGE {
+            bail!(
+                "a message may contain at most {} images",
+                crate::attachments::MAX_IMAGES_PER_MESSAGE
+            );
+        }
+        let mut unique = std::collections::HashSet::new();
+        let mut attachments = Vec::with_capacity(attachment_ids.len());
+        for id in attachment_ids {
+            if !unique.insert(id.as_str()) {
+                bail!("attachment ids must be unique");
+            }
+            let row = sqlx::query("SELECT * FROM attachments WHERE id=? AND user_id=? AND thread_id=? AND status='ready'")
+                .bind(id).bind(user_id).bind(thread_id).fetch_optional(&self.pool).await?
+                .context("attachment is unavailable for this thread")?;
+            attachments.push(attachment_ref_from_row(&row));
+        }
+        Ok(attachments)
+    }
+
+    pub async fn delete_unreferenced_attachment(
+        &self,
+        user_id: &str,
+        attachment_id: &str,
+    ) -> Result<Option<AttachmentRef>> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT * FROM attachments a WHERE a.id=? AND a.user_id=? AND a.status='ready' AND NOT EXISTS(SELECT 1 FROM command_attachments c WHERE c.attachment_id=a.id) AND NOT EXISTS(SELECT 1 FROM item_attachments i WHERE i.attachment_id=a.id)")
+            .bind(attachment_id).bind(user_id).fetch_optional(&mut *tx).await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let attachment = attachment_ref_from_row(&row);
+        sqlx::query("DELETE FROM attachments WHERE id=? AND user_id=?")
+            .bind(attachment_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(Some(attachment))
+    }
+
     pub async fn project_belongs_to_user(
         &self,
         user_id: &str,
@@ -741,7 +855,19 @@ impl ServerStore {
     ) -> Result<Vec<HistoryItemView>> {
         let rows = sqlx::query("SELECT i.* FROM items i JOIN turns t ON t.id=i.turn_id JOIN threads h ON h.id=t.thread_id WHERE h.user_id=? AND i.turn_id=? ORDER BY julianday(i.occurred_at),i.ordinal,i.id LIMIT ? OFFSET ?")
             .bind(user_id).bind(turn_id).bind(limit).bind(offset).fetch_all(&self.pool).await?;
-        Ok(rows.into_iter().map(item_from_row).collect())
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut item = item_from_row(row);
+            item.attachments = self.item_attachments(&item.id).await?;
+            items.push(item);
+        }
+        Ok(items)
+    }
+
+    async fn item_attachments(&self, item_id: &str) -> Result<Vec<AttachmentView>> {
+        let rows = sqlx::query("SELECT a.* FROM item_attachments ia JOIN attachments a ON a.id=ia.attachment_id WHERE ia.item_id=? ORDER BY ia.ordinal")
+            .bind(item_id).fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(attachment_view_from_row).collect())
     }
 
     pub async fn insert_command(
@@ -775,6 +901,26 @@ impl ServerStore {
             .bind(&command.command_id).bind(user_id).bind(&command.device_id).bind(&command.project_id).bind(&command.thread_id)
             .bind(kind).bind(payload).bind(idempotency_key).bind(fingerprint).bind(self.queue_epoch()).bind(sequence).bind(&command.issued_at).bind(expires_at_unix)
             .execute(&mut *tx).await?;
+        let attachments: &[AttachmentRef] = match &command.command {
+            DeviceCommandKind::TurnStart { attachments, .. }
+            | DeviceCommandKind::TurnSteer { attachments, .. } => attachments,
+            _ => &[],
+        };
+        for (index, attachment) in attachments.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO command_attachments(command_id,attachment_id,ordinal) VALUES(?,?,?)",
+            )
+            .bind(&command.command_id)
+            .bind(&attachment.id)
+            .bind(index as i64 + 1)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("UPDATE attachments SET last_referenced_at=? WHERE id=?")
+                .bind(now())
+                .bind(&attachment.id)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(StoredCommand {
             queue_epoch: self.queue_epoch().into(),
@@ -1251,6 +1397,7 @@ impl ServerStore {
                     hex::encode(Sha256::digest(serde_json::to_vec(&serde_json::json!({
                         "text": &item.content_text,
                         "detail": &item.structured_detail,
+                        "attachments": &item.attachments,
                     }))?));
                 let current: Option<(i64,)> =
                     sqlx::query_as("SELECT revision FROM items WHERE id=?")
@@ -1458,6 +1605,33 @@ fn item_from_row(r: sqlx::sqlite::SqliteRow) -> HistoryItemView {
         is_truncated: r.get::<i64, _>("is_truncated") != 0,
         occurred_at: r.get("occurred_at"),
         completed_at: r.get("completed_at"),
+        attachments: Vec::new(),
+    }
+}
+
+fn attachment_view_from_row(r: &sqlx::sqlite::SqliteRow) -> AttachmentView {
+    AttachmentView {
+        id: r.get("id"),
+        original_name: r.get("original_name"),
+        mime_type: r.get("mime_type"),
+        byte_size: r.get("byte_size"),
+        sha256: r.get("sha256"),
+        width: r.get::<i64, _>("width") as u32,
+        height: r.get::<i64, _>("height") as u32,
+    }
+}
+
+fn attachment_ref_from_row(r: &sqlx::sqlite::SqliteRow) -> AttachmentRef {
+    let view = attachment_view_from_row(r);
+    AttachmentRef {
+        id: view.id,
+        original_name: view.original_name,
+        mime_type: view.mime_type,
+        extension: r.get("extension"),
+        byte_size: view.byte_size,
+        sha256: view.sha256,
+        width: view.width,
+        height: view.height,
     }
 }
 
@@ -1916,6 +2090,7 @@ mod tests {
                     is_truncated: false,
                     occurred_at: now(),
                     completed_at: Some(now()),
+                    attachments: Vec::new(),
                 }),
             },
             HistoryRecord {
@@ -1933,6 +2108,7 @@ mod tests {
                     is_truncated: false,
                     occurred_at: now(),
                     completed_at: Some(now()),
+                    attachments: Vec::new(),
                 }),
             },
         ];
@@ -2072,6 +2248,7 @@ mod tests {
                     is_truncated: false,
                     occurred_at: now(),
                     completed_at: Some(now()),
+                    attachments: Vec::new(),
                 }),
             },
         ];

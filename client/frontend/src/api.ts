@@ -6,7 +6,9 @@ import type {
   DirectoryListResponse,
   HistoryRecord,
   ProjectSummary,
+  SyncSnapshot,
   ThreadSummary,
+  AgentProvider,
 } from "@nuntius/shared";
 
 export class ApiError extends Error {
@@ -49,6 +51,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 
 export const api = {
   info: () => req<ClientInfo>("GET", "/info"),
+  sync: () => req<SyncSnapshot>("GET", "/sync"),
   directoryRoots: () => req<DirectoryListResponse>("GET", "/directories/roots"),
   directories: (parentRef: string, cursor?: string) =>
     req<DirectoryListResponse>(

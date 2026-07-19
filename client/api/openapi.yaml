@@ -88,6 +88,20 @@ paths:
       operationId: getLocalThreadHistory
       parameters: [{$ref: '#/components/parameters/ThreadId'}]
       responses: {'200': {description: 本地权威 Thread/Turn/Item 记录, content: {application/json: {schema: {type: array, items: {type: object, additionalProperties: true}}}}}, '404': {$ref: '#/components/responses/NotFound'}}
+  /attachments/{attachmentId}/content:
+    get:
+      operationId: getLocalAttachmentContent
+      parameters: [{$ref: '#/components/parameters/AttachmentId'}]
+      responses:
+        '200': {description: 设备缓存的原始图片, content: {image/jpeg: {}, image/png: {}, image/webp: {}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /attachments/{attachmentId}/thumbnail:
+    get:
+      operationId: getLocalAttachmentThumbnail
+      parameters: [{$ref: '#/components/parameters/AttachmentId'}]
+      responses:
+        '200': {description: 设备生成的 WebP 缩略图, content: {image/webp: {}}}
+        '404': {$ref: '#/components/responses/NotFound'}
   /threads/{threadId}/turns:
     post:
       operationId: startLocalTurn
@@ -117,7 +131,7 @@ paths:
       operationId: decideLocalApproval
       parameters: [{name: approvalId, in: path, required: true, schema: {type: string}}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ApprovalDecision'}}}}
-      responses: {'200': {description: 审批响应已写给 App Server}, '400': {$ref: '#/components/responses/BadRequest'}}
+      responses: {'200': {description: 审批响应已写给会话 provider}, '400': {$ref: '#/components/responses/BadRequest'}}
   /events:
     get:
       operationId: subscribeLocalEvents
@@ -126,8 +140,9 @@ components:
   parameters:
     ProjectId: {name: projectId, in: path, required: true, schema: {type: string}}
     ThreadId: {name: threadId, in: path, required: true, schema: {type: string}}
+    AttachmentId: {name: attachmentId, in: path, required: true, schema: {type: string}}
   responses:
-    BadRequest: {description: 输入非法或 App Server 拒绝, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    BadRequest: {description: 输入非法或会话 provider 拒绝, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
     NotFound: {description: 本地资源不存在, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   schemas:
     DirectoryPage:
@@ -205,7 +220,21 @@ components:
     TextInput:
       type: object
       required: [text]
-      properties: {text: {type: string, minLength: 1, maxLength: 262144}}
+      properties:
+        text: {type: string, maxLength: 262144}
+        attachmentIds: {type: array, maxItems: 4, uniqueItems: true, items: {type: string}, description: 本地 API 当前不提供上传入口，非空值会被拒绝}
+        clientMessageId: {type: [string, 'null'], minLength: 1, maxLength: 128}
+    Attachment:
+      type: object
+      required: [id, originalName, mimeType, byteSize, sha256, width, height]
+      properties:
+        id: {type: string}
+        originalName: {type: string}
+        mimeType: {enum: [image/jpeg, image/png, image/webp]}
+        byteSize: {type: integer, minimum: 1, maximum: 20971520}
+        sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        width: {type: integer, minimum: 1}
+        height: {type: integer, minimum: 1}
     ApprovalDecision:
       type: object
       required: [decision]

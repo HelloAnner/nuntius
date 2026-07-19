@@ -96,7 +96,7 @@ pub fn initialize_data_dir(data_dir: &Path, force: bool) -> Result<InitResult> {
     fs::create_dir_all(data_dir)
         .with_context(|| format!("failed to create {}", data_dir.display()))?;
     set_private_dir_permissions(data_dir)?;
-    for child in ["logs", "run", "backups", "secrets"] {
+    for child in ["logs", "run", "backups", "secrets", "attachments"] {
         let path = data_dir.join(child);
         fs::create_dir_all(&path)?;
         set_private_dir_permissions(&path)?;
@@ -166,14 +166,14 @@ pub fn random_secret(bytes: usize) -> String {
 }
 
 #[cfg(unix)]
-fn set_private_dir_permissions(path: &Path) -> Result<()> {
+pub(crate) fn set_private_dir_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn set_private_dir_permissions(_path: &Path) -> Result<()> {
+pub(crate) fn set_private_dir_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 

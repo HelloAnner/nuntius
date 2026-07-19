@@ -2,6 +2,7 @@ mod agent;
 mod api;
 mod app_server;
 mod assets;
+mod attachments;
 mod command_queue;
 mod config;
 mod directory;
@@ -24,7 +25,7 @@ use fs2::FileExt;
 use nuntius_updater::{BuildInfo, UpdateConfig, UpdateRole};
 use std::{
     fs::{self, OpenOptions},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     sync::Arc,
     time::Duration,
@@ -245,12 +246,41 @@ async fn backup() -> Result<()> {
     let root = config::data_dir()?;
     let store = ClientStore::open(&root).await?;
     let destination = root.join("backups").join(format!(
-        "nuntius-client-{}.db",
+        "nuntius-client-{}",
         time::OffsetDateTime::now_utc().unix_timestamp_nanos()
     ));
-    store.backup(&destination).await?;
-    config::private_file(&destination)?;
+    fs::create_dir(&destination)?;
+    config::private_dir(&destination)?;
+    let database = destination.join(config::DATABASE_FILE);
+    store.backup(&database).await?;
+    config::private_file(&database)?;
+    copy_private_tree(&root.join("attachments"), &destination.join("attachments"))?;
     println!("backup created {}", destination.display());
+    Ok(())
+}
+
+fn copy_private_tree(source: &Path, destination: &Path) -> Result<()> {
+    if !source.exists() {
+        return Ok(());
+    }
+    fs::create_dir(destination)?;
+    config::private_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_private_tree(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target)?;
+            config::private_file(&target)?;
+        } else {
+            anyhow::bail!(
+                "refusing to back up symlink or special file {}",
+                entry.path().display()
+            );
+        }
+    }
     Ok(())
 }
 

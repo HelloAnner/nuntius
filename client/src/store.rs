@@ -77,6 +77,13 @@ impl ClientStore {
         sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
             .execute(&self.pool)
             .await?;
+        // Keep enough short-term control events for browser reconnects without
+        // turning the replay journal into a second long-term history store.
+        sqlx::query(
+            "DELETE FROM browser_event_journal WHERE cursor < COALESCE((SELECT MAX(cursor)-10000 FROM browser_event_journal), 0)",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
     pub async fn backup(&self, destination: &Path) -> Result<()> {
@@ -107,7 +114,7 @@ impl ClientStore {
         .fetch_all(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE pending_app_requests SET status='unknown',decided_at=? WHERE status IN ('pending','responding')",
+            "UPDATE pending_app_requests SET status='unknown',decided_at=?,error_message='client_restarted_before_decision' WHERE status IN ('pending','responding')",
         )
         .bind(&stamp)
         .execute(&mut *tx)
@@ -121,6 +128,14 @@ impl ClientStore {
         // Archive expresses an idempotent desired state, so it is safe to run again after
         // a process restart. Other applying commands retain the conservative unknown state.
         sqlx::query("UPDATE command_inbox SET status='accepted',started_at=NULL,completed_at=NULL,error_code=NULL,error_message=NULL WHERE status='applying' AND json_extract(payload,'$.command.kind')='thread_archive'")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE status IN ('active','running','inProgress')")
+            .bind(&stamp)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("UPDATE items SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE status IN ('active','running','inProgress')")
+            .bind(&stamp)
             .execute(&self.pool)
             .await?;
         sqlx::query("UPDATE command_inbox SET status='unknown',completed_at=?,error_code='execution_state_unknown_after_restart',error_message='客户端重启，无法确认命令是否已经执行' WHERE status='applying'")
@@ -527,6 +542,7 @@ impl ClientStore {
         thread_id: &str,
         app_turn_id: Option<&str>,
         text: &str,
+        attachments: &[AttachmentView],
     ) -> Result<String> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let stamp = now();
@@ -566,15 +582,16 @@ impl ClientStore {
                 .bind(&turn_id).bind(thread_id).bind(app_turn_id).bind(ordinal).bind(&stamp)
                 .execute(&mut *tx).await?;
         }
-        if sqlx::query_scalar::<_, String>(
+        let item_id = if let Some(item_id) = sqlx::query_scalar::<_, String>(
             "SELECT id FROM items WHERE turn_id=? AND kind='user_message' AND content_text=? LIMIT 1",
         )
         .bind(&turn_id)
         .bind(text)
         .fetch_optional(&mut *tx)
         .await?
-        .is_none()
         {
+            item_id
+        } else {
             let item_id = new_id("itm");
             let item_ordinal: i64 = sqlx::query_scalar(
                 "SELECT COALESCE(MAX(ordinal),0)+1 FROM items WHERE turn_id=?",
@@ -583,8 +600,19 @@ impl ClientStore {
             .fetch_one(&mut *tx)
             .await?;
             sqlx::query("INSERT INTO items(id,turn_id,ordinal,kind,status,content_text,occurred_at,completed_at) VALUES(?,?,?,'user_message','completed',?,?,?)")
-                .bind(item_id).bind(&turn_id).bind(item_ordinal).bind(text).bind(&stamp).bind(&stamp)
+                .bind(&item_id).bind(&turn_id).bind(item_ordinal).bind(text).bind(&stamp).bind(&stamp)
                 .execute(&mut *tx).await?;
+            item_id
+        };
+        for (index, attachment) in attachments.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO item_attachments(item_id,attachment_id,ordinal) VALUES(?,?,?)",
+            )
+            .bind(&item_id)
+            .bind(&attachment.id)
+            .bind(index as i64 + 1)
+            .execute(&mut *tx)
+            .await?;
         }
         sqlx::query(
             "UPDATE threads SET status='active',last_activity_at=?,updated_at=? WHERE id=?",
@@ -597,6 +625,7 @@ impl ClientStore {
         tx.commit().await?;
         Ok(turn_id)
     }
+
     pub async fn mark_app_turn_started(
         &self,
         thread_id: &str,
@@ -655,6 +684,60 @@ impl ClientStore {
         .await?;
         tx.commit().await?;
         Ok(turn_id)
+    }
+
+    pub async fn upsert_attachment(
+        &self,
+        thread_id: &str,
+        attachment: &AttachmentRef,
+        local_path: &Path,
+    ) -> Result<AttachmentView> {
+        sqlx::query("INSERT INTO attachments(id,thread_id,original_name,mime_type,extension,byte_size,sha256,width,height,local_path,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET thread_id=excluded.thread_id,original_name=excluded.original_name,mime_type=excluded.mime_type,extension=excluded.extension,byte_size=excluded.byte_size,sha256=excluded.sha256,width=excluded.width,height=excluded.height,local_path=excluded.local_path")
+            .bind(&attachment.id).bind(thread_id).bind(&attachment.original_name).bind(&attachment.mime_type)
+            .bind(&attachment.extension).bind(attachment.byte_size).bind(&attachment.sha256)
+            .bind(i64::from(attachment.width)).bind(i64::from(attachment.height))
+            .bind(local_path.to_string_lossy().as_ref()).bind(now()).execute(&self.pool).await?;
+        Ok(AttachmentView {
+            id: attachment.id.clone(),
+            original_name: attachment.original_name.clone(),
+            mime_type: attachment.mime_type.clone(),
+            byte_size: attachment.byte_size,
+            sha256: attachment.sha256.clone(),
+            width: attachment.width,
+            height: attachment.height,
+        })
+    }
+
+    pub async fn attachment_ref(
+        &self,
+        attachment_id: &str,
+    ) -> Result<Option<(String, AttachmentRef)>> {
+        let row = sqlx::query("SELECT * FROM attachments WHERE id=?")
+            .bind(attachment_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|row| {
+            let view = attachment_view_from_row(&row);
+            (
+                row.get("thread_id"),
+                AttachmentRef {
+                    id: view.id,
+                    original_name: view.original_name,
+                    mime_type: view.mime_type,
+                    extension: row.get("extension"),
+                    byte_size: view.byte_size,
+                    sha256: view.sha256,
+                    width: view.width,
+                    height: view.height,
+                },
+            )
+        }))
+    }
+
+    async fn item_attachments(&self, item_id: &str) -> Result<Vec<AttachmentView>> {
+        let rows = sqlx::query("SELECT a.* FROM item_attachments ia JOIN attachments a ON a.id=ia.attachment_id WHERE ia.item_id=? ORDER BY ia.ordinal")
+            .bind(item_id).fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(attachment_view_from_row).collect())
     }
     pub async fn record_agent_message(
         &self,
@@ -780,6 +863,9 @@ impl ClientStore {
             sqlx::query("UPDATE turns SET status=?,completed_at=? WHERE id=(SELECT id FROM turns WHERE thread_id=? ORDER BY ordinal DESC LIMIT 1)")
                 .bind(status).bind(&stamp).bind(thread_id).execute(&mut *tx).await?;
         }
+        // A Codex thread has at most one executing turn. Once the authoritative
+        // completion arrives, any other non-terminal row is a stale projection,
+        // not evidence that work is still running.
         sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE thread_id=? AND status IN ('active','running','inProgress')")
             .bind(&stamp)
             .bind(thread_id)
@@ -931,9 +1017,28 @@ impl ClientStore {
                 // ordinal so re-imports cannot reshuffle what the live path already persisted.
                 sqlx::query("INSERT INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,revision,content_text,structured_detail,occurred_at,completed_at) VALUES(?,?,NULLIF(?,''),COALESCE((SELECT MAX(ordinal)+1 FROM items WHERE turn_id=?),1),?,'completed',1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET app_server_item_id=COALESCE(excluded.app_server_item_id,items.app_server_item_id),kind=excluded.kind,content_text=excluded.content_text,structured_detail=excluded.structured_detail,occurred_at=CASE WHEN julianday(excluded.occurred_at)<julianday(items.occurred_at) THEN excluded.occurred_at ELSE items.occurred_at END,completed_at=COALESCE(excluded.completed_at,items.completed_at),revision=CASE WHEN items.app_server_item_id IS NOT COALESCE(excluded.app_server_item_id,items.app_server_item_id) OR items.kind IS NOT excluded.kind OR items.content_text IS NOT excluded.content_text OR items.structured_detail IS NOT excluded.structured_detail OR (excluded.completed_at IS NOT NULL AND items.completed_at IS NOT excluded.completed_at) THEN items.revision+1 ELSE items.revision END")
                     .bind(&item_id).bind(&turn_id).bind(app_item).bind(&turn_id).bind(kind).bind(text).bind(serde_json::to_string(item)?).bind(&stamp).bind(&completed).execute(&mut *tx).await?;
+                if kind == "user_message" {
+                    for path in app_item_local_image_paths(item) {
+                        let attachment_id: Option<String> = sqlx::query_scalar(
+                            "SELECT id FROM attachments WHERE thread_id=? AND local_path=?",
+                        )
+                        .bind(thread_id)
+                        .bind(path)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                        if let Some(attachment_id) = attachment_id {
+                            sqlx::query("INSERT OR IGNORE INTO item_attachments(item_id,attachment_id,ordinal) VALUES(?,?,COALESCE((SELECT MAX(ordinal)+1 FROM item_attachments WHERE item_id=?),1))")
+                                .bind(&item_id).bind(attachment_id).bind(&item_id)
+                                .execute(&mut *tx).await?;
+                        }
+                    }
+                }
             }
             tx.commit().await?;
         }
+        // `thread/read` is the upstream snapshot. Persist its thread status and
+        // collapse contradictory historical turn flags before exposing the
+        // snapshot to either frontend.
         let stamp = now();
         let thread_status = value_status(thread.get("status"), "idle");
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -1037,6 +1142,7 @@ impl ClientStore {
                         is_truncated: content_truncated || detail_truncated,
                         occurred_at: item.get("occurred_at"),
                         completed_at: item.get("completed_at"),
+                        attachments: self.item_attachments(&item.get::<String, _>("id")).await?,
                     }),
                 });
             }
@@ -1261,6 +1367,29 @@ impl ClientStore {
         request_id: &Value,
         method: &str,
         params: &Value,
+        project_id: Option<&str>,
+        thread_id: Option<&str>,
+    ) -> Result<()> {
+        self.save_provider_request(
+            AgentProvider::Codex,
+            approval_id,
+            request_id,
+            method,
+            params,
+            project_id,
+            thread_id,
+        )
+        .await
+    }
+    pub async fn save_provider_request(
+        &self,
+        provider: AgentProvider,
+        approval_id: &str,
+        request_id: &Value,
+        method: &str,
+        params: &Value,
+        project_id: Option<&str>,
+        thread_id: Option<&str>,
     ) -> Result<()> {
         self.save_provider_request(
             AgentProvider::Codex,
@@ -1323,12 +1452,113 @@ impl ClientStore {
         })
         .transpose()
     }
-    pub async fn finish_app_request(&self, approval_id: &str, status: &str) -> Result<()> {
+    pub async fn approval_thread(&self, approval_id: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar::<_, Option<String>>(
+            "SELECT thread_id FROM pending_app_requests WHERE approval_id=?",
+        )
+        .bind(approval_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten())
+    }
+    pub async fn finish_app_request(
+        &self,
+        approval_id: &str,
+        status: &str,
+        decision: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
         if !matches!(status, "decided" | "unknown") {
             anyhow::bail!("invalid approval status")
         }
-        sqlx::query("UPDATE pending_app_requests SET status=?,decided_at=? WHERE approval_id=? AND status='responding'").bind(status).bind(now()).bind(approval_id).execute(&self.pool).await?;
+        sqlx::query("UPDATE pending_app_requests SET status=?,decided_at=?,decision=COALESCE(?,decision),error_message=? WHERE approval_id=? AND status='responding'")
+            .bind(status)
+            .bind(now())
+            .bind(decision)
+            .bind(error_message)
+            .bind(approval_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
+    }
+    pub async fn list_approvals(&self, device_id: &str) -> Result<Vec<ApprovalView>> {
+        let rows =
+            sqlx::query("SELECT * FROM pending_app_requests ORDER BY created_at DESC LIMIT 500")
+                .fetch_all(&self.pool)
+                .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ApprovalView {
+                    id: row.get("approval_id"),
+                    device_id: device_id.to_owned(),
+                    project_id: row.get("project_id"),
+                    thread_id: row.get("thread_id"),
+                    method: row.get("method"),
+                    params: serde_json::from_str(&row.get::<String, _>("params"))?,
+                    status: row.get("status"),
+                    requested_at: row.get("created_at"),
+                    decided_at: row.get("decided_at"),
+                    decision: row.get("decision"),
+                })
+            })
+            .collect()
+    }
+    pub async fn append_browser_event(&self, event: &NuntiusEvent) -> Result<i64> {
+        let encoded = serde_json::to_string(event)?;
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO browser_event_journal(event_id,payload,created_at) VALUES(?,?,?)",
+        )
+        .bind(&event.event_id)
+        .bind(&encoded)
+        .bind(&event.occurred_at)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() > 0 {
+            return Ok(result.last_insert_rowid());
+        }
+        Ok(
+            sqlx::query_scalar("SELECT cursor FROM browser_event_journal WHERE event_id=?")
+                .bind(&event.event_id)
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+    pub async fn browser_event_cursor(&self, event_id: &str) -> Result<Option<i64>> {
+        Ok(
+            sqlx::query_scalar("SELECT cursor FROM browser_event_journal WHERE event_id=?")
+                .bind(event_id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+    pub async fn browser_event_bounds(&self) -> Result<(Option<i64>, Option<i64>)> {
+        let row = sqlx::query(
+            "SELECT MIN(cursor) minimum,MAX(cursor) maximum FROM browser_event_journal",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((row.get("minimum"), row.get("maximum")))
+    }
+    pub async fn replay_browser_events(
+        &self,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<(i64, NuntiusEvent)>> {
+        let rows = sqlx::query(
+            "SELECT cursor,payload FROM browser_event_journal WHERE cursor>? ORDER BY cursor LIMIT ?",
+        )
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.get("cursor"),
+                    serde_json::from_str(&row.get::<String, _>("payload"))?,
+                ))
+            })
+            .collect()
     }
     pub async fn counts(&self) -> Result<(i64, i64, i64, i64)> {
         let projects = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE status='active'")
@@ -1419,6 +1649,26 @@ fn provider_from_str(value: &str) -> AgentProvider {
     }
 }
 
+fn provider_from_str(value: &str) -> AgentProvider {
+    if value == "kimi" {
+        AgentProvider::Kimi
+    } else {
+        AgentProvider::Codex
+    }
+}
+
+fn attachment_view_from_row(r: &sqlx::sqlite::SqliteRow) -> AttachmentView {
+    AttachmentView {
+        id: r.get("id"),
+        original_name: r.get("original_name"),
+        mime_type: r.get("mime_type"),
+        byte_size: r.get("byte_size"),
+        sha256: r.get("sha256"),
+        width: r.get::<i64, _>("width") as u32,
+        height: r.get::<i64, _>("height") as u32,
+    }
+}
+
 fn imported_thread_title(thread: &Value) -> &str {
     thread
         .get("name")
@@ -1488,6 +1738,16 @@ fn app_item_text(item: &Value) -> Option<String> {
         .filter_map(|part| part.get("text").and_then(Value::as_str))
         .collect::<Vec<_>>();
     (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn app_item_local_image_paths(item: &Value) -> Vec<&str> {
+    item.get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("localImage"))
+        .filter_map(|part| part.get("path").and_then(Value::as_str))
+        .collect()
 }
 
 fn normalize_item_kind(kind: &str) -> &str {
@@ -1884,7 +2144,7 @@ mod tests {
             Some("app_thread_rebound")
         );
         store
-            .record_user_turn("thr_test", Some("app_turn"), "hello")
+            .record_user_turn("thr_test", Some("app_turn"), "hello", &[])
             .await
             .unwrap();
         store
@@ -2086,13 +2346,15 @@ mod tests {
                 &json!(42),
                 "item/commandExecution/requestApproval",
                 &json!({}),
+                None,
+                None,
             )
             .await
             .unwrap();
         assert!(store.claim_app_request("apr_test").await.unwrap().is_some());
         assert!(store.claim_app_request("apr_test").await.unwrap().is_none());
         store
-            .finish_app_request("apr_test", "decided")
+            .finish_app_request("apr_test", "decided", Some("accept"), None)
             .await
             .unwrap();
 

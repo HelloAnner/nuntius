@@ -1,7 +1,8 @@
 /* Conversation item renderers: user bubble, agent message, work items,
  * approval card. Used identically by the remote and local consoles. */
-import { memo, useState, type ReactNode } from "react";
+import { memo, useEffect, useState, type ReactNode } from "react";
 import type { LiveItem, LiveStatus } from "../stream";
+import type { AttachmentView } from "../types";
 import { Markdown } from "./Markdown";
 import {
   IconAlert,
@@ -12,12 +13,14 @@ import {
   IconTerminal,
   IconThought,
   IconTool,
+  IconX,
 } from "./icons";
 import { Spinner } from "./ui";
 
 /* ---------- user ---------- */
 export const UserBubble = memo(function UserBubble({
   text,
+  attachments = [],
   state,
   stateLabel,
   stateError,
@@ -25,6 +28,7 @@ export const UserBubble = memo(function UserBubble({
   onRetry,
 }: {
   text: string;
+  attachments?: AttachmentView[];
   state?: string | null;
   stateLabel?: string | null;
   stateError?: boolean;
@@ -34,7 +38,10 @@ export const UserBubble = memo(function UserBubble({
   const pending = state === "applying" || state === "accepted" || state === "waiting_device";
   return (
     <div className="msg-user">
-      <div className="bubble">{text}</div>
+      <div className={`bubble${attachments.length ? " has-attachments" : ""}`}>
+        {attachments.length ? <AttachmentGallery attachments={attachments} /> : null}
+        {text ? <div className="bubble-text">{text}</div> : null}
+      </div>
       {stateLabel ? (
         <div
           className={`send-state${stateError ? " err" : ""}`}
@@ -50,6 +57,61 @@ export const UserBubble = memo(function UserBubble({
     </div>
   );
 });
+
+function AttachmentGallery({ attachments }: { attachments: AttachmentView[] }) {
+  const [active, setActive] = useState<AttachmentView | null>(null);
+  useEffect(() => {
+    if (!active) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setActive(null);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [active]);
+  return (
+    <>
+      <div className={`message-images count-${Math.min(attachments.length, 4)}`}>
+        {attachments.map((attachment) => (
+          <button
+            key={attachment.id}
+            className="message-image"
+            onClick={() => setActive(attachment)}
+            aria-label={`查看图片 ${attachment.originalName}`}
+          >
+            <img
+              src={`/api/v1/attachments/${encodeURIComponent(attachment.id)}/thumbnail`}
+              alt={attachment.originalName}
+              loading="lazy"
+            />
+            <span>{attachment.width} × {attachment.height}</span>
+          </button>
+        ))}
+      </div>
+      {active ? (
+        <div
+          className="image-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label={active.originalName}
+          onClick={() => setActive(null)}
+        >
+          <button className="image-lightbox-close" onClick={() => setActive(null)} aria-label="关闭图片">
+            <IconX size={20} />
+          </button>
+          <img
+            src={`/api/v1/attachments/${encodeURIComponent(active.id)}/content`}
+            alt={active.originalName}
+            onClick={(event) => event.stopPropagation()}
+          />
+          <div className="image-lightbox-meta" onClick={(event) => event.stopPropagation()}>
+            <span>{active.originalName}</span>
+            <span>{active.width} × {active.height}</span>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
 
 /* ---------- agent ---------- */
 export const AgentMessage = memo(function AgentMessage({

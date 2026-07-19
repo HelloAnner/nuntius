@@ -1,5 +1,5 @@
-/* Thread page (local console): conversation with the on-device Codex. */
-import { useEffect, useMemo, useState } from "react";
+/* Thread page (local console): conversation with the selected on-device provider. */
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   IconArchive,
@@ -11,6 +11,7 @@ import {
   useConfirmAction,
   useToast,
   type ApprovalView,
+  type AttachmentView,
   type HistoryGroup,
   type HistoryRecord,
   type ThreadSummary,
@@ -51,6 +52,7 @@ function groupHistory(records: HistoryRecord[]): HistoryGroup[] {
         status: r.item.status,
         occurredAt: r.item.occurredAt,
         truncated: r.item.isTruncated,
+        attachments: r.item.attachments ?? [],
       });
     }
   }
@@ -64,6 +66,10 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
   const back = useRoute((s) => s.back);
   const wide = useMedia("(min-width: 768px)");
   const { confirm, node: confirmNode } = useConfirmAction();
+  const [sendBusy, setSendBusy] = useState(false);
+  const [interruptBusy, setInterruptBusy] = useState(false);
+  const sendPendingRef = useRef(false);
+  const interruptPendingRef = useRef(false);
 
   const info = useQuery({ queryKey: ["info"], queryFn: api.info });
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
@@ -144,29 +150,41 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
           ? "正在恢复运行连接…"
           : null;
 
-  const send = async (text: string) => {
+  const send = async (text: string, attachments: AttachmentView[] = [], clientMessageId = newIdemKey()) => {
+    if (sendPendingRef.current) return;
+    sendPendingRef.current = true;
+    setSendBusy(true);
     const provisionalId = `pending:${newIdemKey()}`;
-    liveStore.addOptimistic(threadId, provisionalId, text);
+    liveStore.addOptimistic(threadId, provisionalId, text, attachments, clientMessageId);
     try {
       await api.startTurn(threadId, text);
       liveStore.applyCommandStatus(provisionalId, "completed");
     } catch (e) {
       const message = e instanceof Error ? e.message : "发送失败";
       liveStore.applyCommandStatus(provisionalId, "failed", "request_failed", message);
+    } finally {
+      sendPendingRef.current = false;
+      setSendBusy(false);
     }
   };
 
-  const retry = (turnId: string, text: string) => {
+  const retry = (turnId: string, text: string, attachments: AttachmentView[]) => {
     liveStore.removeOptimistic(threadId, turnId);
-    void send(text);
+    void send(text, attachments);
   };
 
   const interrupt = async () => {
+    if (interruptPendingRef.current) return;
+    interruptPendingRef.current = true;
+    setInterruptBusy(true);
     try {
       await api.interruptTurn(threadId);
       toast("中断请求已发送");
     } catch (e) {
       toast(e instanceof Error ? e.message : "中断失败", { error: true });
+    } finally {
+      interruptPendingRef.current = false;
+      setInterruptBusy(false);
     }
   };
 

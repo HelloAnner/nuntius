@@ -1,6 +1,7 @@
 /* Message composer: autosizing textarea, send / steer / interrupt. */
-import { useEffect, useRef, useState } from "react";
-import { IconArrowUp, IconStop } from "./icons";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import type { AttachmentView } from "../types";
+import { IconArrowUp, IconImage, IconStop, IconX } from "./icons";
 import { Spinner } from "./ui";
 
 export function Composer({
@@ -13,6 +14,8 @@ export function Composer({
   busy,
   placeholder,
   onSend,
+  onUpload,
+  onDeleteAttachment,
   onInterrupt,
 }: {
   draftKey: string;
@@ -23,36 +26,169 @@ export function Composer({
   runtimeConnected: boolean;
   busy?: boolean;
   placeholder?: string;
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments: AttachmentView[], clientMessageId: string) => void;
+  onUpload?: (file: File, onProgress: (progress: number) => void) => Promise<AttachmentView>;
+  onDeleteAttachment?: (attachmentId: string) => Promise<void>;
   onInterrupt: () => void;
 }) {
   const storageKey = `nuntius:draft:${draftKey}`;
   const [text, setText] = useState(() => localStorage.getItem(storageKey) ?? "");
+  const [uploads, setUploads] = useState<PendingImage[]>([]);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const uploadsRef = useRef<PendingImage[]>([]);
+  const previousDraftKey = useRef(draftKey);
+
+  useEffect(() => {
+    uploadsRef.current = uploads;
+  }, [uploads]);
+
+  useEffect(() => {
+    if (previousDraftKey.current === draftKey) return;
+    for (const upload of uploadsRef.current) {
+      URL.revokeObjectURL(upload.previewUrl);
+      if (upload.attachment && onDeleteAttachment) {
+        void onDeleteAttachment(upload.attachment.id).catch(() => {});
+      }
+    }
+    uploadsRef.current = [];
+    setUploads([]);
+    previousDraftKey.current = draftKey;
+  }, [draftKey, onDeleteAttachment]);
+
+  useEffect(() => () => {
+    for (const upload of uploadsRef.current) URL.revokeObjectURL(upload.previewUrl);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(storageKey, text);
   }, [storageKey, text]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
   }, [text]);
 
+  const uploadFile = (entry: PendingImage) => {
+    if (!onUpload) return;
+    setUploads((current) => current.map((item) => item.localId === entry.localId
+      ? { ...item, status: "uploading", progress: 0, error: null }
+      : item));
+    void onUpload(entry.file, (progress) => {
+      setUploads((current) => current.map((item) => item.localId === entry.localId
+        ? { ...item, progress }
+        : item));
+    }).then((attachment) => {
+      setUploads((current) => current.map((item) => item.localId === entry.localId
+        ? { ...item, status: "ready", progress: 100, attachment }
+        : item));
+    }).catch((error) => {
+      setUploads((current) => current.map((item) => item.localId === entry.localId
+        ? { ...item, status: "failed", error: error instanceof Error ? error.message : "上传失败" }
+        : item));
+    });
+  };
+
+  const selectFiles = (files: FileList | null) => {
+    if (!files || !onUpload) return;
+    const remaining = Math.max(0, 4 - uploads.length);
+    for (const file of Array.from(files).slice(0, remaining)) {
+      const entry: PendingImage = {
+        localId: `image:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+        progress: 0,
+        status: "uploading",
+        attachment: null,
+        error: null,
+      };
+      setUploads((current) => [...current, entry]);
+      if (file.size > 20 * 1024 * 1024) {
+        setUploads((current) => current.map((item) => item.localId === entry.localId
+          ? { ...item, status: "failed", error: "图片不能超过 20 MB" }
+          : item));
+      } else if (file.type && !["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+        setUploads((current) => current.map((item) => item.localId === entry.localId
+          ? { ...item, status: "failed", error: "仅支持 JPEG、PNG 和 WebP" }
+          : item));
+      } else {
+        uploadFile(entry);
+      }
+    }
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const removeUpload = (entry: PendingImage) => {
+    URL.revokeObjectURL(entry.previewUrl);
+    setUploads((current) => current.filter((item) => item.localId !== entry.localId));
+    if (entry.attachment && onDeleteAttachment) void onDeleteAttachment(entry.attachment.id).catch(() => {});
+  };
+
+  const uploadBusy = uploads.some((item) => item.status === "uploading");
+  const uploadFailed = uploads.some((item) => item.status === "failed");
+  const readyAttachments = uploads.flatMap((item) => item.attachment ? [item.attachment] : []);
+
   const submit = () => {
     const value = text.trim();
-    if (!value || busy) return;
-    onSend(value);
+    if ((!value && readyAttachments.length === 0) || busy || uploadBusy || uploadFailed) return;
+    const clientMessageId = typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `msg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    onSend(value, readyAttachments, clientMessageId);
     setText("");
+    for (const upload of uploads) URL.revokeObjectURL(upload.previewUrl);
+    setUploads([]);
   };
 
   const locked = !canSend;
   return (
     <div className={`composer${locked ? " locked" : ""}`}>
       <RuntimeStatus status={runtimeStatus} connected={runtimeConnected} />
+      {uploads.length ? (
+        <div className="composer-attachments" aria-label="待发送图片">
+          {uploads.map((upload) => (
+            <div className={`composer-attachment ${upload.status}`} key={upload.localId}>
+              <img src={upload.previewUrl} alt={upload.file.name} />
+              {upload.status === "uploading" ? (
+                <span className="attachment-progress" style={{ "--progress": `${upload.progress}%` } as CSSProperties}>
+                  {upload.progress > 0 ? `${upload.progress}%` : <Spinner sm />}
+                </span>
+              ) : null}
+              {upload.status === "failed" ? (
+                <button className="attachment-error" onClick={() => uploadFile(upload)} title={upload.error ?? "上传失败"}>
+                  重试
+                </button>
+              ) : null}
+              <button className="attachment-remove" onClick={() => removeUpload(upload)} aria-label={`移除 ${upload.file.name}`}>
+                <IconX size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <div className="composer-inner">
+        {onUpload ? (
+          <>
+            <input
+              ref={fileRef}
+              className="composer-file-input"
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              multiple
+              onChange={(event) => selectFiles(event.target.files)}
+            />
+            <button
+              className="attach-btn"
+              onClick={() => fileRef.current?.click()}
+              disabled={locked || busy || uploads.length >= 4}
+              aria-label="添加图片"
+            >
+              <IconImage size={19} />
+            </button>
+          </>
+        ) : null}
         <textarea
           ref={ref}
           rows={1}
@@ -85,7 +221,7 @@ export function Composer({
         <button
           className="send-btn"
           onClick={submit}
-          disabled={locked || busy || !text.trim()}
+          disabled={locked || busy || uploadBusy || uploadFailed || (!text.trim() && readyAttachments.length === 0)}
           aria-label={running ? "发送指导" : "发送"}
         >
           {busy ? <Spinner sm /> : <IconArrowUp size={17} />}
@@ -93,6 +229,16 @@ export function Composer({
       </div>
     </div>
   );
+}
+
+interface PendingImage {
+  localId: string;
+  file: File;
+  previewUrl: string;
+  progress: number;
+  status: "uploading" | "ready" | "failed";
+  attachment: AttachmentView | null;
+  error: string | null;
 }
 
 function RuntimeStatus({ status, connected }: { status: string | null; connected: boolean }) {

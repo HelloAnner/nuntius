@@ -1,5 +1,5 @@
 /* Thread page: the focused conversation surface. */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Empty,
@@ -17,6 +17,7 @@ import {
   useConfirmAction,
   useToast,
   type ApprovalView,
+  type AttachmentView,
   type HistoryGroup,
   type HistoryItemView,
   type ThreadSummary,
@@ -46,6 +47,7 @@ function mapHistoryItem(item: HistoryItemView) {
     status: item.status,
     occurredAt: item.occurredAt,
     truncated: item.isTruncated,
+    attachments: item.attachments ?? [],
   };
 }
 
@@ -73,6 +75,10 @@ export function ThreadPage({
   const [turnCount, setTurnCount] = useState(12);
   const [routeGraceElapsed, setRouteGraceElapsed] = useState(false);
   const { confirm, node: confirmNode } = useConfirmAction();
+  const [sendBusy, setSendBusy] = useState(false);
+  const [interruptBusy, setInterruptBusy] = useState(false);
+  const sendPendingRef = useRef(false);
+  const interruptPendingRef = useRef(false);
 
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const projects = useQuery({
@@ -223,10 +229,13 @@ export function ThreadPage({
             ? "正在恢复运行连接…"
             : null;
 
-  const send = async (text: string) => {
+  const send = async (text: string, attachments: AttachmentView[] = [], clientMessageId = newIdemKey()) => {
+    if (sendPendingRef.current) return;
+    sendPendingRef.current = true;
+    setSendBusy(true);
     const idemKey = newIdemKey();
     const provisionalId = `pending:${idemKey}`;
-    liveStore.addOptimistic(threadId, provisionalId, text);
+    liveStore.addOptimistic(threadId, provisionalId, text, attachments, clientMessageId);
     try {
       const receipt = await api.startTurn(
         threadId,
@@ -250,21 +259,30 @@ export function ThreadPage({
         e instanceof ApiError ? e.code : "request_failed",
         message,
       );
+    } finally {
+      sendPendingRef.current = false;
+      setSendBusy(false);
     }
   };
 
-  const retry = (turnId: string, text: string) => {
+  const retry = (turnId: string, text: string, attachments: AttachmentView[]) => {
     liveStore.removeOptimistic(threadId, turnId);
-    void send(text);
+    void send(text, attachments);
   };
 
   const interrupt = async () => {
+    if (interruptPendingRef.current) return;
+    interruptPendingRef.current = true;
+    setInterruptBusy(true);
     try {
       const receipt = await api.interruptTurn(threadId);
       trackCommand(qc, receipt.commandId, threadId, "turn.interrupt");
       toast("中断请求已发送");
     } catch {
       toast("中断失败，设备可能已离线", { error: true });
+    } finally {
+      interruptPendingRef.current = false;
+      setInterruptBusy(false);
     }
   };
 
@@ -318,6 +336,8 @@ export function ThreadPage({
       runtimeConnected={online && providerConnected}
       busy={busyIds.has(threadId)}
       onSend={send}
+      onUpload={(file, onProgress) => api.uploadAttachment(threadId, file, onProgress)}
+      onDeleteAttachment={api.deleteAttachment}
       onRetry={retry}
       onInterrupt={interrupt}
     />

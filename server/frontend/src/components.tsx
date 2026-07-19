@@ -7,6 +7,7 @@ import {
   initials,
   osLabel,
   relTime,
+  providerLabel,
   statusLabel,
   tintIndex,
   truncateMiddle,

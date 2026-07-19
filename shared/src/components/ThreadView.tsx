@@ -31,6 +31,7 @@ export interface RenderItem {
   status: string;
   occurredAt: string;
   truncated?: boolean;
+  attachments: AttachmentView[];
 }
 
 export interface HistoryGroup {
@@ -93,13 +94,20 @@ export function visibleLiveItems(
 
 /** Only reconcile an orphan local echo with the corresponding recent turn. */
 export function optimisticEchoIsInHistory(turn: LiveTurn, history: HistoryGroup[]): boolean {
-  if (!turn.id.startsWith("local:") || !turn.userText || turn.items.length > 0) return false;
+  if (
+    !turn.id.startsWith("local:") ||
+    (!turn.userText && turn.userAttachments.length === 0) ||
+    turn.items.length > 0
+  ) return false;
   const optimisticAt = Date.parse(turn.startedAt);
   return history.some((group, index) => {
-    const hasText = group.items.some(
-      (item) => item.kind === "user_message" && item.text === turn.userText,
-    );
-    if (!hasText) return false;
+    const hasMessage = group.items.some((item) => {
+      if (item.kind !== "user_message" || item.text !== (turn.userText ?? "")) return false;
+      const expected = turn.userAttachments.map((attachment) => attachment.id).join(",");
+      const actual = item.attachments.map((attachment) => attachment.id).join(",");
+      return expected === actual;
+    });
+    if (!hasMessage) return false;
     const historyAt = group.turn.startedAt ? Date.parse(group.turn.startedAt) : Number.NaN;
     if (Number.isFinite(optimisticAt) && Number.isFinite(historyAt)) {
       return Math.abs(optimisticAt - historyAt) < 120_000;
@@ -180,7 +188,7 @@ export function liveTurnIsInHistory(turn: LiveTurn, history: HistoryGroup[]): bo
   const userMessages = liveItems.filter((item) => item.kind === "user");
   if (agentMessages.length === 0) return false;
 
-  const hasPrompt = turn.userText !== null;
+  const hasPrompt = turn.userText !== null || turn.userAttachments.length > 0;
   const liveAt = Date.parse(turn.startedAt);
   return history.some((group, index) => {
     const items = visibleHistoryItems(group.items);
@@ -193,14 +201,20 @@ export function liveTurnIsInHistory(turn: LiveTurn, history: HistoryGroup[]): bo
     if (!agentMessages.every((message) => persistedAgents.has(message))) return false;
     const allSteersPersisted = userMessages.every((liveItem) =>
       items.some(
-        (item) => item.kind === "user_message" && item.text === liveItem.text,
+        (item) =>
+          item.kind === "user_message" &&
+          item.text === liveItem.text &&
+          attachmentIds(item.attachments) === attachmentIds(liveItem.attachments),
       ),
     );
     if (!allSteersPersisted) return false;
 
     if (!hasPrompt) return index === history.length - 1;
     const promptMatches = items.some(
-      (item) => item.kind === "user_message" && item.text === turn.userText,
+      (item) =>
+        item.kind === "user_message" &&
+        item.text === (turn.userText ?? "") &&
+        attachmentIds(item.attachments) === attachmentIds(turn.userAttachments),
     );
     if (!promptMatches) return false;
 
@@ -279,6 +293,8 @@ export function ThreadView({
   runtimeConnected,
   busy,
   onSend,
+  onUpload,
+  onDeleteAttachment,
   onRetry,
   onInterrupt,
 }: {
@@ -299,8 +315,10 @@ export function ThreadView({
   runtimeStatus: string | null;
   runtimeConnected: boolean;
   busy?: boolean;
-  onSend: (text: string) => void;
-  onRetry?: (turnId: string, text: string) => void;
+  onSend: (text: string, attachments: AttachmentView[], clientMessageId: string) => void;
+  onUpload?: (file: File, onProgress: (progress: number) => void) => Promise<AttachmentView>;
+  onDeleteAttachment?: (attachmentId: string) => Promise<void>;
+  onRetry?: (turnId: string, text: string, attachments: AttachmentView[]) => void;
   onInterrupt: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -461,9 +479,9 @@ export function ThreadView({
     followLatest(false);
   }, [draftKey, followLatest, loading]);
 
-  const sendAndFollow = useCallback((text: string) => {
+  const sendAndFollow = useCallback((text: string, attachments: AttachmentView[], clientMessageId: string) => {
     followLatest(false);
-    onSend(text);
+    onSend(text, attachments, clientMessageId);
   }, [followLatest, onSend]);
 
   const renderLiveTurn = (turn: LiveTurn) => {
@@ -471,9 +489,10 @@ export function ThreadView({
     return (
       <section key={turn.renderKey ?? turn.id}>
         <TurnMeta status={turn.status} startedAt={turn.startedAt} />
-        {turn.userText ? (
+        {turn.userText || turn.userAttachments.length > 0 ? (
           <UserBubble
-            text={turn.userText}
+            text={turn.userText ?? ""}
+            attachments={turn.userAttachments}
             state={turn.sendState}
             stateLabel={
               turn.sendState && turn.sendState !== "completed"
@@ -484,7 +503,7 @@ export function ThreadView({
             errorMessage={stateErr ? turn.sendErrorMessage : null}
             onRetry={
               stateErr && onRetry
-                ? () => onRetry(turn.id, turn.userText ?? "")
+                ? () => onRetry(turn.id, turn.userText ?? "", turn.userAttachments)
                 : undefined
             }
           />
@@ -497,7 +516,7 @@ export function ThreadView({
               streaming={item.status === "running"}
             />
           ) : item.kind === "user" ? (
-            <UserBubble key={item.key} text={item.text} />
+            <UserBubble key={item.key} text={item.text} attachments={item.attachments} />
           ) : null,
         )}
       </section>
@@ -553,7 +572,7 @@ export function ThreadView({
                 />
                 {items.map((item) => {
                   if (item.kind === "user_message") {
-                    return <UserBubble key={item.id} text={item.text} />;
+                    return <UserBubble key={item.id} text={item.text} attachments={item.attachments} />;
                   }
                   if (item.kind === "agent_message") {
                     return <AgentMessage key={item.id} text={item.text} />;
@@ -568,7 +587,7 @@ export function ThreadView({
                       streaming={item.status === "running"}
                     />
                   ) : item.kind === "user" ? (
-                    <UserBubble key={item.key} text={item.text} />
+                    <UserBubble key={item.key} text={item.text} attachments={item.attachments} />
                   ) : null,
                 )}
               </section>
@@ -617,6 +636,8 @@ export function ThreadView({
         runtimeConnected={runtimeConnected}
         busy={busy}
         onSend={sendAndFollow}
+        onUpload={onUpload}
+        onDeleteAttachment={onDeleteAttachment}
         onInterrupt={onInterrupt}
       />
     </div>
@@ -635,9 +656,7 @@ function TurnMeta({
   const active = status === "active" || status === "running";
   const quiet = status === "completed" || status === "idle";
   const time = clockTime(startedAt);
-  const spoken = [ordinal ? `第 ${ordinal} 轮` : null, statusLabel(status), time]
-    .filter(Boolean)
-    .join("，");
+  const spoken = [ordinal ? `第 ${ordinal} 轮` : null, statusLabel(status), time].filter(Boolean).join("，");
   return (
     <div className={`turn-meta num${active ? " active" : ""}`} aria-label={spoken}>
       {active ? <span className="live-dot" aria-hidden="true" /> : null}

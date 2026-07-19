@@ -74,6 +74,7 @@ export function SwipeActionRow({
   const start = useRef<{ x: number; y: number } | null>(null);
   const horizontal = useRef(false);
   const dragged = useRef(false);
+  const latestOffset = useRef(0);
   const maximum = 88;
 
   const pointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -81,7 +82,6 @@ export function SwipeActionRow({
     start.current = { x: event.clientX - offset, y: event.clientY };
     horizontal.current = false;
     dragged.current = false;
-    event.currentTarget.setPointerCapture(event.pointerId);
   };
   const pointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!start.current) return;
@@ -95,14 +95,30 @@ export function SwipeActionRow({
     }
     horizontal.current = true;
     dragged.current = true;
-    setOffset(Math.max(0, Math.min(maximum, dx)));
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }
+    latestOffset.current = Math.max(0, Math.min(maximum, dx));
+    setOffset(latestOffset.current);
   };
   const pointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     start.current = null;
-    setOffset(offset >= 42 ? maximum : 0);
+    const next = latestOffset.current >= 42 ? maximum : 0;
+    latestOffset.current = next;
+    setOffset(next);
+  };
+  const pointerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    start.current = null;
+    horizontal.current = false;
+    dragged.current = true;
+    latestOffset.current = 0;
+    setOffset(0);
   };
 
   return (
@@ -112,8 +128,12 @@ export function SwipeActionRow({
         type="button"
         disabled={disabled || busy}
         aria-label={label}
-        onFocus={() => setOffset(maximum)}
+        onFocus={() => {
+          latestOffset.current = maximum;
+          setOffset(maximum);
+        }}
         onClick={() => {
+          latestOffset.current = 0;
           setOffset(0);
           void onAction();
         }}
@@ -127,12 +147,14 @@ export function SwipeActionRow({
         onPointerDown={pointerDown}
         onPointerMove={pointerMove}
         onPointerUp={pointerEnd}
-        onPointerCancel={pointerEnd}
+        onPointerCancel={pointerCancel}
         onClickCapture={(event) => {
-          if (!dragged.current) return;
+          if (!dragged.current && latestOffset.current === 0) return;
           event.preventDefault();
           event.stopPropagation();
           dragged.current = false;
+          latestOffset.current = 0;
+          setOffset(0);
         }}
       >
         {children}

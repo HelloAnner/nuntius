@@ -20,6 +20,7 @@ ed25519-dalek.workspace = true
 futures-util.workspace = true
 fs2.workspace = true
 hex.workspace = true
+image.workspace = true
 libc.workspace = true
 mime_guess.workspace = true
 nix.workspace = true

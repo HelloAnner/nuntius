@@ -1,5 +1,5 @@
 use crate::{
-    AppState, assets, auth,
+    AppState, assets, attachments, auth,
     config::random_secret,
     error::{ApiError, json_message},
     event_hub::PublishedEvent,
@@ -10,7 +10,9 @@ use crate::{
 use async_stream::stream;
 use axum::{
     Json, Router,
-    extract::{Path, Query, Request, State, WebSocketUpgrade, ws::WebSocket},
+    extract::{
+        DefaultBodyLimit, Multipart, Path, Query, Request, State, WebSocketUpgrade, ws::WebSocket,
+    },
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{
@@ -78,6 +80,28 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/threads/{thread_id}/turns",
             get(history_turns).post(start_turn),
+        )
+        .route(
+            "/api/v1/threads/{thread_id}/attachments",
+            post(upload_attachment).layer(DefaultBodyLimit::max(
+                attachments::MAX_IMAGE_BYTES + 1024 * 1024,
+            )),
+        )
+        .route(
+            "/api/v1/attachments/{attachment_id}",
+            delete(delete_attachment),
+        )
+        .route(
+            "/api/v1/attachments/{attachment_id}/content",
+            get(attachment_content),
+        )
+        .route(
+            "/api/v1/attachments/{attachment_id}/thumbnail",
+            get(attachment_thumbnail),
+        )
+        .route(
+            "/api/v1/device-attachments/{attachment_id}/content",
+            get(device_attachment_content),
         )
         .route("/api/v1/threads/{thread_id}/steer", post(steer_turn))
         .route(
@@ -248,7 +272,7 @@ async fn sync_snapshot(
         .store
         .list_threads(&session.user_id, None, None, 500, 0)
         .await?;
-    let approvals = state.store.list_approvals(&session.user_id, true).await?;
+    let approvals = state.store.list_approvals(&session.user_id, false).await?;
     Ok(Json(SyncSnapshot {
         cursor: maximum.unwrap_or(0),
         generated_at: now(),
@@ -869,6 +893,209 @@ async fn history_items(
     ))
 }
 
+async fn upload_attachment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<AttachmentView>), ApiError> {
+    let session = web_mutation(&state, &headers).await?;
+    let upload_key = required_idempotency_key(&headers)?;
+    let (device_id, _) = state
+        .store
+        .thread_command_target(&session.user_id, &thread_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if let Some(existing) = state
+        .store
+        .attachment_by_upload_key(&session.user_id, &thread_id, upload_key)
+        .await?
+    {
+        return Ok((StatusCode::OK, Json(existing)));
+    }
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?
+        .ok_or_else(|| ApiError::BadRequest("multipart field `file` is required".into()))?;
+    if field.name() != Some("file") {
+        return Err(ApiError::BadRequest(
+            "multipart field must be named `file`".into(),
+        ));
+    }
+    let original_name = field.file_name().unwrap_or("image").to_string();
+    let bytes = field
+        .bytes()
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?
+        .to_vec();
+    if multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?
+        .is_some()
+    {
+        return Err(ApiError::BadRequest("upload one image per request".into()));
+    }
+    let prepared = attachments::prepare(bytes, original_name)
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let attachment_id = new_id("att");
+    attachments::persist(&state.data_dir, &session.user_id, &attachment_id, &prepared)
+        .await
+        .map_err(ApiError::internal)?;
+    let inserted = state
+        .store
+        .insert_attachment(
+            &attachment_id,
+            &session.user_id,
+            &device_id,
+            &thread_id,
+            upload_key,
+            &prepared.original_name,
+            prepared.mime_type,
+            prepared.extension,
+            prepared.original.len() as i64,
+            &prepared.sha256,
+            prepared.width,
+            prepared.height,
+        )
+        .await;
+    match inserted {
+        Ok(view) => Ok((StatusCode::CREATED, Json(view))),
+        Err(error) => {
+            if let Ok(directory) =
+                attachments::attachment_dir(&state.data_dir, &session.user_id, &attachment_id)
+            {
+                let _ = tokio::fs::remove_dir_all(directory).await;
+            }
+            if let Some(existing) = state
+                .store
+                .attachment_by_upload_key(&session.user_id, &thread_id, upload_key)
+                .await?
+            {
+                Ok((StatusCode::OK, Json(existing)))
+            } else {
+                Err(ApiError::internal(error))
+            }
+        }
+    }
+}
+
+async fn attachment_content(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(attachment_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let session = auth::authenticate_web(&state.store, &headers).await?;
+    let attachment = state
+        .store
+        .attachment_ref_for_user(&session.user_id, &attachment_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    serve_attachment_file(
+        attachments::original_path(
+            &state.data_dir,
+            &session.user_id,
+            &attachment.id,
+            &attachment.extension,
+        )?,
+        &attachment.mime_type,
+    )
+    .await
+}
+
+async fn attachment_thumbnail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(attachment_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let session = auth::authenticate_web(&state.store, &headers).await?;
+    let attachment = state
+        .store
+        .attachment_ref_for_user(&session.user_id, &attachment_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    serve_attachment_file(
+        attachments::thumbnail_path(&state.data_dir, &session.user_id, &attachment.id)?,
+        "image/webp",
+    )
+    .await
+}
+
+async fn device_attachment_content(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(attachment_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let token = auth::bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
+    let device = state
+        .store
+        .device_by_access_token_hash(&auth::hash_secret(token))
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+    let attachment = state
+        .store
+        .attachment_ref_for_device(&device.user_id, &device.device_id, &attachment_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    serve_attachment_file(
+        attachments::original_path(
+            &state.data_dir,
+            &device.user_id,
+            &attachment.id,
+            &attachment.extension,
+        )?,
+        &attachment.mime_type,
+    )
+    .await
+}
+
+async fn delete_attachment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(attachment_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let session = web_mutation(&state, &headers).await?;
+    required_idempotency_key(&headers)?;
+    let attachment = state
+        .store
+        .delete_unreferenced_attachment(&session.user_id, &attachment_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if let Ok(directory) =
+        attachments::attachment_dir(&state.data_dir, &session.user_id, &attachment.id)
+    {
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn serve_attachment_file(
+    path: std::path::PathBuf,
+    mime_type: &str,
+) -> Result<Response, ApiError> {
+    let bytes = tokio::fs::read(path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ApiError::NotFound
+        } else {
+            ApiError::internal(error)
+        }
+    })?;
+    let content_type = HeaderValue::from_bytes(mime_type.as_bytes()).map_err(ApiError::internal)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static("inline"),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
 async fn start_turn(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -881,6 +1108,11 @@ async fn start_turn(
         .thread_command_target(&session.user_id, &thread_id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    let attachments = state
+        .store
+        .resolve_message_attachments(&session.user_id, &thread_id, &request.attachment_ids)
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     enqueue(
         &state,
         &headers,
@@ -888,7 +1120,11 @@ async fn start_turn(
         device,
         Some(project),
         Some(thread_id.clone()),
-        DeviceCommandKind::TurnStart { thread_id, request },
+        DeviceCommandKind::TurnStart {
+            thread_id,
+            request,
+            attachments,
+        },
     )
     .await
 }
@@ -899,9 +1135,30 @@ async fn steer_turn(
     Path(thread_id): Path<String>,
     Json(request): Json<TextInputRequest>,
 ) -> Result<(StatusCode, Json<CommandReceipt>), ApiError> {
-    command_for_thread(&state, &headers, thread_id, |thread_id| {
-        DeviceCommandKind::TurnSteer { thread_id, request }
-    })
+    let session = web_mutation(&state, &headers).await?;
+    let (device, project) = state
+        .store
+        .thread_command_target(&session.user_id, &thread_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let attachments = state
+        .store
+        .resolve_message_attachments(&session.user_id, &thread_id, &request.attachment_ids)
+        .await
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    enqueue(
+        &state,
+        &headers,
+        &session,
+        device,
+        Some(project),
+        Some(thread_id.clone()),
+        DeviceCommandKind::TurnSteer {
+            thread_id,
+            request,
+            attachments,
+        },
+    )
     .await
 }
 async fn interrupt_turn(
@@ -1239,6 +1496,14 @@ async fn enqueue(
     ))
 }
 
+fn required_idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .ok_or_else(|| ApiError::BadRequest("Idempotency-Key header is required".into()))
+}
+
 async fn web_mutation(state: &AppState, headers: &HeaderMap) -> Result<SessionRecord, ApiError> {
     let session = auth::authenticate_web(&state.store, headers).await?;
     auth::require_csrf(&state.store, headers, &session).await?;
@@ -1291,6 +1556,70 @@ fn bounded_json(field: &str, value: &Value, maximum: usize) -> Result<(), ApiErr
 }
 
 fn validate_device_command(kind: &DeviceCommandKind) -> Result<(), ApiError> {
+    fn message(
+        text: &str,
+        attachment_ids: &[String],
+        client_message_id: Option<&str>,
+        attachments: &[AttachmentRef],
+    ) -> Result<(), ApiError> {
+        if text.trim().is_empty() && attachments.is_empty() {
+            return Err(ApiError::BadRequest(
+                "message requires text or an image".into(),
+            ));
+        }
+        if text.len() > 256 * 1024 || attachments.len() > attachments::MAX_IMAGES_PER_MESSAGE {
+            return Err(ApiError::BadRequest(
+                "message exceeds the input limit".into(),
+            ));
+        }
+        if attachment_ids.len() != attachments.len()
+            || attachment_ids
+                .iter()
+                .zip(attachments)
+                .any(|(id, attachment)| id != &attachment.id)
+        {
+            return Err(ApiError::BadRequest(
+                "attachment references do not match the message".into(),
+            ));
+        }
+        if let Some(client_message_id) = client_message_id {
+            bounded_nonempty("clientMessageId", client_message_id, 128)?;
+        }
+        for attachment in attachments {
+            bounded_nonempty("attachmentId", &attachment.id, 128)?;
+            bounded_nonempty("attachmentName", &attachment.original_name, 180)?;
+            if attachment.sha256.len() != 64
+                || !attachment
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(ApiError::BadRequest(
+                    "attachment checksum is invalid".into(),
+                ));
+            }
+            if !matches!(
+                (attachment.mime_type.as_str(), attachment.extension.as_str()),
+                ("image/jpeg", "jpg") | ("image/png", "png") | ("image/webp", "webp")
+            ) {
+                return Err(ApiError::BadRequest(
+                    "attachment media type is invalid".into(),
+                ));
+            }
+            if attachment.byte_size <= 0
+                || attachment.byte_size > attachments::MAX_IMAGE_BYTES as i64
+            {
+                return Err(ApiError::BadRequest("attachment size is invalid".into()));
+            }
+            let pixels = u64::from(attachment.width) * u64::from(attachment.height);
+            if pixels == 0 || pixels > 50_000_000 {
+                return Err(ApiError::BadRequest(
+                    "attachment dimensions are invalid".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
     match kind {
         DeviceCommandKind::ProjectCreate(request) => {
             bounded_nonempty("directoryRef", &request.directory_ref, 256)?;
@@ -1309,12 +1638,30 @@ fn validate_device_command(kind: &DeviceCommandKind) -> Result<(), ApiError> {
             }
             bounded_json("options", &request.options, 64 * 1024)?;
         }
-        DeviceCommandKind::TurnStart { request, .. } => {
-            bounded_nonempty("text", &request.text, 256 * 1024)?;
+        DeviceCommandKind::TurnStart {
+            request,
+            attachments,
+            ..
+        } => {
+            message(
+                &request.text,
+                &request.attachment_ids,
+                request.client_message_id.as_deref(),
+                attachments,
+            )?;
             bounded_json("options", &request.options, 64 * 1024)?;
         }
-        DeviceCommandKind::TurnSteer { request, .. } => {
-            bounded_nonempty("text", &request.text, 256 * 1024)?;
+        DeviceCommandKind::TurnSteer {
+            request,
+            attachments,
+            ..
+        } => {
+            message(
+                &request.text,
+                &request.attachment_ids,
+                request.client_message_id.as_deref(),
+                attachments,
+            )?;
         }
         DeviceCommandKind::ApprovalDecide { request, .. } => {
             if !matches!(

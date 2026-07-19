@@ -1,4 +1,4 @@
-/* Overview: this machine at a glance — agent, app server, pairing, queues. */
+/* Overview: this machine at a glance — providers, pairing, and queues. */
 import { useQuery } from "@tanstack/react-query";
 import {
   Avatar,

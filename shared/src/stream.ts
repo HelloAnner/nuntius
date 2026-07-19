@@ -3,6 +3,7 @@
  * with useSyncExternalStore. */
 
 import type {
+  AttachmentView,
   ApprovalRequestedPayload,
   CommandStatus,
   NuntiusEvent,
@@ -51,6 +52,8 @@ export interface LiveTurn {
   renderKey?: string;
   status: LiveTurnStatus;
   userText: string | null;
+  userAttachments: AttachmentView[];
+  clientMessageId: string | null;
   sendState: CommandStatus | null;
   sendErrorCode: string | null;
   sendErrorMessage: string | null;
@@ -92,7 +95,8 @@ export class ThreadLiveStore {
     for (const fn of this.listeners) fn();
   }
 
-  /** Coalesce token deltas into one React update per paint. */
+  /** Coalesce token deltas to a bounded update rate; Markdown parsing at 60fps
+   * is expensive on phones and does not improve perceived streaming quality. */
   private scheduleBump() {
     if (this.notifyScheduled) return;
     this.notifyScheduled = true;
@@ -101,11 +105,7 @@ export class ThreadLiveStore {
       this.notifyScheduled = false;
       this.bump();
     };
-    if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(flush);
-    } else {
-      setTimeout(flush, 16);
-    }
+    setTimeout(flush, 50);
   }
 
   get(threadId: string): ThreadLive {
@@ -117,8 +117,23 @@ export class ThreadLiveStore {
     return t;
   }
 
+  /** Drop disposable realtime overlays before applying a database snapshot. */
+  reset() {
+    this.threads.clear();
+    this.pending.clear();
+    this.seenEvents.clear();
+    this.seenEventOrder = [];
+    this.bump();
+  }
+
   /** optimistic user echo registered right after a 202 receipt */
-  addOptimistic(threadId: string, commandId: string, text: string): string {
+  addOptimistic(
+    threadId: string,
+    commandId: string,
+    text: string,
+    attachments: AttachmentView[] = [],
+    clientMessageId: string | null = null,
+  ): string {
     const live = this.get(threadId);
     // The SSE turn can beat the HTTP 202 response. Adopt only a recent,
     // unclaimed authoritative turn with the same prompt so that race does not
@@ -154,6 +169,8 @@ export class ThreadLiveStore {
         renderKey: turnId,
         status: "running",
         userText: text,
+        userAttachments: attachments,
+        clientMessageId,
         sendState: "accepted",
         sendErrorCode: null,
         sendErrorMessage: null,
@@ -219,8 +236,42 @@ export class ThreadLiveStore {
     const key = `steer:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
     const item = this.ensureItem(turn, key, "user", occurredAt, Number.MAX_SAFE_INTEGER);
     item.text = text;
+    item.attachments = attachments;
+    item.title = clientMessageId ?? "";
     item.status = "completed";
     this.bump();
+  }
+
+  private consumeSteerOptimistic(
+    threadId: string,
+    text: string,
+    clientMessageId: string | null,
+  ): { text: string; attachments: AttachmentView[] } | null {
+    const live = this.get(threadId);
+    const pendingIds = new Set(
+      [...this.pending.values()]
+        .filter((location) => location.threadId === threadId)
+        .map((location) => location.turnId),
+    );
+    const optimistic = live.turns.find((turn) =>
+      turn.id.startsWith("local:")
+      && pendingIds.has(turn.id)
+      && (clientMessageId
+        ? turn.clientMessageId === clientMessageId
+        : turn.userText === text),
+    );
+    if (!optimistic) return null;
+    delete live.byId[optimistic.id];
+    live.turns = live.turns.filter((turn) => turn !== optimistic);
+    for (const [commandId, location] of this.pending) {
+      if (location.threadId === threadId && location.turnId === optimistic.id) {
+        this.pending.delete(commandId);
+      }
+    }
+    return {
+      text: optimistic.userText ?? "",
+      attachments: optimistic.userAttachments,
+    };
   }
 
   /** drop optimistic echoes once the authoritative turn event arrives */
@@ -283,6 +334,8 @@ export class ThreadLiveStore {
         id: realTurnId,
         status: "running",
         userText: text,
+        userAttachments: [],
+        clientMessageId,
         sendState: null,
         sendErrorCode: null,
         sendErrorMessage: null,
@@ -328,6 +381,22 @@ export class ThreadLiveStore {
       turn.startedSequence = event.seq;
       turn.sendState = "completed";
       this.bump();
+      return;
+    }
+    if (type === "turn.steered") {
+      const text = typeof payload.text === "string" ? payload.text : "";
+      const clientMessageId = typeof payload.clientMessageId === "string"
+        ? payload.clientMessageId
+        : null;
+      const optimistic = this.consumeSteerOptimistic(threadId, text, clientMessageId);
+      this.appendSteerEcho(
+        threadId,
+        text || optimistic?.text || "",
+        Array.isArray(payload.attachments)
+          ? payload.attachments as AttachmentView[]
+          : optimistic?.attachments ?? [],
+        clientMessageId,
+      );
       return;
     }
     if (type === "approval.requested") {
@@ -723,4 +792,14 @@ function statusOfItem(item: Record<string, unknown>): LiveStatus {
   if (s.includes("progress") || s.includes("running")) return "running";
   if (s.includes("unknown")) return "unknown";
   return "completed";
+}
+
+function formatUnknown(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
