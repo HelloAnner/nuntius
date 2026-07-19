@@ -149,7 +149,7 @@ impl AppSession {
                     Ok(Some(line)) => {
                         // Oversized frames are dropped, never fatal: the reader must keep
                         // consuming stdout or every subsequent request silently wedges.
-                        if line.len() > 16 * 1024 * 1024 {
+                        if line.len() > 128 * 1024 * 1024 {
                             tracing::error!(
                                 bytes = line.len(),
                                 "App Server JSONL message exceeds limit; dropping frame"
