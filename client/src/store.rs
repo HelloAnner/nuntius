@@ -1634,14 +1634,6 @@ fn provider_from_str(value: &str) -> AgentProvider {
     }
 }
 
-fn provider_from_str(value: &str) -> AgentProvider {
-    if value == "kimi" {
-        AgentProvider::Kimi
-    } else {
-        AgentProvider::Codex
-    }
-}
-
 fn attachment_view_from_row(r: &sqlx::sqlite::SqliteRow) -> AttachmentView {
     AttachmentView {
         id: r.get("id"),
