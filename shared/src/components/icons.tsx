@@ -74,6 +74,12 @@ export const IconArrowUp = (p: P) => base(p, <path d="M12 19V5M5.5 11.5 12 5l6.5
 export const IconArrowDown = (p: P) => base(p, <path d="M12 5v14M5.5 12.5 12 19l6.5-6.5" />);
 
 export const IconPlus = (p: P) => base(p, <path d="M12 5v14M5 12h14" />);
+export const IconImage = (p: P) =>
+  base(p, <>
+    <rect x="3.5" y="4" width="17" height="16" rx="2.3" />
+    <circle cx="9" cy="9.5" r="1.7" />
+    <path d="m5.5 17 4.2-4.2 3.1 3 2.1-2.1 3.6 3.3" />
+  </>);
 
 export const IconStop = (p: P) =>
   base(p, <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none" />);

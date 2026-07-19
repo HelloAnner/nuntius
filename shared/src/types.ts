@@ -2,6 +2,15 @@
  * Field names match the camelCase JSON produced by the Rust backends. */
 
 export type TransportSecurity = "secure" | "insecure" | "local";
+export type AgentProvider = "codex" | "kimi";
+
+export interface AgentProviderStatus {
+  provider: AgentProvider;
+  label: string;
+  available: boolean;
+  status: string;
+  version: string | null;
+}
 
 export interface ServerInfo {
   apiVersion: string;
@@ -20,6 +29,7 @@ export interface ClientInfo {
   paired: boolean;
   localBind: string;
   appServerRunning: boolean;
+  providers: AgentProviderStatus[];
   projects: number;
   pendingCommands: number;
   pendingEvents: number;
@@ -71,6 +81,7 @@ export interface DeviceSummary {
   historyCompleteness: HistoryCompleteness;
   historyLastSyncedAt: string | null;
   transportSecurity: TransportSecurity | null;
+  providers: AgentProviderStatus[];
 }
 
 export type ProjectKind = "workspace" | "system_unassigned";
@@ -93,6 +104,7 @@ export interface ThreadSummary {
   id: string;
   deviceId: string;
   projectId: string;
+  provider: AgentProvider;
   appServerThreadId: string | null;
   title: string;
   status: string;
@@ -123,6 +135,17 @@ export interface HistoryItemView {
   isTruncated: boolean;
   occurredAt: string;
   completedAt: string | null;
+  attachments: AttachmentView[];
+}
+
+export interface AttachmentView {
+  id: string;
+  originalName: string;
+  mimeType: string;
+  byteSize: number;
+  sha256: string;
+  width: number;
+  height: number;
 }
 
 export interface HistoryRecord {
@@ -159,6 +182,30 @@ export interface CommandView {
   errorCode: string | null;
   errorMessage: string | null;
   result: unknown;
+}
+
+/** Durable approval projection returned by both local and remote snapshots. */
+export interface ApprovalSnapshot {
+  id: string;
+  deviceId: string;
+  projectId: string | null;
+  threadId: string | null;
+  method: string;
+  params: unknown;
+  status: string;
+  requestedAt: string;
+  decidedAt: string | null;
+  decision: string | null;
+}
+
+/** Database-backed baseline paired with an SSE replay cursor. */
+export interface SyncSnapshot {
+  cursor: number;
+  generatedAt: string;
+  devices: DeviceSummary[];
+  projects: ProjectSummary[];
+  threads: ThreadSummary[];
+  approvals: ApprovalSnapshot[];
 }
 
 export interface DirectoryEntry {
@@ -209,6 +256,8 @@ export interface ApiErrorBody {
 /* payload shapes for well-known events */
 export interface TurnStartedPayload {
   text: string;
+  attachments?: AttachmentView[];
+  clientMessageId?: string | null;
 }
 export interface ApprovalRequestedPayload {
   approvalId: string;

@@ -63,7 +63,7 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
     if (!project || !canDelete || deleting) return;
     confirm({
       title: `删除「${project.displayName}」？`,
-      body: `会从 Nuntius 服务器和「${device?.displayName ?? "这台设备"}」删除项目登记及 ${project.threadCount} 个会话记录。不会删除磁盘上的项目文件或 Codex 原始会话文件；以后重新添加此目录可以再次同步历史。`,
+      body: `会从 Nuntius 服务器和「${device?.displayName ?? "这台设备"}」删除项目登记及 ${project.threadCount} 个会话记录。不会删除磁盘上的项目文件或代理原始会话文件；以后重新添加此目录可以再次同步历史。`,
       confirmLabel: "删除项目",
       danger: true,
       action: async () => {

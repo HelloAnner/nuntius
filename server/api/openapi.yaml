@@ -194,6 +194,55 @@ paths:
       parameters: [{$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/StartTurn'}}}}
       responses: {'202': {$ref: '#/components/responses/CommandAccepted'}, '503': {$ref: '#/components/responses/DeviceOffline'}}
+  /threads/{threadId}/attachments:
+    post:
+      operationId: uploadThreadAttachment
+      description: 上传单张 JPEG、PNG 或 WebP 图片；服务端按文件内容校验、生成缩略图并保存。每张最大 20 MiB、5000 万像素。
+      parameters: [{$ref: '#/components/parameters/ThreadId'}, {$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties: {file: {type: string, format: binary}}
+      responses:
+        '200': {description: 幂等重放的已有附件, content: {application/json: {schema: {$ref: '#/components/schemas/Attachment'}}}}
+        '201': {description: 附件已保存, content: {application/json: {schema: {$ref: '#/components/schemas/Attachment'}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+  /attachments/{attachmentId}:
+    delete:
+      operationId: deleteUnreferencedAttachment
+      description: 删除尚未被命令或历史消息引用的暂存附件。
+      parameters: [{$ref: '#/components/parameters/AttachmentId'}, {$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      responses:
+        '204': {description: 附件已删除}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /attachments/{attachmentId}/content:
+    get:
+      operationId: getAttachmentContent
+      parameters: [{$ref: '#/components/parameters/AttachmentId'}]
+      responses:
+        '200': {description: 原始图片字节, content: {image/jpeg: {}, image/png: {}, image/webp: {}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /attachments/{attachmentId}/thumbnail:
+    get:
+      operationId: getAttachmentThumbnail
+      parameters: [{$ref: '#/components/parameters/AttachmentId'}]
+      responses:
+        '200': {description: WebP 缩略图, content: {image/webp: {}}}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /device-attachments/{attachmentId}/content:
+    get:
+      security: [{deviceBearer: []}]
+      operationId: downloadDeviceAttachment
+      description: 目标设备使用短期 Bearer Token 下载已绑定到该设备的原图。
+      parameters: [{$ref: '#/components/parameters/AttachmentId'}]
+      responses:
+        '200': {description: 原始图片字节, content: {image/jpeg: {}, image/png: {}, image/webp: {}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /threads/{threadId}/steer:
     post:
       operationId: steerTurn
@@ -268,6 +317,7 @@ components:
     DeviceId: {name: deviceId, in: path, required: true, schema: {type: string}}
     ProjectId: {name: projectId, in: path, required: true, schema: {type: string}}
     ThreadId: {name: threadId, in: path, required: true, schema: {type: string}}
+    AttachmentId: {name: attachmentId, in: path, required: true, schema: {type: string}}
     Csrf: {name: X-CSRF-Token, in: header, required: true, schema: {type: string}}
     IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 1, maxLength: 128}}
   responses:
@@ -328,7 +378,7 @@ components:
         architecture: {type: string, maxLength: 64}
     Device:
       type: object
-      required: [id, displayName, status, projectCount, activeTurnCount, pendingApprovalCount, historyCompleteness, inboxDepth, outboxDepth, historyBackfillDepth]
+      required: [id, displayName, status, projectCount, activeTurnCount, pendingApprovalCount, historyCompleteness, inboxDepth, outboxDepth, historyBackfillDepth, providers]
       properties:
         id: {type: string}
         displayName: {type: string}
@@ -349,6 +399,17 @@ components:
         inboxDepth: {type: integer}
         outboxDepth: {type: integer}
         historyBackfillDepth: {type: integer}
+        providers:
+          type: array
+          items:
+            type: object
+            required: [provider, label, available, status]
+            properties:
+              provider: {enum: [codex, kimi]}
+              label: {type: string}
+              available: {type: boolean}
+              status: {type: string}
+              version: {type: [string, 'null']}
     Project:
       type: object
       required: [id, deviceId, kind, displayName, status, threadCount]
@@ -363,11 +424,12 @@ components:
         lastActivityAt: {type: [string, 'null'], format: date-time}
     Thread:
       type: object
-      required: [id, deviceId, projectId, title, status, archived, historyCompleteness]
+      required: [id, deviceId, projectId, provider, title, status, archived, historyCompleteness]
       properties:
         id: {type: string}
         deviceId: {type: string}
         projectId: {type: string}
+        provider: {enum: [codex, kimi]}
         appServerThreadId: {type: [string, 'null']}
         title: {type: string}
         status: {type: string}
@@ -397,17 +459,36 @@ components:
       properties:
         title: {type: [string, 'null'], maxLength: 256}
         firstMessage: {type: [string, 'null'], maxLength: 262144}
+        provider: {enum: [codex, kimi], default: codex}
+        accessMode: {enum: [full, ask], default: full}
         options: {type: object, additionalProperties: true}
     StartTurn:
       type: object
       required: [text]
       properties:
-        text: {type: string, minLength: 1, maxLength: 262144}
+        text: {type: string, maxLength: 262144, description: 可为空，但 text 与 attachmentIds 至少有一项非空}
+        attachmentIds: {type: array, maxItems: 4, uniqueItems: true, items: {type: string}}
+        clientMessageId: {type: [string, 'null'], minLength: 1, maxLength: 128}
+        accessMode: {enum: [full, ask], default: full}
         options: {type: object, additionalProperties: true}
     TextInput:
       type: object
       required: [text]
-      properties: {text: {type: string, minLength: 1, maxLength: 262144}}
+      properties:
+        text: {type: string, maxLength: 262144, description: 可为空，但 text 与 attachmentIds 至少有一项非空}
+        attachmentIds: {type: array, maxItems: 4, uniqueItems: true, items: {type: string}}
+        clientMessageId: {type: [string, 'null'], minLength: 1, maxLength: 128}
+    Attachment:
+      type: object
+      required: [id, originalName, mimeType, byteSize, sha256, width, height]
+      properties:
+        id: {type: string}
+        originalName: {type: string}
+        mimeType: {enum: [image/jpeg, image/png, image/webp]}
+        byteSize: {type: integer, minimum: 1, maximum: 20971520}
+        sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        width: {type: integer, minimum: 1}
+        height: {type: integer, minimum: 1}
     ApprovalDecision:
       type: object
       required: [decision]

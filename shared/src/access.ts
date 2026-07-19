@@ -1,5 +1,9 @@
 export type ConversationAccessMode = "full" | "ask";
 
+export function providerLabel(provider: import("./types").AgentProvider): string {
+  return provider === "kimi" ? "Kimi" : "Codex";
+}
+
 /** Options accepted by Codex app-server thread/start. */
 export function threadOptionsForAccess(mode: ConversationAccessMode): Record<string, unknown> {
   return mode === "full"

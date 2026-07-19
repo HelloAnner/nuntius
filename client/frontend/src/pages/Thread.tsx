@@ -1,15 +1,16 @@
-/* Thread page (local console): conversation with the on-device Codex. */
-import { useEffect, useMemo, useState } from "react";
+/* Thread page (local console): conversation with the selected on-device provider. */
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   IconArchive,
-  Spinner,
   SwipeActionRow,
   ThreadView,
   newIdemKey,
+  providerLabel,
   useConfirmAction,
   useToast,
   type ApprovalView,
+  type AttachmentView,
   type HistoryGroup,
   type HistoryRecord,
 } from "@nuntius/shared";
@@ -41,6 +42,7 @@ function groupHistory(records: HistoryRecord[]): HistoryGroup[] {
           (r.item.structuredDetail ? JSON.stringify(r.item.structuredDetail, null, 2) : ""),
         status: r.item.status,
         truncated: r.item.isTruncated,
+        attachments: r.item.attachments ?? [],
       });
     }
   }
@@ -54,6 +56,10 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
   const back = useRoute((s) => s.back);
   const wide = useMedia("(min-width: 768px)");
   const { confirm, node: confirmNode } = useConfirmAction();
+  const [sendBusy, setSendBusy] = useState(false);
+  const [interruptBusy, setInterruptBusy] = useState(false);
+  const sendPendingRef = useRef(false);
+  const interruptPendingRef = useRef(false);
 
   const info = useQuery({ queryKey: ["info"], queryFn: api.info });
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
@@ -106,44 +112,60 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     [approvals, threadId, project, thread],
   );
 
-  const appRunning = info.data?.appServerRunning ?? false;
+  const providerStatus = info.data?.providers?.find(
+    (candidate) => candidate.provider === (thread?.provider ?? "codex"),
+  );
+  const providerAvailable = providerStatus?.available ?? thread?.provider !== "kimi";
+  const providerConnected = providerStatus?.status === "online";
   const archived = thread?.archived ?? false;
   // SQLite is authoritative. Live events render output but never manufacture
   // the execution state shown to the user.
   const running = thread?.status === "active";
 
-  const canSend = Boolean(appRunning && !archived && thread);
+  const canSend = Boolean(providerAvailable && !archived && thread);
   const lockedReason = !thread
     ? "会话加载中…"
     : archived
       ? "已归档"
-      : !appRunning
-        ? "Codex App Server 未运行"
+      : !providerAvailable
+        ? `${providerLabel(thread.provider)} 在本机不可用`
         : null;
 
-  const send = async (text: string) => {
+  const send = async (text: string, attachments: AttachmentView[] = [], clientMessageId = newIdemKey()) => {
+    if (sendPendingRef.current) return;
+    sendPendingRef.current = true;
+    setSendBusy(true);
     const provisionalId = `pending:${newIdemKey()}`;
-    liveStore.addOptimistic(threadId, provisionalId, text);
+    liveStore.addOptimistic(threadId, provisionalId, text, attachments, clientMessageId);
     try {
       await api.startTurn(threadId, text);
       liveStore.applyCommandStatus(provisionalId, "completed");
     } catch (e) {
       const message = e instanceof Error ? e.message : "发送失败";
       liveStore.applyCommandStatus(provisionalId, "failed", "request_failed", message);
+    } finally {
+      sendPendingRef.current = false;
+      setSendBusy(false);
     }
   };
 
-  const retry = (turnId: string, text: string) => {
+  const retry = (turnId: string, text: string, attachments: AttachmentView[]) => {
     liveStore.removeOptimistic(threadId, turnId);
-    void send(text);
+    void send(text, attachments);
   };
 
   const interrupt = async () => {
+    if (interruptPendingRef.current) return;
+    interruptPendingRef.current = true;
+    setInterruptBusy(true);
     try {
       await api.interruptTurn(threadId);
       toast("中断请求已发送");
     } catch (e) {
       toast(e instanceof Error ? e.message : "中断失败", { error: true });
+    } finally {
+      interruptPendingRef.current = false;
+      setInterruptBusy(false);
     }
   };
 
@@ -177,24 +199,21 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
 
   const groups = useMemo(() => groupHistory(history.data ?? []), [history.data]);
 
-  const threadView = history.isLoading ? (
-    <div style={{ flex: 1, display: "grid", placeItems: "center" }}>
-      <Spinner />
-    </div>
-  ) : (
+  const threadView = (
     <ThreadView
+      loading={history.isLoading}
       history={groups}
       live={live}
       approvals={threadApprovals}
       onDecide={decide}
-      approvalsLocked={!appRunning}
+      approvalsLocked={!providerConnected}
       draftKey={threadId}
       canSend={canSend}
       lockedReason={lockedReason}
       running={running}
       runtimeStatus={thread?.status ?? null}
-      runtimeConnected={appRunning}
-      busy={busyIds.has(threadId)}
+      runtimeConnected={providerConnected || providerAvailable}
+      busy={busyIds.has(threadId) || sendBusy || interruptBusy}
       onSend={send}
       onRetry={retry}
       onInterrupt={interrupt}
@@ -204,7 +223,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
   const topbar = (
     <TopBar
       title={thread?.title ?? "会话"}
-      subtitle={project?.displayName}
+      subtitle={thread ? `${project?.displayName ?? "项目"} · ${providerLabel(thread.provider)}` : project?.displayName}
       onBack={() => back({ name: "project", projectId })}
       trailing={
         <>

@@ -7,6 +7,7 @@ import {
   initials,
   osLabel,
   relTime,
+  providerLabel,
   statusLabel,
   tintIndex,
   truncateMiddle,
@@ -243,7 +244,7 @@ export function ThreadRow({
     !thread.archived && !["active", "completed", "idle"].includes(thread.status)
       ? statusLabel(thread.status)
       : null;
-  const details = [context, thread.archived ? "已归档" : secondaryStatus].filter(Boolean) as string[];
+  const details = [providerLabel(thread.provider), context, thread.archived ? "已归档" : secondaryStatus].filter(Boolean) as string[];
   return (
     <button
       className={`list-row${selected ? " selected" : ""}`}

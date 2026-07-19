@@ -1,5 +1,5 @@
 /* Thread page: the focused conversation surface. */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Empty,
@@ -11,11 +11,12 @@ import {
   SwipeActionRow,
   ThreadView,
   newIdemKey,
+  providerLabel,
   statusLabel,
-  turnOptionsForAccess,
   useConfirmAction,
   useToast,
   type ApprovalView,
+  type AttachmentView,
   type HistoryGroup,
   type HistoryItemView,
 } from "@nuntius/shared";
@@ -36,6 +37,7 @@ function mapHistoryItem(item: HistoryItemView) {
       (item.structuredDetail ? JSON.stringify(item.structuredDetail, null, 2) : ""),
     status: item.status,
     truncated: item.isTruncated,
+    attachments: item.attachments ?? [],
   };
 }
 
@@ -64,6 +66,10 @@ export function ThreadPage({
   const [turnCount, setTurnCount] = useState(12);
   const [routeGraceElapsed, setRouteGraceElapsed] = useState(false);
   const { confirm, node: confirmNode } = useConfirmAction();
+  const [sendBusy, setSendBusy] = useState(false);
+  const [interruptBusy, setInterruptBusy] = useState(false);
+  const sendPendingRef = useRef(false);
+  const interruptPendingRef = useRef(false);
 
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const projects = useQuery({
@@ -169,13 +175,18 @@ export function ThreadPage({
   );
 
   const online = device?.status === "online";
+  const providerStatus = device?.providers?.find(
+    (candidate) => candidate.provider === (thread?.provider ?? "codex"),
+  );
+  const providerAvailable = providerStatus?.available ?? thread?.provider !== "kimi";
+  const providerConnected = providerStatus?.status === "online";
   const unassigned = project?.kind === "system_unassigned";
   const archived = thread?.archived ?? false;
   // The server SQLite projection is authoritative. Browser memory is only a
   // transient rendering layer for streamed output.
   const running = thread?.status === "active";
 
-  const canSend = Boolean(online && !unassigned && !archived && thread);
+  const canSend = Boolean(online && providerAvailable && !unassigned && !archived && thread);
   const lockedReason = !thread
     ? "会话加载中…"
     : archived
@@ -184,17 +195,24 @@ export function ThreadPage({
         ? "未归类，只读"
         : !online
           ? `设备${statusLabel(device?.status ?? "offline")}`
+          : !providerAvailable
+            ? `${providerLabel(thread.provider)} 在设备上不可用`
           : null;
 
-  const send = async (text: string) => {
+  const send = async (text: string, attachments: AttachmentView[] = [], clientMessageId = newIdemKey()) => {
+    if (sendPendingRef.current) return;
+    sendPendingRef.current = true;
+    setSendBusy(true);
     const idemKey = newIdemKey();
     const provisionalId = `pending:${idemKey}`;
-    liveStore.addOptimistic(threadId, provisionalId, text);
+    liveStore.addOptimistic(threadId, provisionalId, text, attachments, clientMessageId);
     try {
       const receipt = await api.startTurn(
         threadId,
         text,
-        turnOptionsForAccess(accessMode),
+        attachments.map((attachment) => attachment.id),
+        clientMessageId,
+        accessMode,
         idemKey,
       );
       liveStore.bindCommand(provisionalId, receipt.commandId);
@@ -213,21 +231,30 @@ export function ThreadPage({
         e instanceof ApiError ? e.code : "request_failed",
         message,
       );
+    } finally {
+      sendPendingRef.current = false;
+      setSendBusy(false);
     }
   };
 
-  const retry = (turnId: string, text: string) => {
+  const retry = (turnId: string, text: string, attachments: AttachmentView[]) => {
     liveStore.removeOptimistic(threadId, turnId);
-    void send(text);
+    void send(text, attachments);
   };
 
   const interrupt = async () => {
+    if (interruptPendingRef.current) return;
+    interruptPendingRef.current = true;
+    setInterruptBusy(true);
     try {
       const receipt = await api.interruptTurn(threadId);
       trackCommand(qc, receipt.commandId, threadId, "turn.interrupt");
       toast("中断请求已发送");
     } catch {
       toast("中断失败，设备可能已离线", { error: true });
+    } finally {
+      interruptPendingRef.current = false;
+      setInterruptBusy(false);
     }
   };
 
@@ -269,17 +296,14 @@ export function ThreadPage({
       },
     });
 
-  const threadView = history.isLoading ? (
-    <div style={{ flex: 1, display: "grid", placeItems: "center" }}>
-      <Spinner />
-    </div>
-  ) : (
+  const threadView = (
     <ThreadView
+      loading={history.isLoading}
       history={history.data?.groups ?? []}
       live={live}
       approvals={threadApprovals}
       onDecide={decide}
-      approvalsLocked={!online}
+      approvalsLocked={!online || !providerConnected}
       hasMoreHistory={history.data?.hasMore}
       loadingMore={history.isFetching && !history.isLoading}
       onLoadOlder={() => setTurnCount((n) => n + 12)}
@@ -288,9 +312,11 @@ export function ThreadPage({
       lockedReason={lockedReason}
       running={running}
       runtimeStatus={thread?.status ?? null}
-      runtimeConnected={online}
-      busy={busyIds.has(threadId)}
+      runtimeConnected={online && providerAvailable}
+      busy={busyIds.has(threadId) || sendBusy || interruptBusy}
       onSend={send}
+      onUpload={(file, onProgress) => api.uploadAttachment(threadId, file, onProgress)}
+      onDeleteAttachment={api.deleteAttachment}
       onRetry={retry}
       onInterrupt={interrupt}
     />
@@ -300,7 +326,7 @@ export function ThreadPage({
     <TopBar
       title={thread?.title ?? "会话"}
       subtitle={device && project
-        ? `${online ? device.displayName : statusLabel(device.status)} · ${project.displayName}`
+        ? `${online ? device.displayName : statusLabel(device.status)} · ${project.displayName}${thread ? ` · ${providerLabel(thread.provider)}` : ""}`
         : undefined}
       onBack={() =>
         fromRecents

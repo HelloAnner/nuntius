@@ -69,7 +69,7 @@ export function ApprovalsPage() {
                       <ApprovalCard
                         approval={enrich(a)}
                         onDecide={(d) => void decide(a, d)}
-                        locked={!(info.data?.appServerRunning ?? false)}
+                        locked={!approvalProviderOnline(a, threads.data, info.data?.providers)}
                       />
                       {a.threadId ? (
                         <button
@@ -117,6 +117,15 @@ export function ApprovalsPage() {
       </div>
     </div>
   );
+}
+
+function approvalProviderOnline(
+  approval: ApprovalView,
+  threads: import("@nuntius/shared").ThreadSummary[] | undefined,
+  providers: import("@nuntius/shared").AgentProviderStatus[] | undefined,
+): boolean {
+  const provider = threads?.find((thread) => thread.id === approval.threadId)?.provider ?? "codex";
+  return providers?.find((status) => status.provider === provider)?.status === "online";
 }
 
 function labelOf(a: ApprovalView): string {

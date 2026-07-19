@@ -5,9 +5,10 @@ import type {
   DirectoryListResponse,
   HistoryRecord,
   ProjectSummary,
+  SyncSnapshot,
   ThreadSummary,
+  AgentProvider,
 } from "@nuntius/shared";
-import { threadOptionsForAccess, turnOptionsForAccess } from "@nuntius/shared";
 
 export class ApiError extends Error {
   code: string;
@@ -49,6 +50,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 
 export const api = {
   info: () => req<ClientInfo>("GET", "/info"),
+  sync: () => req<SyncSnapshot>("GET", "/sync"),
   directoryRoots: () => req<DirectoryListResponse>("GET", "/directories/roots"),
   directories: (parentRef: string, cursor?: string) =>
     req<DirectoryListResponse>(
@@ -62,18 +64,19 @@ export const api = {
     req<{ projectId: string; threadCount: number }>("DELETE", `/projects/${projectId}`),
   projectThreads: (projectId: string) =>
     req<ThreadSummary[]>("GET", `/projects/${projectId}/threads`),
-  createThread: (projectId: string, title: string | null) =>
+  createThread: (projectId: string, title: string | null, provider: AgentProvider) =>
     req<{ threadId: string; appServerThreadId: string }>(
       "POST",
       `/projects/${projectId}/threads`,
-      { title, firstMessage: null, options: threadOptionsForAccess("full") },
+      { title, firstMessage: null, provider, accessMode: "full", options: {} },
     ),
   threads: () => req<ThreadSummary[]>("GET", "/threads"),
   history: (threadId: string) => req<HistoryRecord[]>("GET", `/threads/${threadId}/history`),
   startTurn: (threadId: string, text: string) =>
     req<{ operation: "start" | "steer"; turnId?: string }>("POST", `/threads/${threadId}/turns`, {
       text,
-      options: turnOptionsForAccess("full"),
+      accessMode: "full",
+      options: {},
     }),
   steerTurn: (threadId: string, text: string) =>
     req<unknown>("POST", `/threads/${threadId}/steer`, { text }),

@@ -1,5 +1,5 @@
 use crate::{config::DATABASE_FILE, protocol::*};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{
@@ -473,6 +473,8 @@ impl ServerStore {
                 inbox_depth: r.get("inbox_depth"),
                 outbox_depth: r.get("outbox_depth"),
                 history_backfill_depth: r.get("history_backfill_depth"),
+                providers: serde_json::from_str(&r.get::<String, _>("provider_statuses_json"))
+                    .unwrap_or_default(),
             })
             .collect())
     }
@@ -485,10 +487,14 @@ impl ServerStore {
         health: Option<&DeviceHealth>,
     ) -> Result<()> {
         let codex = health.and_then(|h| h.codex_version.as_deref());
-        sqlx::query("UPDATE devices SET last_seen_at=?,agent_version=?,codex_version=COALESCE(?,codex_version),transport_security=?,active_turn_count=COALESCE(?,active_turn_count),pending_approval_count=COALESCE(?,pending_approval_count),app_server_status=COALESCE(?,app_server_status),storage_status=COALESCE(?,storage_status),inbox_depth=COALESCE(?,inbox_depth),outbox_depth=COALESCE(?,outbox_depth),history_backfill_depth=COALESCE(?,history_backfill_depth) WHERE id=? AND status='active'")
+        let providers = health
+            .map(|health| serde_json::to_string(&health.providers))
+            .transpose()?;
+        sqlx::query("UPDATE devices SET last_seen_at=?,agent_version=?,codex_version=COALESCE(?,codex_version),transport_security=?,active_turn_count=COALESCE(?,active_turn_count),pending_approval_count=COALESCE(?,pending_approval_count),app_server_status=COALESCE(?,app_server_status),storage_status=COALESCE(?,storage_status),inbox_depth=COALESCE(?,inbox_depth),outbox_depth=COALESCE(?,outbox_depth),history_backfill_depth=COALESCE(?,history_backfill_depth),provider_statuses_json=COALESCE(?,provider_statuses_json) WHERE id=? AND status='active'")
             .bind(now()).bind(agent_version).bind(codex).bind(transport_string(security)).bind(health.map(|value|value.active_turn_count)).bind(health.map(|value|value.pending_approval_count))
             .bind(health.map(|value|value.app_server_status.as_str())).bind(health.map(|value|value.storage_status.as_str()))
             .bind(health.map(|value|value.inbox_depth)).bind(health.map(|value|value.outbox_depth)).bind(health.map(|value|value.history_backfill_depth))
+            .bind(providers)
             .bind(device_id).execute(&self.pool).await?;
         Ok(())
     }
@@ -627,11 +633,12 @@ impl ServerStore {
         if project_exists.is_none() {
             bail!("created thread references an unavailable project")
         }
-        sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,app_server_thread_id,title,status,archived,history_completeness,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,last_activity_at=COALESCE(excluded.last_activity_at,threads.last_activity_at) WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id")
+        sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,status,archived,history_completeness,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,last_activity_at=COALESCE(excluded.last_activity_at,threads.last_activity_at) WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id")
             .bind(&thread.id)
             .bind(user_id)
             .bind(&thread.device_id)
             .bind(&thread.project_id)
+            .bind(thread.provider.as_str())
             .bind(&thread.app_server_thread_id)
             .bind(&thread.title)
             .bind(&thread.status)
@@ -665,6 +672,120 @@ impl ServerStore {
         let row = sqlx::query("SELECT h.device_id,h.project_id FROM threads h JOIN devices d ON d.id=h.device_id JOIN projects p ON p.id=h.project_id WHERE h.id=? AND h.user_id=? AND h.archived=0 AND d.status='active' AND p.removed_at IS NULL AND p.kind='workspace' AND p.status='active'")
             .bind(thread_id).bind(user_id).fetch_optional(&self.pool).await?;
         Ok(row.map(|r| (r.get("device_id"), r.get("project_id"))))
+    }
+
+    pub async fn insert_attachment(
+        &self,
+        id: &str,
+        user_id: &str,
+        device_id: &str,
+        thread_id: &str,
+        upload_key: &str,
+        original_name: &str,
+        mime_type: &str,
+        extension: &str,
+        byte_size: i64,
+        sha256: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<AttachmentView> {
+        sqlx::query("INSERT INTO attachments(id,user_id,device_id,thread_id,original_name,mime_type,extension,byte_size,sha256,width,height,status,upload_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'ready',?,?)")
+            .bind(id).bind(user_id).bind(device_id).bind(thread_id).bind(original_name)
+            .bind(mime_type).bind(extension).bind(byte_size).bind(sha256)
+            .bind(i64::from(width)).bind(i64::from(height)).bind(upload_key).bind(now())
+            .execute(&self.pool).await?;
+        Ok(AttachmentView {
+            id: id.into(),
+            original_name: original_name.into(),
+            mime_type: mime_type.into(),
+            byte_size,
+            sha256: sha256.into(),
+            width,
+            height,
+        })
+    }
+
+    pub async fn attachment_by_upload_key(
+        &self,
+        user_id: &str,
+        thread_id: &str,
+        upload_key: &str,
+    ) -> Result<Option<AttachmentView>> {
+        let row = sqlx::query("SELECT * FROM attachments WHERE user_id=? AND thread_id=? AND upload_key=? AND status<>'deleted'")
+            .bind(user_id).bind(thread_id).bind(upload_key).fetch_optional(&self.pool).await?;
+        Ok(row.map(|row| attachment_view_from_row(&row)))
+    }
+
+    pub async fn attachment_ref_for_user(
+        &self,
+        user_id: &str,
+        attachment_id: &str,
+    ) -> Result<Option<AttachmentRef>> {
+        let row =
+            sqlx::query("SELECT * FROM attachments WHERE id=? AND user_id=? AND status<>'deleted'")
+                .bind(attachment_id)
+                .bind(user_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|row| attachment_ref_from_row(&row)))
+    }
+
+    pub async fn attachment_ref_for_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        attachment_id: &str,
+    ) -> Result<Option<AttachmentRef>> {
+        let row = sqlx::query("SELECT * FROM attachments WHERE id=? AND user_id=? AND device_id=? AND status<>'deleted'")
+            .bind(attachment_id).bind(user_id).bind(device_id).fetch_optional(&self.pool).await?;
+        Ok(row.map(|row| attachment_ref_from_row(&row)))
+    }
+
+    pub async fn resolve_message_attachments(
+        &self,
+        user_id: &str,
+        thread_id: &str,
+        attachment_ids: &[String],
+    ) -> Result<Vec<AttachmentRef>> {
+        if attachment_ids.len() > crate::attachments::MAX_IMAGES_PER_MESSAGE {
+            bail!(
+                "a message may contain at most {} images",
+                crate::attachments::MAX_IMAGES_PER_MESSAGE
+            );
+        }
+        let mut unique = std::collections::HashSet::new();
+        let mut attachments = Vec::with_capacity(attachment_ids.len());
+        for id in attachment_ids {
+            if !unique.insert(id.as_str()) {
+                bail!("attachment ids must be unique");
+            }
+            let row = sqlx::query("SELECT * FROM attachments WHERE id=? AND user_id=? AND thread_id=? AND status='ready'")
+                .bind(id).bind(user_id).bind(thread_id).fetch_optional(&self.pool).await?
+                .context("attachment is unavailable for this thread")?;
+            attachments.push(attachment_ref_from_row(&row));
+        }
+        Ok(attachments)
+    }
+
+    pub async fn delete_unreferenced_attachment(
+        &self,
+        user_id: &str,
+        attachment_id: &str,
+    ) -> Result<Option<AttachmentRef>> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT * FROM attachments a WHERE a.id=? AND a.user_id=? AND a.status='ready' AND NOT EXISTS(SELECT 1 FROM command_attachments c WHERE c.attachment_id=a.id) AND NOT EXISTS(SELECT 1 FROM item_attachments i WHERE i.attachment_id=a.id)")
+            .bind(attachment_id).bind(user_id).fetch_optional(&mut *tx).await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let attachment = attachment_ref_from_row(&row);
+        sqlx::query("DELETE FROM attachments WHERE id=? AND user_id=?")
+            .bind(attachment_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(Some(attachment))
     }
 
     pub async fn project_belongs_to_user(
@@ -720,7 +841,19 @@ impl ServerStore {
     ) -> Result<Vec<HistoryItemView>> {
         let rows = sqlx::query("SELECT i.* FROM items i JOIN turns t ON t.id=i.turn_id JOIN threads h ON h.id=t.thread_id WHERE h.user_id=? AND i.turn_id=? ORDER BY i.ordinal LIMIT ? OFFSET ?")
             .bind(user_id).bind(turn_id).bind(limit).bind(offset).fetch_all(&self.pool).await?;
-        Ok(rows.into_iter().map(item_from_row).collect())
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut item = item_from_row(row);
+            item.attachments = self.item_attachments(&item.id).await?;
+            items.push(item);
+        }
+        Ok(items)
+    }
+
+    async fn item_attachments(&self, item_id: &str) -> Result<Vec<AttachmentView>> {
+        let rows = sqlx::query("SELECT a.* FROM item_attachments ia JOIN attachments a ON a.id=ia.attachment_id WHERE ia.item_id=? ORDER BY ia.ordinal")
+            .bind(item_id).fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(attachment_view_from_row).collect())
     }
 
     pub async fn insert_command(
@@ -754,6 +887,26 @@ impl ServerStore {
             .bind(&command.command_id).bind(user_id).bind(&command.device_id).bind(&command.project_id).bind(&command.thread_id)
             .bind(kind).bind(payload).bind(idempotency_key).bind(fingerprint).bind(self.queue_epoch()).bind(sequence).bind(&command.issued_at).bind(expires_at_unix)
             .execute(&mut *tx).await?;
+        let attachments: &[AttachmentRef] = match &command.command {
+            DeviceCommandKind::TurnStart { attachments, .. }
+            | DeviceCommandKind::TurnSteer { attachments, .. } => attachments,
+            _ => &[],
+        };
+        for (index, attachment) in attachments.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO command_attachments(command_id,attachment_id,ordinal) VALUES(?,?,?)",
+            )
+            .bind(&command.command_id)
+            .bind(&attachment.id)
+            .bind(index as i64 + 1)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("UPDATE attachments SET last_referenced_at=? WHERE id=?")
+                .bind(now())
+                .bind(&attachment.id)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(StoredCommand {
             queue_epoch: self.queue_epoch().into(),
@@ -1158,8 +1311,8 @@ impl ServerStore {
                     &fallback_project
                 };
                 if !stale {
-                    sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,app_server_thread_id,title,status,archived,history_completeness,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,'backfilling',?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,last_synced_at=excluded.last_synced_at,last_activity_at=excluded.last_activity_at,history_revision=excluded.history_revision WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id AND excluded.history_revision>=threads.history_revision")
-                    .bind(&thread.id).bind(user_id).bind(&batch.device_id).bind(project_id).bind(&thread.app_server_thread_id).bind(&thread.title).bind(&thread.status).bind(thread.archived)
+                    sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,status,archived,history_completeness,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,'backfilling',?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,last_synced_at=excluded.last_synced_at,last_activity_at=excluded.last_activity_at,history_revision=excluded.history_revision WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id AND excluded.history_revision>=threads.history_revision")
+                    .bind(&thread.id).bind(user_id).bind(&batch.device_id).bind(project_id).bind(thread.provider.as_str()).bind(&thread.app_server_thread_id).bind(&thread.title).bind(&thread.status).bind(thread.archived)
                     .bind(&thread.last_synced_at).bind(&thread.last_activity_at).bind(batch.inventory_revision).execute(&mut *tx).await?;
                 }
             }
@@ -1230,6 +1383,7 @@ impl ServerStore {
                     hex::encode(Sha256::digest(serde_json::to_vec(&serde_json::json!({
                         "text": &item.content_text,
                         "detail": &item.structured_detail,
+                        "attachments": &item.attachments,
                     }))?));
                 let current: Option<(i64,)> =
                     sqlx::query_as("SELECT revision FROM items WHERE id=?")
@@ -1240,6 +1394,23 @@ impl ServerStore {
                     sqlx::query("INSERT INTO items(id,turn_id,ordinal,kind,status,revision,content_hash,content_text,structured_detail,is_truncated,occurred_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,revision=excluded.revision,content_hash=excluded.content_hash,content_text=excluded.content_text,structured_detail=excluded.structured_detail,is_truncated=excluded.is_truncated,completed_at=excluded.completed_at WHERE excluded.revision>=items.revision")
                         .bind(&item.id).bind(&item.turn_id).bind(item.ordinal).bind(&item.kind).bind(&item.status).bind(item.revision)
                         .bind(content_hash).bind(&item.content_text).bind(detail).bind(item.is_truncated).bind(&item.occurred_at).bind(&item.completed_at).execute(&mut *tx).await?;
+                    sqlx::query("DELETE FROM item_attachments WHERE item_id=?")
+                        .bind(&item.id)
+                        .execute(&mut *tx)
+                        .await?;
+                    for (index, attachment) in item.attachments.iter().enumerate() {
+                        let stored = sqlx::query("SELECT * FROM attachments WHERE id=? AND user_id=? AND device_id=? AND thread_id=? AND status<>'deleted'")
+                            .bind(&attachment.id).bind(user_id).bind(&batch.device_id).bind(&batch.thread_id)
+                            .fetch_optional(&mut *tx).await?
+                            .context("history references an unavailable attachment")?;
+                        let stored = attachment_view_from_row(&stored);
+                        if &stored != attachment {
+                            bail!("history attachment metadata mismatch");
+                        }
+                        sqlx::query("INSERT INTO item_attachments(item_id,attachment_id,ordinal) VALUES(?,?,?)")
+                            .bind(&item.id).bind(&attachment.id).bind(index as i64 + 1)
+                            .execute(&mut *tx).await?;
+                    }
                 }
             }
         }
@@ -1383,6 +1554,11 @@ fn thread_from_row(r: sqlx::sqlite::SqliteRow) -> ThreadSummary {
         id: r.get("id"),
         device_id: r.get("device_id"),
         project_id: r.get("project_id"),
+        provider: if r.get::<String, _>("provider") == "kimi" {
+            AgentProvider::Kimi
+        } else {
+            AgentProvider::Codex
+        },
         app_server_thread_id: r.get("app_server_thread_id"),
         title: r.get("title"),
         status: r.get("status"),
@@ -1408,6 +1584,33 @@ fn item_from_row(r: sqlx::sqlite::SqliteRow) -> HistoryItemView {
         is_truncated: r.get::<i64, _>("is_truncated") != 0,
         occurred_at: r.get("occurred_at"),
         completed_at: r.get("completed_at"),
+        attachments: Vec::new(),
+    }
+}
+
+fn attachment_view_from_row(r: &sqlx::sqlite::SqliteRow) -> AttachmentView {
+    AttachmentView {
+        id: r.get("id"),
+        original_name: r.get("original_name"),
+        mime_type: r.get("mime_type"),
+        byte_size: r.get("byte_size"),
+        sha256: r.get("sha256"),
+        width: r.get::<i64, _>("width") as u32,
+        height: r.get::<i64, _>("height") as u32,
+    }
+}
+
+fn attachment_ref_from_row(r: &sqlx::sqlite::SqliteRow) -> AttachmentRef {
+    let view = attachment_view_from_row(r);
+    AttachmentRef {
+        id: view.id,
+        original_name: view.original_name,
+        mime_type: view.mime_type,
+        extension: r.get("extension"),
+        byte_size: view.byte_size,
+        sha256: view.sha256,
+        width: view.width,
+        height: view.height,
     }
 }
 
@@ -1572,6 +1775,7 @@ mod tests {
                     id: "thr_remove".into(),
                     device_id: device_id.clone(),
                     project_id: "prj_remove".into(),
+                    provider: AgentProvider::Codex,
                     app_server_thread_id: Some("app_remove".into()),
                     title: "Old thread".into(),
                     status: "idle".into(),
@@ -1786,6 +1990,7 @@ mod tests {
                     id: "thr_history".into(),
                     device_id: device_id.clone(),
                     project_id: "unknown-local-project".into(),
+                    provider: AgentProvider::Codex,
                     app_server_thread_id: Some("app_history".into()),
                     title: "Imported".into(),
                     status: "idle".into(),
@@ -1824,6 +2029,7 @@ mod tests {
                     is_truncated: false,
                     occurred_at: now(),
                     completed_at: Some(now()),
+                    attachments: Vec::new(),
                 }),
             },
             HistoryRecord {
@@ -1841,6 +2047,7 @@ mod tests {
                     is_truncated: false,
                     occurred_at: now(),
                     completed_at: Some(now()),
+                    attachments: Vec::new(),
                 }),
             },
         ];
@@ -1906,6 +2113,7 @@ mod tests {
                     id: "thr_history_second".into(),
                     device_id: second_device.clone(),
                     project_id: "unknown-second-project".into(),
+                    provider: AgentProvider::Codex,
                     app_server_thread_id: Some("app_history".into()),
                     title: "Second imported thread".into(),
                     status: "idle".into(),
@@ -1944,6 +2152,7 @@ mod tests {
                     is_truncated: false,
                     occurred_at: now(),
                     completed_at: Some(now()),
+                    attachments: Vec::new(),
                 }),
             },
         ];

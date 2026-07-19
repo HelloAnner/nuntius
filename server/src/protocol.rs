@@ -154,6 +154,50 @@ pub enum HistoryCompleteness {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentProvider {
+    #[default]
+    Codex,
+    Kimi,
+}
+
+impl AgentProvider {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Kimi => "kimi",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationAccessMode {
+    #[default]
+    Full,
+    Ask,
+}
+
+impl ConversationAccessMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Ask => "ask",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProviderStatus {
+    pub provider: AgentProvider,
+    pub label: String,
+    pub available: bool,
+    pub status: String,
+    pub version: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSummary {
@@ -176,6 +220,8 @@ pub struct DeviceSummary {
     pub inbox_depth: i64,
     pub outbox_depth: i64,
     pub history_backfill_depth: i64,
+    #[serde(default)]
+    pub providers: Vec<AgentProviderStatus>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -207,6 +253,8 @@ pub struct ThreadSummary {
     pub id: String,
     pub device_id: String,
     pub project_id: String,
+    #[serde(default)]
+    pub provider: AgentProvider,
     pub app_server_thread_id: Option<String>,
     pub title: String,
     pub status: String,
@@ -241,6 +289,33 @@ pub struct HistoryItemView {
     pub is_truncated: bool,
     pub occurred_at: String,
     pub completed_at: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentView {
+    pub id: String,
+    pub original_name: String,
+    pub mime_type: String,
+    pub byte_size: i64,
+    pub sha256: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentRef {
+    pub id: String,
+    pub original_name: String,
+    pub mime_type: String,
+    pub extension: String,
+    pub byte_size: i64,
+    pub sha256: String,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -344,6 +419,10 @@ pub struct CreateThreadRequest {
     pub title: Option<String>,
     pub first_message: Option<String>,
     #[serde(default)]
+    pub provider: AgentProvider,
+    #[serde(default)]
+    pub access_mode: ConversationAccessMode,
+    #[serde(default)]
     pub options: Value,
 }
 
@@ -352,6 +431,12 @@ pub struct CreateThreadRequest {
 pub struct StartTurnRequest {
     pub text: String,
     #[serde(default)]
+    pub attachment_ids: Vec<String>,
+    #[serde(default)]
+    pub client_message_id: Option<String>,
+    #[serde(default)]
+    pub access_mode: ConversationAccessMode,
+    #[serde(default)]
     pub options: Value,
 }
 
@@ -359,6 +444,10 @@ pub struct StartTurnRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TextInputRequest {
     pub text: String,
+    #[serde(default)]
+    pub attachment_ids: Vec<String>,
+    #[serde(default)]
+    pub client_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -440,10 +529,14 @@ pub enum DeviceCommandKind {
     TurnStart {
         thread_id: String,
         request: StartTurnRequest,
+        #[serde(default)]
+        attachments: Vec<AttachmentRef>,
     },
     TurnSteer {
         thread_id: String,
         request: TextInputRequest,
+        #[serde(default)]
+        attachments: Vec<AttachmentRef>,
     },
     TurnInterrupt {
         thread_id: String,
@@ -538,6 +631,8 @@ pub struct DeviceHealth {
     pub pending_approval_count: i64,
     pub project_count: i64,
     pub codex_version: Option<String>,
+    #[serde(default)]
+    pub providers: Vec<AgentProviderStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

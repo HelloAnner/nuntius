@@ -7,5 +7,6 @@ export * from "./components/ui";
 export * from "./components/Markdown";
 export * from "./components/items";
 export * from "./components/Composer";
+export * from "./components/ProviderPicker";
 export * from "./components/ThreadView";
 export * from "./components/DirectoryBrowser";

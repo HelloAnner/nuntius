@@ -24,7 +24,6 @@
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  animation: fade-rise 0.28s var(--ease-out);
 }
 .page-scroll {
   flex: 1;

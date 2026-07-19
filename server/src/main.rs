@@ -1,5 +1,6 @@
 mod api;
 mod assets;
+mod attachments;
 mod auth;
 mod config;
 mod error;
@@ -15,9 +16,14 @@ use config::{ServerConfig, initialize_data_dir};
 use event_hub::EventHub;
 use nuntius_updater::{BuildInfo, UpdateConfig, UpdateRole};
 use protocol::TransportSecurity;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use store::ServerStore;
-use tower_http::{catch_panic::CatchPanicLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
+use tower_http::{catch_panic::CatchPanicLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -127,14 +133,46 @@ async fn backup(data_dir: PathBuf) -> Result<()> {
     let store = ServerStore::open(&data_dir)
         .await
         .context("open server SQLite")?;
-    let file_name = format!(
-        "nuntius-server-{}.db",
+    let backup_name = format!(
+        "nuntius-server-{}",
         time::OffsetDateTime::now_utc().unix_timestamp_nanos()
     );
-    let destination = data_dir.join("backups").join(file_name);
-    store.backup(&destination).await?;
-    config::set_private_file_permissions(&destination)?;
+    let destination = data_dir.join("backups").join(backup_name);
+    fs::create_dir(&destination)?;
+    config::set_private_dir_permissions(&destination)?;
+    let database = destination.join(config::DATABASE_FILE);
+    store.backup(&database).await?;
+    config::set_private_file_permissions(&database)?;
+    copy_private_tree(
+        &data_dir.join("attachments"),
+        &destination.join("attachments"),
+    )?;
     println!("backup created {}", destination.display());
+    Ok(())
+}
+
+fn copy_private_tree(source: &Path, destination: &Path) -> Result<()> {
+    if !source.exists() {
+        return Ok(());
+    }
+    fs::create_dir(destination)?;
+    config::set_private_dir_permissions(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_private_tree(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target)?;
+            config::set_private_file_permissions(&target)?;
+        } else {
+            anyhow::bail!(
+                "refusing to back up symlink or special file {}",
+                entry.path().display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -166,7 +204,6 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
         }
     });
     let app = api::router(state)
-        .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(CatchPanicLayer::new())
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(config.bind).await?;

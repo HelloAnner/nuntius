@@ -9,6 +9,8 @@ import {
   type HistoryProgressPayload,
   type NuntiusEvent,
   type ProjectSummary,
+  type SyncSnapshot,
+  type ThreadSummary,
 } from "@nuntius/shared";
 import { api, ApiError } from "./api";
 import { liveStore, useApprovals, useCommands } from "./stores";
@@ -24,6 +26,32 @@ export const useSse = create<SseState>((set) => ({
 }));
 
 const TERMINAL_CMD = new Set(["completed", "failed", "rejected", "unknown", "expired"]);
+
+function applySnapshot(qc: QueryClient, snapshot: SyncSnapshot) {
+  liveStore.reset();
+  useApprovals.getState().replaceFromSnapshot(snapshot.approvals);
+  qc.setQueryData(["devices"], snapshot.devices);
+  qc.setQueryData(["allThreads"], snapshot.threads);
+
+  for (const device of snapshot.devices) {
+    qc.setQueryData(
+      ["projects", device.id],
+      snapshot.projects.filter((project) => project.deviceId === device.id),
+    );
+  }
+  const projectIds = new Set(snapshot.projects.map((project) => project.id));
+  for (const project of snapshot.projects) {
+    qc.setQueryData(
+      ["projectThreads", project.deviceId, project.id],
+      snapshot.threads.filter((thread) => thread.projectId === project.id),
+    );
+  }
+  for (const [key] of qc.getQueriesData({ queryKey: ["projectThreads"] })) {
+    const projectId = typeof key[2] === "string" ? key[2] : null;
+    if (projectId && !projectIds.has(projectId)) qc.setQueryData(key, []);
+  }
+  void qc.invalidateQueries({ queryKey: ["threadHistory"] });
+}
 
 export async function waitForCommand(commandId: string, timeoutMs = 90_000) {
   const deadline = Date.now() + timeoutMs;
@@ -107,7 +135,10 @@ function applyCommandStatus(
 export function startEvents(qc: QueryClient): () => void {
   let es: EventSource | null = null;
   let closed = false;
-  let everLive = false;
+  let ready = false;
+  let syncGeneration = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryDelay = 1_000;
   const dirtyThreads = new Set<string>();
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -126,13 +157,6 @@ export function startEvents(qc: QueryClient): () => void {
         void qc.invalidateQueries({ queryKey: ["allThreads"] });
       }, 600);
     }
-  };
-
-  const resync = () => {
-    useSse.getState().set("syncing");
-    void qc.invalidateQueries().then(() => {
-      if (useSse.getState().status === "syncing") useSse.getState().set("live");
-    });
   };
 
   const dispatch = (event: NuntiusEvent) => {
@@ -243,13 +267,14 @@ export function startEvents(qc: QueryClient): () => void {
     }
   };
 
-  const connect = () => {
+  const connect = (after: number) => {
     if (closed) return;
-    es = new EventSource("/api/v1/events");
+    es?.close();
+    es = new EventSource(`/api/v1/events?after=${encodeURIComponent(after)}`);
     es.onopen = () => {
+      ready = true;
+      retryDelay = 1_000;
       useSse.getState().set("live");
-      if (everLive) resync();
-      everLive = true;
     };
     es.addEventListener("nuntius", (e) => {
       try {
@@ -258,22 +283,43 @@ export function startEvents(qc: QueryClient): () => void {
         /* malformed event */
       }
     });
-    es.addEventListener("resync_required", () => resync());
+    es.addEventListener("resync_required", () => void resync());
     es.onerror = () => {
       if (useSse.getState().status !== "syncing") useSse.getState().set("reconnecting");
     };
   };
 
+  const resync = async () => {
+    const generation = ++syncGeneration;
+    es?.close();
+    es = null;
+    useSse.getState().set("syncing");
+    try {
+      const snapshot = await api.sync();
+      if (closed || generation !== syncGeneration) return;
+      applySnapshot(qc, snapshot);
+      connect(snapshot.cursor);
+    } catch {
+      if (closed || generation !== syncGeneration) return;
+      useSse.getState().set("reconnecting");
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer = setTimeout(() => void resync(), retryDelay);
+      retryDelay = Math.min(30_000, retryDelay * 2);
+    }
+  };
+
   const onVisible = () => {
-    if (document.visibilityState === "visible" && everLive) resync();
+    if (document.visibilityState === "visible" && ready) void resync();
   };
   document.addEventListener("visibilitychange", onVisible);
 
-  connect();
+  void resync();
   return () => {
     closed = true;
+    syncGeneration += 1;
     es?.close();
     document.removeEventListener("visibilitychange", onVisible);
     if (flushTimer) clearTimeout(flushTimer);
+    if (retryTimer) clearTimeout(retryTimer);
   };
 }

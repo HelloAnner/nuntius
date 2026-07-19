@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { CommandStatus } from "../types";
+import type { AttachmentView, CommandStatus } from "../types";
 import type { LiveItem, LiveTurn, ThreadLive } from "../stream";
 import { clockTime, statusLabel } from "../format";
 import { AgentMessage, ApprovalCard, UserBubble, type ApprovalView } from "./items";
@@ -23,6 +23,7 @@ export interface RenderItem {
   text: string;
   status: string;
   truncated?: boolean;
+  attachments: AttachmentView[];
 }
 
 export interface HistoryGroup {
@@ -53,7 +54,11 @@ export function visibleLiveItems(
   let skippedInitialEcho = false;
   return turn.items.filter((item) => {
     if (item.kind === "agent") return !historyHasAgent;
-    if (item.kind !== "user" || !item.text || historyUsers.has(item.text)) return false;
+    if (
+      item.kind !== "user" ||
+      (!item.text && item.attachments.length === 0) ||
+      (item.text && historyUsers.has(item.text))
+    ) return false;
     if (
       !skippedInitialEcho &&
       !item.key.startsWith("steer:") &&
@@ -69,13 +74,20 @@ export function visibleLiveItems(
 
 /** Only reconcile an orphan local echo with the corresponding recent turn. */
 export function optimisticEchoIsInHistory(turn: LiveTurn, history: HistoryGroup[]): boolean {
-  if (!turn.id.startsWith("local:") || !turn.userText || turn.items.length > 0) return false;
+  if (
+    !turn.id.startsWith("local:") ||
+    (!turn.userText && turn.userAttachments.length === 0) ||
+    turn.items.length > 0
+  ) return false;
   const optimisticAt = Date.parse(turn.startedAt);
   return history.some((group, index) => {
-    const hasText = group.items.some(
-      (item) => item.kind === "user_message" && item.text === turn.userText,
-    );
-    if (!hasText) return false;
+    const hasMessage = group.items.some((item) => {
+      if (item.kind !== "user_message" || item.text !== (turn.userText ?? "")) return false;
+      const expected = turn.userAttachments.map((attachment) => attachment.id).join(",");
+      const actual = item.attachments.map((attachment) => attachment.id).join(",");
+      return expected === actual;
+    });
+    if (!hasMessage) return false;
     const historyAt = group.turn.startedAt ? Date.parse(group.turn.startedAt) : Number.NaN;
     if (Number.isFinite(optimisticAt) && Number.isFinite(historyAt)) {
       return Math.abs(optimisticAt - historyAt) < 120_000;
@@ -88,6 +100,10 @@ export function optimisticEchoIsInHistory(turn: LiveTurn, history: HistoryGroup[
 
 function normalizedMessage(text: string): string {
   return text.replace(/\r\n/g, "\n").trim();
+}
+
+function attachmentIds(attachments: AttachmentView[]): string {
+  return attachments.map((attachment) => attachment.id).join(",");
 }
 
 /** Hide duplicate persisted assistant rows without changing the durable history. */
@@ -117,7 +133,7 @@ export function liveTurnIsInHistory(turn: LiveTurn, history: HistoryGroup[]): bo
   const userMessages = liveItems.filter((item) => item.kind === "user");
   if (agentMessages.length === 0) return false;
 
-  const hasPrompt = turn.userText !== null;
+  const hasPrompt = turn.userText !== null || turn.userAttachments.length > 0;
   const liveAt = Date.parse(turn.startedAt);
   return history.some((group, index) => {
     const items = visibleHistoryItems(group.items);
@@ -130,14 +146,20 @@ export function liveTurnIsInHistory(turn: LiveTurn, history: HistoryGroup[]): bo
     if (!agentMessages.every((message) => persistedAgents.has(message))) return false;
     const allSteersPersisted = userMessages.every((liveItem) =>
       items.some(
-        (item) => item.kind === "user_message" && item.text === liveItem.text,
+        (item) =>
+          item.kind === "user_message" &&
+          item.text === liveItem.text &&
+          attachmentIds(item.attachments) === attachmentIds(liveItem.attachments),
       ),
     );
     if (!allSteersPersisted) return false;
 
     if (!hasPrompt) return index === history.length - 1;
     const promptMatches = items.some(
-      (item) => item.kind === "user_message" && item.text === turn.userText,
+      (item) =>
+        item.kind === "user_message" &&
+        item.text === (turn.userText ?? "") &&
+        attachmentIds(item.attachments) === attachmentIds(turn.userAttachments),
     );
     if (!promptMatches) return false;
 
@@ -151,6 +173,7 @@ export function liveTurnIsInHistory(turn: LiveTurn, history: HistoryGroup[]): bo
 
 export function ThreadView({
   history,
+  loading,
   live,
   approvals,
   onDecide,
@@ -167,10 +190,13 @@ export function ThreadView({
   runtimeConnected,
   busy,
   onSend,
+  onUpload,
+  onDeleteAttachment,
   onRetry,
   onInterrupt,
 }: {
   history: HistoryGroup[];
+  loading?: boolean;
   live: ThreadLive;
   approvals: ApprovalView[];
   onDecide: (id: string, decision: string) => void;
@@ -186,13 +212,20 @@ export function ThreadView({
   runtimeStatus: string | null;
   runtimeConnected: boolean;
   busy?: boolean;
-  onSend: (text: string) => void;
-  onRetry?: (turnId: string, text: string) => void;
+  onSend: (text: string, attachments: AttachmentView[], clientMessageId: string) => void;
+  onUpload?: (file: File, onProgress: (progress: number) => void) => Promise<AttachmentView>;
+  onDeleteAttachment?: (attachmentId: string) => Promise<void>;
+  onRetry?: (turnId: string, text: string, attachments: AttachmentView[]) => void;
   onInterrupt: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
+  const prependAnchorRef = useRef<{
+    firstTurnId: string | null;
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
   const [stick, setStick] = useState(true);
 
   const historyTurnIds = useMemo(
@@ -243,6 +276,27 @@ export function ThreadView({
     setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight < 140);
   }, [setFollowing]);
 
+  const loadOlder = useCallback(() => {
+    const el = scrollRef.current;
+    if (el) {
+      prependAnchorRef.current = {
+        firstTurnId: history[0]?.turn.id ?? null,
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+      };
+    }
+    onLoadOlder?.();
+  }, [history, onLoadOlder]);
+
+  useLayoutEffect(() => {
+    const anchor = prependAnchorRef.current;
+    const el = scrollRef.current;
+    if (!anchor || !el || history[0]?.turn.id === anchor.firstTurnId) return;
+    el.scrollTop = anchor.scrollTop + (el.scrollHeight - anchor.scrollHeight);
+    prependAnchorRef.current = null;
+    setFollowing(false);
+  }, [history, setFollowing]);
+
   // Streaming Markdown, tool cards, syntax highlighting and approvals can all
   // change height without changing the number of rendered items. Observing the
   // actual content box keeps the latest response visible in every case.
@@ -261,22 +315,51 @@ export function ThreadView({
   }, [draftKey, scrollToBottom]);
 
   useLayoutEffect(() => {
-    followLatest(false);
-  }, [draftKey, followLatest]);
+    if (loading) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const key = `nuntius:scroll:${draftKey}`;
+    let restored = false;
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (raw) {
+        const saved = JSON.parse(raw) as { top?: number; following?: boolean };
+        if (saved.following === false && typeof saved.top === "number") {
+          el.scrollTop = Math.max(0, Math.min(saved.top, el.scrollHeight - el.clientHeight));
+          setFollowing(false);
+          restored = true;
+        }
+      }
+    } catch {
+      /* unavailable or malformed session storage */
+    }
+    if (!restored) followLatest(false);
+    return () => {
+      try {
+        sessionStorage.setItem(
+          key,
+          JSON.stringify({ top: el.scrollTop, following: stickRef.current }),
+        );
+      } catch {
+        /* unavailable session storage */
+      }
+    };
+  }, [draftKey, followLatest, loading, setFollowing]);
 
-  const sendAndFollow = useCallback((text: string) => {
+  const sendAndFollow = useCallback((text: string, attachments: AttachmentView[], clientMessageId: string) => {
     followLatest(false);
-    onSend(text);
+    onSend(text, attachments, clientMessageId);
   }, [followLatest, onSend]);
 
   const renderLiveTurn = (turn: LiveTurn) => {
     const stateErr = turn.sendState && SEND_ERROR.includes(turn.sendState);
     return (
-      <section key={turn.id}>
+      <section key={turn.renderKey ?? turn.id}>
         <TurnMeta status={turn.status} startedAt={turn.startedAt} />
-        {turn.userText ? (
+        {turn.userText || turn.userAttachments.length > 0 ? (
           <UserBubble
-            text={turn.userText}
+            text={turn.userText ?? ""}
+            attachments={turn.userAttachments}
             state={turn.sendState}
             stateLabel={
               turn.sendState && turn.sendState !== "completed"
@@ -287,7 +370,7 @@ export function ThreadView({
             errorMessage={stateErr ? turn.sendErrorMessage : null}
             onRetry={
               stateErr && onRetry
-                ? () => onRetry(turn.id, turn.userText ?? "")
+                ? () => onRetry(turn.id, turn.userText ?? "", turn.userAttachments)
                 : undefined
             }
           />
@@ -300,7 +383,7 @@ export function ThreadView({
               streaming={item.status === "running"}
             />
           ) : item.kind === "user" ? (
-            <UserBubble key={item.key} text={item.text} />
+            <UserBubble key={item.key} text={item.text} attachments={item.attachments} />
           ) : null,
         )}
       </section>
@@ -312,11 +395,18 @@ export function ThreadView({
       <div className="thread-scroll" ref={scrollRef} onScroll={onScroll}>
         <div className="thread-col" ref={contentRef}>
           {headerOverlay}
+          {loading ? (
+            <div className="thread-loading" role="status" aria-label="正在加载会话记录">
+              <div className="skeleton thread-loading-user" />
+              <div className="skeleton thread-loading-agent" />
+              <div className="skeleton thread-loading-agent short" />
+            </div>
+          ) : null}
           {hasMoreHistory || loadingMore ? (
             <div style={{ display: "flex", justifyContent: "center", padding: "6px 0 14px" }}>
               <button
                 className="btn ghost sm"
-                onClick={onLoadOlder}
+                onClick={loadOlder}
                 disabled={loadingMore}
               >
                 {loadingMore ? <Spinner sm /> : null}
@@ -341,7 +431,7 @@ export function ThreadView({
                 />
                 {items.map((item) => {
                   if (item.kind === "user_message") {
-                    return <UserBubble key={item.id} text={item.text} />;
+                    return <UserBubble key={item.id} text={item.text} attachments={item.attachments} />;
                   }
                   if (item.kind === "agent_message") {
                     return <AgentMessage key={item.id} text={item.text} />;
@@ -356,7 +446,7 @@ export function ThreadView({
                       streaming={item.status === "running"}
                     />
                   ) : item.kind === "user" ? (
-                    <UserBubble key={item.key} text={item.text} />
+                    <UserBubble key={item.key} text={item.text} attachments={item.attachments} />
                   ) : null,
                 )}
               </section>
@@ -374,7 +464,7 @@ export function ThreadView({
             />
           ))}
 
-          {history.length === 0 && live.turns.length === 0 ? (
+          {!loading && history.length === 0 && live.turns.length === 0 ? (
             <div
               style={{
                 textAlign: "center",
@@ -407,6 +497,8 @@ export function ThreadView({
         runtimeConnected={runtimeConnected}
         busy={busy}
         onSend={sendAndFollow}
+        onUpload={onUpload}
+        onDeleteAttachment={onDeleteAttachment}
         onInterrupt={onInterrupt}
       />
     </div>
@@ -425,9 +517,7 @@ function TurnMeta({
   const active = status === "active" || status === "running";
   const quiet = status === "completed" || status === "idle";
   const time = clockTime(startedAt);
-  const spoken = [ordinal ? `第 ${ordinal} 轮` : null, statusLabel(status), time]
-    .filter(Boolean)
-    .join("，");
+  const spoken = [ordinal ? `第 ${ordinal} 轮` : null, statusLabel(status), time].filter(Boolean).join("，");
   return (
     <div className={`turn-meta num${active ? " active" : ""}`} aria-label={spoken}>
       {active ? <span className="live-dot" aria-hidden="true" /> : null}

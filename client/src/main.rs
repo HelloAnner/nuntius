@@ -1,20 +1,23 @@
+mod agent;
 mod api;
 mod app_server;
 mod assets;
+mod attachments;
 mod command_queue;
 mod config;
 mod directory;
 mod error;
 mod executor;
 mod history_monitor;
+mod kimi;
 mod pairing;
 mod protocol;
 mod store;
 mod tunnel;
 mod update_relay;
 
+use agent::AgentRuntimes;
 use anyhow::{Context, Result, bail};
-use app_server::AppServerRuntime;
 use clap::{Parser, Subcommand};
 use config::ClientConfig;
 use executor::CommandExecutor;
@@ -22,7 +25,7 @@ use fs2::FileExt;
 use nuntius_updater::{BuildInfo, UpdateConfig, UpdateRole};
 use std::{
     fs::{self, OpenOptions},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     sync::Arc,
     time::Duration,
@@ -135,12 +138,41 @@ async fn backup() -> Result<()> {
     let root = config::data_dir()?;
     let store = ClientStore::open(&root).await?;
     let destination = root.join("backups").join(format!(
-        "nuntius-client-{}.db",
+        "nuntius-client-{}",
         time::OffsetDateTime::now_utc().unix_timestamp_nanos()
     ));
-    store.backup(&destination).await?;
-    config::private_file(&destination)?;
+    fs::create_dir(&destination)?;
+    config::private_dir(&destination)?;
+    let database = destination.join(config::DATABASE_FILE);
+    store.backup(&database).await?;
+    config::private_file(&database)?;
+    copy_private_tree(&root.join("attachments"), &destination.join("attachments"))?;
     println!("backup created {}", destination.display());
+    Ok(())
+}
+
+fn copy_private_tree(source: &Path, destination: &Path) -> Result<()> {
+    if !source.exists() {
+        return Ok(());
+    }
+    fs::create_dir(destination)?;
+    config::private_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_private_tree(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target)?;
+            config::private_file(&target)?;
+        } else {
+            anyhow::bail!(
+                "refusing to back up symlink or special file {}",
+                entry.path().display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -153,12 +185,12 @@ async fn run() -> Result<()> {
     store.recover_process_state().await?;
     let (events, _) = tokio::sync::broadcast::channel(4096);
     let (command_acks, _) = tokio::sync::broadcast::channel(1024);
-    let app = AppServerRuntime::new(cfg.clone());
+    let agents = AgentRuntimes::new(cfg.clone());
     let device_id = cfg.device_id.clone().unwrap_or_else(|| "unpaired".into());
     let executor = CommandExecutor {
         config: cfg.clone(),
         store,
-        app: app.clone(),
+        agents: agents.clone(),
         device_id,
         events,
         command_acks,
@@ -178,13 +210,15 @@ async fn run() -> Result<()> {
         }
     });
     let app_events_task = tokio::spawn(executor::process_app_events(executor.clone()));
+    let kimi_event_stream_task = tokio::spawn(agents.kimi.clone().run_event_stream());
+    let kimi_events_task = tokio::spawn(executor::process_kimi_events(executor.clone()));
     let history_monitor_task = tokio::spawn(history_monitor::run(executor.clone()));
     let discovery = executor.clone();
     let discovery_task = tokio::spawn(async move {
         match discovery.discover_all().await {
-            Ok(count) => tracing::info!(count, "Codex history discovery completed"),
+            Ok(count) => tracing::info!(count, "agent history discovery completed"),
             Err(error) => {
-                tracing::warn!(error=?error, "Codex history discovery unavailable; local API remains online")
+                tracing::warn!(error=?error, "agent history discovery unavailable; local API remains online")
             }
         }
     });
@@ -264,10 +298,12 @@ async fn run() -> Result<()> {
     if let Some(task) = tunnel_task {
         task.abort()
     }
-    app.shutdown().await?;
+    agents.shutdown().await?;
     discovery_task.abort();
     history_monitor_task.abort();
     app_events_task.abort();
+    kimi_event_stream_task.abort();
+    kimi_events_task.abort();
     command_queue_task.abort();
     maintenance_task.abort();
     if let Some(update) = prepared_update {

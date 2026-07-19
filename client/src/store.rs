@@ -76,6 +76,13 @@ impl ClientStore {
         sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
             .execute(&self.pool)
             .await?;
+        // Keep enough short-term control events for browser reconnects without
+        // turning the replay journal into a second long-term history store.
+        sqlx::query(
+            "DELETE FROM browser_event_journal WHERE cursor < COALESCE((SELECT MAX(cursor)-10000 FROM browser_event_journal), 0)",
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
     pub async fn backup(&self, destination: &Path) -> Result<()> {
@@ -97,12 +104,20 @@ impl ClientStore {
     pub async fn recover_process_state(&self) -> Result<()> {
         let stamp = now();
         sqlx::query(
-            "UPDATE pending_app_requests SET status='unknown',decided_at=? WHERE status IN ('pending','responding')",
+            "UPDATE pending_app_requests SET status='unknown',decided_at=?,error_message='client_restarted_before_decision' WHERE status IN ('pending','responding')",
         )
         .bind(&stamp)
         .execute(&self.pool)
         .await?;
         sqlx::query("UPDATE threads SET status='unknown',updated_at=? WHERE status='active'")
+            .bind(&stamp)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE status IN ('active','running','inProgress')")
+            .bind(&stamp)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("UPDATE items SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE status IN ('active','running','inProgress')")
             .bind(&stamp)
             .execute(&self.pool)
             .await?;
@@ -247,10 +262,11 @@ impl ClientStore {
             bail!("项目中仍有运行中的会话，请先中断或等待会话结束");
         }
         let canonical_path: String = project.get("canonical_path");
-        let threads = sqlx::query("SELECT id,app_server_thread_id FROM threads WHERE project_id=?")
-            .bind(id)
-            .fetch_all(&mut *tx)
-            .await?;
+        let threads =
+            sqlx::query("SELECT id,provider,app_server_thread_id FROM threads WHERE project_id=?")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?;
         let thread_count = threads.len() as i64;
 
         sqlx::query("INSERT INTO removed_project_paths(canonical_path,project_id,removed_at) VALUES(?,?,?) ON CONFLICT(canonical_path) DO UPDATE SET project_id=excluded.project_id,removed_at=excluded.removed_at")
@@ -261,15 +277,19 @@ impl ClientStore {
             .await?;
         for thread in &threads {
             let thread_id: String = thread.get("id");
+            let provider: String = thread.get("provider");
             if let Some(app_thread_id) = thread.get::<Option<String>, _>("app_server_thread_id") {
-                sqlx::query("INSERT INTO removed_app_threads(app_server_thread_id,canonical_path,removed_at) VALUES(?,?,?) ON CONFLICT(app_server_thread_id) DO UPDATE SET canonical_path=excluded.canonical_path,removed_at=excluded.removed_at")
+                sqlx::query("INSERT INTO removed_app_threads(app_server_thread_id,canonical_path,removed_at,provider) VALUES(?,?,?,?) ON CONFLICT(app_server_thread_id) DO UPDATE SET canonical_path=excluded.canonical_path,removed_at=excluded.removed_at,provider=excluded.provider")
                     .bind(&app_thread_id)
                     .bind(&canonical_path)
                     .bind(&stamp)
+                    .bind(&provider)
                     .execute(&mut *tx)
                     .await?;
                 sqlx::query("DELETE FROM runtime_state WHERE key=?")
-                    .bind(format!("app_thread_fingerprint:{app_thread_id}"))
+                    .bind(format!(
+                        "provider_thread_fingerprint:{provider}:{app_thread_id}"
+                    ))
                     .execute(&mut *tx)
                     .await?;
             }
@@ -312,11 +332,22 @@ impl ClientStore {
     }
 
     pub async fn app_thread_removed(&self, app_thread_id: &str) -> Result<bool> {
-        let removed: Option<i64> =
-            sqlx::query_scalar("SELECT 1 FROM removed_app_threads WHERE app_server_thread_id=?")
-                .bind(app_thread_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        self.provider_thread_removed(AgentProvider::Codex, app_thread_id)
+            .await
+    }
+
+    pub async fn provider_thread_removed(
+        &self,
+        provider: AgentProvider,
+        app_thread_id: &str,
+    ) -> Result<bool> {
+        let removed: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM removed_app_threads WHERE provider=? AND app_server_thread_id=?",
+        )
+        .bind(provider.as_str())
+        .bind(app_thread_id)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(removed.is_some())
     }
 
@@ -370,8 +401,29 @@ impl ClientStore {
         title: &str,
         app_server_options: &Value,
     ) -> Result<()> {
+        self.create_provider_thread(
+            id,
+            project_id,
+            AgentProvider::Codex,
+            app_id,
+            title,
+            ConversationAccessMode::Full,
+            app_server_options,
+        )
+        .await
+    }
+    pub async fn create_provider_thread(
+        &self,
+        id: &str,
+        project_id: &str,
+        provider: AgentProvider,
+        app_id: &str,
+        title: &str,
+        access_mode: ConversationAccessMode,
+        app_server_options: &Value,
+    ) -> Result<()> {
         let stamp = now();
-        sqlx::query("INSERT INTO threads(id,project_id,app_server_thread_id,title,app_server_options,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id).bind(project_id).bind(app_id).bind(title).bind(serde_json::to_string(app_server_options)?).bind(&stamp).bind(&stamp).bind(&stamp).execute(&self.pool).await?;
+        sqlx::query("INSERT INTO threads(id,project_id,provider,app_server_thread_id,title,access_mode,app_server_options,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(id).bind(project_id).bind(provider.as_str()).bind(app_id).bind(title).bind(access_mode.as_str()).bind(serde_json::to_string(app_server_options)?).bind(&stamp).bind(&stamp).bind(&stamp).execute(&self.pool).await?;
         Ok(())
     }
     pub async fn thread_has_turns(&self, id: &str) -> Result<bool> {
@@ -388,6 +440,17 @@ impl ClientStore {
                 .fetch_one(&self.pool)
                 .await?;
         Ok(serde_json::from_str(&encoded).unwrap_or_else(|_| Value::Object(Default::default())))
+    }
+    pub async fn thread_access_mode(&self, id: &str) -> Result<ConversationAccessMode> {
+        let mode: String = sqlx::query_scalar("SELECT access_mode FROM threads WHERE id=?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(if mode == "ask" {
+            ConversationAccessMode::Ask
+        } else {
+            ConversationAccessMode::Full
+        })
     }
     pub async fn rebind_app_server_thread(&self, id: &str, app_id: &str) -> Result<()> {
         sqlx::query(
@@ -429,11 +492,22 @@ impl ClientStore {
         Ok(())
     }
     pub async fn local_thread_id(&self, app_thread_id: &str) -> Result<Option<String>> {
+        self.local_provider_thread_id(AgentProvider::Codex, app_thread_id)
+            .await
+    }
+    pub async fn local_provider_thread_id(
+        &self,
+        provider: AgentProvider,
+        app_thread_id: &str,
+    ) -> Result<Option<String>> {
         Ok(
-            sqlx::query_scalar("SELECT id FROM threads WHERE app_server_thread_id=?")
-                .bind(app_thread_id)
-                .fetch_optional(&self.pool)
-                .await?,
+            sqlx::query_scalar(
+                "SELECT id FROM threads WHERE provider=? AND app_server_thread_id=?",
+            )
+            .bind(provider.as_str())
+            .bind(app_thread_id)
+            .fetch_optional(&self.pool)
+            .await?,
         )
     }
     pub async fn record_user_turn(
@@ -441,6 +515,7 @@ impl ClientStore {
         thread_id: &str,
         app_turn_id: Option<&str>,
         text: &str,
+        attachments: &[AttachmentView],
     ) -> Result<String> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let stamp = now();
@@ -480,15 +555,16 @@ impl ClientStore {
                 .bind(&turn_id).bind(thread_id).bind(app_turn_id).bind(ordinal).bind(&stamp)
                 .execute(&mut *tx).await?;
         }
-        if sqlx::query_scalar::<_, String>(
+        let item_id = if let Some(item_id) = sqlx::query_scalar::<_, String>(
             "SELECT id FROM items WHERE turn_id=? AND kind='user_message' AND content_text=? LIMIT 1",
         )
         .bind(&turn_id)
         .bind(text)
         .fetch_optional(&mut *tx)
         .await?
-        .is_none()
         {
+            item_id
+        } else {
             let item_id = new_id("itm");
             let item_ordinal: i64 = sqlx::query_scalar(
                 "SELECT COALESCE(MAX(ordinal),0)+1 FROM items WHERE turn_id=?",
@@ -497,8 +573,19 @@ impl ClientStore {
             .fetch_one(&mut *tx)
             .await?;
             sqlx::query("INSERT INTO items(id,turn_id,ordinal,kind,status,content_text,occurred_at,completed_at) VALUES(?,?,?,'user_message','completed',?,?,?)")
-                .bind(item_id).bind(&turn_id).bind(item_ordinal).bind(text).bind(&stamp).bind(&stamp)
+                .bind(&item_id).bind(&turn_id).bind(item_ordinal).bind(text).bind(&stamp).bind(&stamp)
                 .execute(&mut *tx).await?;
+            item_id
+        };
+        for (index, attachment) in attachments.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO item_attachments(item_id,attachment_id,ordinal) VALUES(?,?,?)",
+            )
+            .bind(&item_id)
+            .bind(&attachment.id)
+            .bind(index as i64 + 1)
+            .execute(&mut *tx)
+            .await?;
         }
         sqlx::query(
             "UPDATE threads SET status='active',last_activity_at=?,updated_at=? WHERE id=?",
@@ -511,6 +598,7 @@ impl ClientStore {
         tx.commit().await?;
         Ok(turn_id)
     }
+
     pub async fn mark_app_turn_started(
         &self,
         thread_id: &str,
@@ -569,6 +657,60 @@ impl ClientStore {
         .await?;
         tx.commit().await?;
         Ok(turn_id)
+    }
+
+    pub async fn upsert_attachment(
+        &self,
+        thread_id: &str,
+        attachment: &AttachmentRef,
+        local_path: &Path,
+    ) -> Result<AttachmentView> {
+        sqlx::query("INSERT INTO attachments(id,thread_id,original_name,mime_type,extension,byte_size,sha256,width,height,local_path,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET thread_id=excluded.thread_id,original_name=excluded.original_name,mime_type=excluded.mime_type,extension=excluded.extension,byte_size=excluded.byte_size,sha256=excluded.sha256,width=excluded.width,height=excluded.height,local_path=excluded.local_path")
+            .bind(&attachment.id).bind(thread_id).bind(&attachment.original_name).bind(&attachment.mime_type)
+            .bind(&attachment.extension).bind(attachment.byte_size).bind(&attachment.sha256)
+            .bind(i64::from(attachment.width)).bind(i64::from(attachment.height))
+            .bind(local_path.to_string_lossy().as_ref()).bind(now()).execute(&self.pool).await?;
+        Ok(AttachmentView {
+            id: attachment.id.clone(),
+            original_name: attachment.original_name.clone(),
+            mime_type: attachment.mime_type.clone(),
+            byte_size: attachment.byte_size,
+            sha256: attachment.sha256.clone(),
+            width: attachment.width,
+            height: attachment.height,
+        })
+    }
+
+    pub async fn attachment_ref(
+        &self,
+        attachment_id: &str,
+    ) -> Result<Option<(String, AttachmentRef)>> {
+        let row = sqlx::query("SELECT * FROM attachments WHERE id=?")
+            .bind(attachment_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|row| {
+            let view = attachment_view_from_row(&row);
+            (
+                row.get("thread_id"),
+                AttachmentRef {
+                    id: view.id,
+                    original_name: view.original_name,
+                    mime_type: view.mime_type,
+                    extension: row.get("extension"),
+                    byte_size: view.byte_size,
+                    sha256: view.sha256,
+                    width: view.width,
+                    height: view.height,
+                },
+            )
+        }))
+    }
+
+    async fn item_attachments(&self, item_id: &str) -> Result<Vec<AttachmentView>> {
+        let rows = sqlx::query("SELECT a.* FROM item_attachments ia JOIN attachments a ON a.id=ia.attachment_id WHERE ia.item_id=? ORDER BY ia.ordinal")
+            .bind(item_id).fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(attachment_view_from_row).collect())
     }
     pub async fn record_agent_message(
         &self,
@@ -654,6 +796,9 @@ impl ClientStore {
             sqlx::query("UPDATE turns SET status=?,completed_at=? WHERE id=(SELECT id FROM turns WHERE thread_id=? ORDER BY ordinal DESC LIMIT 1)")
                 .bind(status).bind(&stamp).bind(thread_id).execute(&mut *tx).await?;
         }
+        // A Codex thread has at most one executing turn. Once the authoritative
+        // completion arrives, any other non-terminal row is a stale projection,
+        // not evidence that work is still running.
         sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE thread_id=? AND status IN ('active','running','inProgress')")
             .bind(&stamp)
             .bind(thread_id)
@@ -669,11 +814,20 @@ impl ClientStore {
         Ok(())
     }
     pub async fn import_app_thread(&self, project_id: &str, thread: &Value) -> Result<String> {
+        self.import_provider_thread(AgentProvider::Codex, project_id, thread)
+            .await
+    }
+    pub async fn import_provider_thread(
+        &self,
+        provider: AgentProvider,
+        project_id: &str,
+        thread: &Value,
+    ) -> Result<String> {
         let app_id = thread
             .get("id")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("App Server thread has no id"))?;
-        if let Some(id) = self.local_thread_id(app_id).await? {
+        if let Some(id) = self.local_provider_thread_id(provider, app_id).await? {
             self.update_imported_thread(&id, thread).await?;
             return Ok(id);
         }
@@ -681,8 +835,8 @@ impl ClientStore {
         let title = imported_thread_title(thread);
         let stamp = unix_value_to_rfc3339(thread.get("updatedAt")).unwrap_or_else(now);
         let status = value_status(thread.get("status"), "idle");
-        sqlx::query("INSERT INTO threads(id,project_id,app_server_thread_id,title,status,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
-            .bind(&id).bind(project_id).bind(app_id).bind(title).bind(status).bind(&stamp).bind(&stamp).bind(&stamp)
+        sqlx::query("INSERT INTO threads(id,project_id,provider,app_server_thread_id,title,status,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
+            .bind(&id).bind(project_id).bind(provider.as_str()).bind(app_id).bind(title).bind(status).bind(&stamp).bind(&stamp).bind(&stamp)
             .execute(&self.pool).await?;
         Ok(id)
     }
@@ -785,9 +939,28 @@ impl ClientStore {
                 // ordinal so re-imports cannot reshuffle what the live path already persisted.
                 sqlx::query("INSERT INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,revision,content_text,structured_detail,occurred_at,completed_at) VALUES(?,?,NULLIF(?,''),COALESCE((SELECT MAX(ordinal)+1 FROM items WHERE turn_id=?),1),?,'completed',1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET app_server_item_id=COALESCE(excluded.app_server_item_id,items.app_server_item_id),kind=excluded.kind,content_text=excluded.content_text,structured_detail=excluded.structured_detail,completed_at=COALESCE(excluded.completed_at,items.completed_at),revision=CASE WHEN items.app_server_item_id IS NOT COALESCE(excluded.app_server_item_id,items.app_server_item_id) OR items.kind IS NOT excluded.kind OR items.content_text IS NOT excluded.content_text OR items.structured_detail IS NOT excluded.structured_detail OR (excluded.completed_at IS NOT NULL AND items.completed_at IS NOT excluded.completed_at) THEN items.revision+1 ELSE items.revision END")
                     .bind(&item_id).bind(&turn_id).bind(app_item).bind(&turn_id).bind(kind).bind(text).bind(serde_json::to_string(item)?).bind(&stamp).bind(&completed).execute(&mut *tx).await?;
+                if kind == "user_message" {
+                    for path in app_item_local_image_paths(item) {
+                        let attachment_id: Option<String> = sqlx::query_scalar(
+                            "SELECT id FROM attachments WHERE thread_id=? AND local_path=?",
+                        )
+                        .bind(thread_id)
+                        .bind(path)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                        if let Some(attachment_id) = attachment_id {
+                            sqlx::query("INSERT OR IGNORE INTO item_attachments(item_id,attachment_id,ordinal) VALUES(?,?,COALESCE((SELECT MAX(ordinal)+1 FROM item_attachments WHERE item_id=?),1))")
+                                .bind(&item_id).bind(attachment_id).bind(&item_id)
+                                .execute(&mut *tx).await?;
+                        }
+                    }
+                }
             }
             tx.commit().await?;
         }
+        // `thread/read` is the upstream snapshot. Persist its thread status and
+        // collapse contradictory historical turn flags before exposing the
+        // snapshot to either frontend.
         let stamp = now();
         let thread_status = value_status(thread.get("status"), "idle");
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -889,6 +1062,7 @@ impl ClientStore {
                         is_truncated: content_truncated || detail_truncated,
                         occurred_at: item.get("occurred_at"),
                         completed_at: item.get("completed_at"),
+                        attachments: self.item_attachments(&item.get::<String, _>("id")).await?,
                     }),
                 });
             }
@@ -1113,11 +1287,53 @@ impl ClientStore {
         request_id: &Value,
         method: &str,
         params: &Value,
+        project_id: Option<&str>,
+        thread_id: Option<&str>,
     ) -> Result<()> {
-        sqlx::query("INSERT OR IGNORE INTO pending_app_requests(approval_id,app_request_id,method,params,status,created_at) VALUES(?,?,?,?,'pending',?)").bind(approval_id).bind(request_id.to_string()).bind(method).bind(serde_json::to_string(params)?).bind(now()).execute(&self.pool).await?;
+        self.save_provider_request(
+            AgentProvider::Codex,
+            approval_id,
+            request_id,
+            method,
+            params,
+            project_id,
+            thread_id,
+        )
+        .await
+    }
+    pub async fn save_provider_request(
+        &self,
+        provider: AgentProvider,
+        approval_id: &str,
+        request_id: &Value,
+        method: &str,
+        params: &Value,
+        project_id: Option<&str>,
+        thread_id: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO pending_app_requests(approval_id,app_request_id,method,params,project_id,thread_id,status,created_at,provider) VALUES(?,?,?,?,?,?,'pending',?,?)")
+            .bind(approval_id)
+            .bind(request_id.to_string())
+            .bind(method)
+            .bind(serde_json::to_string(params)?)
+            .bind(project_id)
+            .bind(thread_id)
+            .bind(now())
+            .bind(provider.as_str())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
     pub async fn claim_app_request(&self, approval_id: &str) -> Result<Option<(Value, String)>> {
+        Ok(self
+            .claim_provider_request(approval_id)
+            .await?
+            .map(|(_, request_id, method)| (request_id, method)))
+    }
+    pub async fn claim_provider_request(
+        &self,
+        approval_id: &str,
+    ) -> Result<Option<(AgentProvider, Value, String)>> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let claimed = sqlx::query("UPDATE pending_app_requests SET status='responding' WHERE approval_id=? AND status='pending'")
             .bind(approval_id).execute(&mut *tx).await?.rows_affected();
@@ -1126,7 +1342,7 @@ impl ClientStore {
             return Ok(None);
         }
         let row = sqlx::query(
-            "SELECT app_request_id,method FROM pending_app_requests WHERE approval_id=?",
+            "SELECT provider,app_request_id,method FROM pending_app_requests WHERE approval_id=?",
         )
         .bind(approval_id)
         .fetch_optional(&mut *tx)
@@ -1134,18 +1350,120 @@ impl ClientStore {
         tx.commit().await?;
         row.map(|r| {
             Ok((
+                provider_from_str(&r.get::<String, _>("provider")),
                 serde_json::from_str(&r.get::<String, _>("app_request_id"))?,
                 r.get("method"),
             ))
         })
         .transpose()
     }
-    pub async fn finish_app_request(&self, approval_id: &str, status: &str) -> Result<()> {
+    pub async fn approval_thread(&self, approval_id: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar::<_, Option<String>>(
+            "SELECT thread_id FROM pending_app_requests WHERE approval_id=?",
+        )
+        .bind(approval_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten())
+    }
+    pub async fn finish_app_request(
+        &self,
+        approval_id: &str,
+        status: &str,
+        decision: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
         if !matches!(status, "decided" | "unknown") {
             anyhow::bail!("invalid approval status")
         }
-        sqlx::query("UPDATE pending_app_requests SET status=?,decided_at=? WHERE approval_id=? AND status='responding'").bind(status).bind(now()).bind(approval_id).execute(&self.pool).await?;
+        sqlx::query("UPDATE pending_app_requests SET status=?,decided_at=?,decision=COALESCE(?,decision),error_message=? WHERE approval_id=? AND status='responding'")
+            .bind(status)
+            .bind(now())
+            .bind(decision)
+            .bind(error_message)
+            .bind(approval_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
+    }
+    pub async fn list_approvals(&self, device_id: &str) -> Result<Vec<ApprovalView>> {
+        let rows =
+            sqlx::query("SELECT * FROM pending_app_requests ORDER BY created_at DESC LIMIT 500")
+                .fetch_all(&self.pool)
+                .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ApprovalView {
+                    id: row.get("approval_id"),
+                    device_id: device_id.to_owned(),
+                    project_id: row.get("project_id"),
+                    thread_id: row.get("thread_id"),
+                    method: row.get("method"),
+                    params: serde_json::from_str(&row.get::<String, _>("params"))?,
+                    status: row.get("status"),
+                    requested_at: row.get("created_at"),
+                    decided_at: row.get("decided_at"),
+                    decision: row.get("decision"),
+                })
+            })
+            .collect()
+    }
+    pub async fn append_browser_event(&self, event: &NuntiusEvent) -> Result<i64> {
+        let encoded = serde_json::to_string(event)?;
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO browser_event_journal(event_id,payload,created_at) VALUES(?,?,?)",
+        )
+        .bind(&event.event_id)
+        .bind(&encoded)
+        .bind(&event.occurred_at)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() > 0 {
+            return Ok(result.last_insert_rowid());
+        }
+        Ok(
+            sqlx::query_scalar("SELECT cursor FROM browser_event_journal WHERE event_id=?")
+                .bind(&event.event_id)
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+    pub async fn browser_event_cursor(&self, event_id: &str) -> Result<Option<i64>> {
+        Ok(
+            sqlx::query_scalar("SELECT cursor FROM browser_event_journal WHERE event_id=?")
+                .bind(event_id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+    pub async fn browser_event_bounds(&self) -> Result<(Option<i64>, Option<i64>)> {
+        let row = sqlx::query(
+            "SELECT MIN(cursor) minimum,MAX(cursor) maximum FROM browser_event_journal",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((row.get("minimum"), row.get("maximum")))
+    }
+    pub async fn replay_browser_events(
+        &self,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<(i64, NuntiusEvent)>> {
+        let rows = sqlx::query(
+            "SELECT cursor,payload FROM browser_event_journal WHERE cursor>? ORDER BY cursor LIMIT ?",
+        )
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.get("cursor"),
+                    serde_json::from_str(&row.get::<String, _>("payload"))?,
+                ))
+            })
+            .collect()
     }
     pub async fn counts(&self) -> Result<(i64, i64, i64, i64)> {
         let projects = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE status='active'")
@@ -1209,6 +1527,7 @@ fn thread_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ThreadSummary
         id: r.get("id"),
         device_id: device_id.into(),
         project_id: r.get("project_id"),
+        provider: provider_from_str(&r.get::<String, _>("provider")),
         app_server_thread_id: r.get("app_server_thread_id"),
         title: r.get("title"),
         status: r.get("status"),
@@ -1216,6 +1535,26 @@ fn thread_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ThreadSummary
         history_completeness: HistoryCompleteness::Complete,
         last_synced_at: None,
         last_activity_at: r.get("last_activity_at"),
+    }
+}
+
+fn provider_from_str(value: &str) -> AgentProvider {
+    if value == "kimi" {
+        AgentProvider::Kimi
+    } else {
+        AgentProvider::Codex
+    }
+}
+
+fn attachment_view_from_row(r: &sqlx::sqlite::SqliteRow) -> AttachmentView {
+    AttachmentView {
+        id: r.get("id"),
+        original_name: r.get("original_name"),
+        mime_type: r.get("mime_type"),
+        byte_size: r.get("byte_size"),
+        sha256: r.get("sha256"),
+        width: r.get::<i64, _>("width") as u32,
+        height: r.get::<i64, _>("height") as u32,
     }
 }
 
@@ -1262,6 +1601,16 @@ fn app_item_text(item: &Value) -> Option<String> {
         .filter_map(|part| part.get("text").and_then(Value::as_str))
         .collect::<Vec<_>>();
     (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+fn app_item_local_image_paths(item: &Value) -> Vec<&str> {
+    item.get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("localImage"))
+        .filter_map(|part| part.get("path").and_then(Value::as_str))
+        .collect()
 }
 
 fn normalize_item_kind(kind: &str) -> &str {
@@ -1546,7 +1895,7 @@ mod tests {
             Some("app_thread_rebound")
         );
         store
-            .record_user_turn("thr_test", Some("app_turn"), "hello")
+            .record_user_turn("thr_test", Some("app_turn"), "hello", &[])
             .await
             .unwrap();
         store
@@ -1709,13 +2058,15 @@ mod tests {
                 &json!(42),
                 "item/commandExecution/requestApproval",
                 &json!({}),
+                None,
+                None,
             )
             .await
             .unwrap();
         assert!(store.claim_app_request("apr_test").await.unwrap().is_some());
         assert!(store.claim_app_request("apr_test").await.unwrap().is_none());
         store
-            .finish_app_request("apr_test", "decided")
+            .finish_app_request("apr_test", "decided", Some("accept"), None)
             .await
             .unwrap();
 

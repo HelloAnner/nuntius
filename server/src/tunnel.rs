@@ -224,6 +224,8 @@ async fn run_socket(
                     "history.v1".into(),
                     "directory-browser.v1".into(),
                     "project-delete.v1".into(),
+                    "image-input.v1".into(),
+                    "agent-provider.v1".into(),
                 ],
             })
             .await?;

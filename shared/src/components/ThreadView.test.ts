@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { LiveItem, LiveTurn } from "../stream";
+import { ThreadLiveStore, type LiveItem, type LiveTurn } from "../stream";
 import type { HistoryGroup } from "./ThreadView";
 import {
   liveTurnIsInHistory,
@@ -9,7 +9,7 @@ import {
 } from "./ThreadView";
 
 function item(key: string, kind: LiveItem["kind"], text: string): LiveItem {
-  return { key, kind, text, title: "", status: "completed", files: [] };
+  return { key, kind, text, title: "", status: "completed", files: [], attachments: [] };
 }
 
 function turn(overrides: Partial<LiveTurn> = {}): LiveTurn {
@@ -17,6 +17,8 @@ function turn(overrides: Partial<LiveTurn> = {}): LiveTurn {
     id: "trn_live",
     status: "running",
     userText: "帮我检查一下",
+    userAttachments: [],
+    clientMessageId: null,
     sendState: "completed",
     sendErrorCode: null,
     sendErrorMessage: null,
@@ -41,12 +43,13 @@ function historyGroup(
       completedAt: null,
     },
     items: [
-      { id: "itm_user", kind: "user_message", text, status: "completed" },
+      { id: "itm_user", kind: "user_message", text, status: "completed", attachments: [] },
       ...agentTexts.map((agentText, index) => ({
         id: `itm_agent_${index}`,
         kind: "agent_message" as const,
         text: agentText,
         status: "completed",
+        attachments: [],
       })),
     ],
   };
@@ -127,5 +130,39 @@ describe("ThreadView live/history reconciliation", () => {
       "itm_user",
       "itm_agent_0",
     ]);
+  });
+
+  test("replaces an image steer provisional turn with one inline echo", () => {
+    const store = new ThreadLiveStore();
+    const attachment = {
+      id: "att_one",
+      originalName: "one.png",
+      mimeType: "image/png",
+      byteSize: 123,
+      sha256: "a".repeat(64),
+      width: 20,
+      height: 10,
+    };
+    store.addOptimistic("thr", "pending", "", [attachment], "client-one");
+    store.apply({
+      eventId: "evt-steer",
+      userId: null,
+      deviceId: "dev",
+      projectId: "prj",
+      threadId: "thr",
+      turnId: "turn-active",
+      streamId: "stream",
+      seq: 1,
+      eventType: "turn.steered",
+      durability: "durable",
+      occurredAt: "2026-07-19T10:00:00.000Z",
+      payload: { text: "", attachments: [attachment], clientMessageId: "client-one" },
+    });
+
+    const live = store.get("thr");
+    expect(live.turns).toHaveLength(1);
+    expect(live.turns[0].id.startsWith("local:")).toBe(false);
+    expect(live.turns[0].items).toHaveLength(1);
+    expect(live.turns[0].items[0].attachments).toEqual([attachment]);
   });
 });

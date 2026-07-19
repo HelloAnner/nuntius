@@ -1,6 +1,9 @@
 /* Remote console API client (public server, /api/v1). */
 import {
   newIdemKey,
+  type AttachmentView,
+  type AgentProvider,
+  type ConversationAccessMode,
   type CommandReceipt,
   type CommandView,
   type DeviceSummary,
@@ -10,6 +13,7 @@ import {
   type PairingCodeView,
   type ProjectSummary,
   type ServerInfo,
+  type SyncSnapshot,
   type ThreadSummary,
   type WebSessionView,
 } from "@nuntius/shared";
@@ -49,6 +53,45 @@ export function setCsrfProvider(fn: CsrfProvider) {
   csrfProvider = fn;
 }
 
+function uploadAttachment(
+  threadId: string,
+  file: File,
+  onProgress: (progress: number) => void,
+): Promise<AttachmentView> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/v1/threads/${encodeURIComponent(threadId)}/attachments`);
+    xhr.withCredentials = true;
+    xhr.timeout = 90_000;
+    const csrf = csrfProvider();
+    if (csrf) xhr.setRequestHeader("x-csrf-token", csrf);
+    xhr.setRequestHeader("idempotency-key", newIdemKey());
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    xhr.onerror = () => reject(new ApiError(0, "network", "图片上传失败，请检查网络", true));
+    xhr.ontimeout = () => reject(new ApiError(0, "timeout", "图片上传超时，请重试", true));
+    xhr.onload = () => {
+      let body: unknown = null;
+      try { body = JSON.parse(xhr.responseText); } catch { /* handled below */ }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body as AttachmentView);
+        return;
+      }
+      const detail = body as { error?: { code?: string; message?: string; retryable?: boolean } } | null;
+      reject(new ApiError(
+        xhr.status,
+        detail?.error?.code ?? "upload_failed",
+        detail?.error?.message ?? `图片上传失败（${xhr.status}）`,
+        detail?.error?.retryable ?? false,
+      ));
+    };
+    const form = new FormData();
+    form.append("file", file, file.name);
+    xhr.send(form);
+  });
+}
+
 async function req<T>(
   method: string,
   path: string,
@@ -81,6 +124,7 @@ async function req<T>(
 
 export const api = {
   info: () => req<ServerInfo>("GET", "/info"),
+  sync: () => req<SyncSnapshot>("GET", "/sync"),
   session: () => req<WebSessionView>("GET", "/auth/session"),
   login: (loginName: string, password: string) =>
     req<WebSessionView>("POST", "/auth/login", { loginName, password }),
@@ -109,11 +153,11 @@ export const api = {
 
   projectThreads: (deviceId: string, projectId: string) =>
     req<ThreadSummary[]>("GET", `/devices/${deviceId}/projects/${projectId}/threads`),
-  createThread: (deviceId: string, projectId: string, title: string | null, firstMessage: string | null, options: Record<string, unknown>, idemKey: string) =>
+  createThread: (deviceId: string, projectId: string, title: string | null, firstMessage: string | null, provider: AgentProvider, accessMode: ConversationAccessMode, idemKey: string) =>
     req<CommandReceipt>(
       "POST",
       `/devices/${deviceId}/projects/${projectId}/threads`,
-      { title, firstMessage, options },
+      { title, firstMessage, provider, accessMode, options: {} },
       { idemKey },
     ),
 
@@ -123,10 +167,13 @@ export const api = {
   historyItems: (turnId: string, limit = 500) =>
     req<HistoryItemView[]>("GET", `/turns/${turnId}/items?limit=${limit}`),
 
-  startTurn: (threadId: string, text: string, options: Record<string, unknown>, idemKey: string) =>
-    req<CommandReceipt>("POST", `/threads/${threadId}/turns`, { text, options }, { idemKey }),
-  steerTurn: (threadId: string, text: string, idemKey: string) =>
-    req<CommandReceipt>("POST", `/threads/${threadId}/steer`, { text }, { idemKey }),
+  uploadAttachment,
+  deleteAttachment: (attachmentId: string) =>
+    req<void>("DELETE", `/attachments/${attachmentId}`),
+  startTurn: (threadId: string, text: string, attachmentIds: string[], clientMessageId: string, accessMode: ConversationAccessMode, idemKey: string) =>
+    req<CommandReceipt>("POST", `/threads/${threadId}/turns`, { text, attachmentIds, clientMessageId, accessMode, options: {} }, { idemKey }),
+  steerTurn: (threadId: string, text: string, attachmentIds: string[], clientMessageId: string, idemKey: string) =>
+    req<CommandReceipt>("POST", `/threads/${threadId}/steer`, { text, attachmentIds, clientMessageId }, { idemKey }),
   interruptTurn: (threadId: string) =>
     req<CommandReceipt>("POST", `/threads/${threadId}/interrupt`),
   archiveThread: (threadId: string, archived = true) =>

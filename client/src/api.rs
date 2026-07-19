@@ -1,11 +1,12 @@
 use crate::{
-    assets, command_queue, directory, error::ApiError, executor::CommandExecutor, protocol::*,
+    assets, attachments, command_queue, directory, error::ApiError, executor::CommandExecutor,
+    protocol::*,
 };
 use async_stream::stream;
 use axum::{
     Json, Router,
     extract::{Path, Query, Request, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{
         IntoResponse, Response, Sse,
@@ -23,6 +24,7 @@ pub fn router(executor: CommandExecutor) -> Router {
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/api/v1/info", get(info))
+        .route("/api/v1/sync", get(sync_snapshot))
         .route("/api/v1/openapi.yaml", get(openapi))
         .route("/api/v1/directories/roots", get(directory_roots))
         .route("/api/v1/directories", get(directory_list))
@@ -34,6 +36,14 @@ pub fn router(executor: CommandExecutor) -> Router {
         )
         .route("/api/v1/threads", get(threads))
         .route("/api/v1/threads/{thread_id}/history", get(history))
+        .route(
+            "/api/v1/attachments/{attachment_id}/content",
+            get(attachment_content),
+        )
+        .route(
+            "/api/v1/attachments/{attachment_id}/thumbnail",
+            get(attachment_thumbnail),
+        )
         .route("/api/v1/threads/{thread_id}/turns", post(start_turn))
         .route("/api/v1/threads/{thread_id}/steer", post(steer_turn))
         .route(
@@ -123,9 +133,31 @@ async fn ready(State(executor): State<CommandExecutor>) -> Result<Json<Value>, A
 }
 async fn info(State(executor): State<CommandExecutor>) -> Result<Json<Value>, ApiError> {
     let (projects, inbox, outbox, active) = executor.store.counts().await?;
+    let providers = executor.agents.statuses().await;
+    let app_server_running = providers
+        .iter()
+        .any(|status| status.provider == AgentProvider::Codex && status.status == "online");
     Ok(Json(
-        json!({"apiVersion":"v1","clientVersion":env!("CARGO_PKG_VERSION"),"buildSha":nuntius_updater::build_sha(),"deviceId":executor.device_id,"paired":executor.config.device_id.is_some(),"localBind":executor.config.local_bind,"appServerRunning":executor.app.is_running().await,"projects":projects,"pendingCommands":inbox,"pendingEvents":outbox,"activeTurns":active,"capabilities":["local-console.v1","directory-browser.v1","project-delete.v1","app-server.v1","sse.v1"]}),
+        json!({"apiVersion":"v1","clientVersion":env!("CARGO_PKG_VERSION"),"buildSha":nuntius_updater::build_sha(),"deviceId":executor.device_id,"paired":executor.config.device_id.is_some(),"localBind":executor.config.local_bind,"appServerRunning":app_server_running,"providers":providers,"projects":projects,"pendingCommands":inbox,"pendingEvents":outbox,"activeTurns":active,"capabilities":["local-console.v1","directory-browser.v1","project-delete.v1","image-input.v1","agent-provider.v1","app-server.v1","sse.v1"]}),
     ))
+}
+async fn sync_snapshot(
+    State(executor): State<CommandExecutor>,
+) -> Result<Json<SyncSnapshot>, ApiError> {
+    // Capture the cursor first so mutations racing the following reads are
+    // replayed by SSE instead of falling between snapshot and subscription.
+    let (_, maximum) = executor.store.browser_event_bounds().await?;
+    Ok(Json(SyncSnapshot {
+        cursor: maximum.unwrap_or(0),
+        generated_at: now(),
+        devices: Vec::new(),
+        projects: executor.store.list_projects(&executor.device_id).await?,
+        threads: executor
+            .store
+            .list_threads_page(&executor.device_id, None, 500, 0)
+            .await?,
+        approvals: executor.store.list_approvals(&executor.device_id).await?,
+    }))
 }
 async fn openapi() -> Response {
     (
@@ -276,6 +308,69 @@ async fn history(
             .await?,
     ))
 }
+
+async fn attachment_content(
+    State(executor): State<CommandExecutor>,
+    Path(attachment_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let (thread_id, attachment) = executor
+        .store
+        .attachment_ref(&attachment_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let root = crate::config::data_dir().map_err(ApiError::Internal)?;
+    serve_attachment_file(
+        attachments::original_path(&root, &thread_id, &attachment.id, &attachment.extension)
+            .map_err(ApiError::Internal)?,
+        &attachment.mime_type,
+    )
+    .await
+}
+
+async fn attachment_thumbnail(
+    State(executor): State<CommandExecutor>,
+    Path(attachment_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let (thread_id, attachment) = executor
+        .store
+        .attachment_ref(&attachment_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let root = crate::config::data_dir().map_err(ApiError::Internal)?;
+    serve_attachment_file(
+        attachments::thumbnail_path(&root, &thread_id, &attachment.id)
+            .map_err(ApiError::Internal)?,
+        "image/webp",
+    )
+    .await
+}
+
+async fn serve_attachment_file(
+    path: std::path::PathBuf,
+    mime_type: &str,
+) -> Result<Response, ApiError> {
+    let bytes = tokio::fs::read(path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ApiError::NotFound
+        } else {
+            ApiError::Internal(error.into())
+        }
+    })?;
+    let content_type = HeaderValue::from_bytes(mime_type.as_bytes())
+        .map_err(|error| ApiError::Internal(error.into()))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static("inline"),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
 async fn start_turn(
     State(executor): State<CommandExecutor>,
     Path(thread_id): Path<String>,
@@ -286,6 +381,7 @@ async fn start_turn(
         DeviceCommandKind::TurnStart {
             thread_id: thread_id.clone(),
             request,
+            attachments: Vec::new(),
         },
         None,
         Some(thread_id),
@@ -302,6 +398,7 @@ async fn steer_turn(
         DeviceCommandKind::TurnSteer {
             thread_id: thread_id.clone(),
             request,
+            attachments: Vec::new(),
         },
         None,
         Some(thread_id),
@@ -424,14 +521,64 @@ async fn run(
         }
     }
 }
+#[derive(Deserialize)]
+struct EventsQuery {
+    after: Option<i64>,
+}
 async fn events(
     State(executor): State<CommandExecutor>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    headers: HeaderMap,
+    Query(query): Query<EventsQuery>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let header_after = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok());
+    let after = header_after.or(query.after).unwrap_or(0);
     let mut receiver = executor.events.subscribe();
-    let output = stream! {loop{match receiver.recv().await{Ok(event)=>yield Ok(Event::default().id(event.event_id.clone()).event("nuntius").json_data(event).expect("serializable event")),Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>yield Ok(Event::default().event("resync_required").data("{}")),Err(_)=>break}}};
-    Sse::new(output).keep_alive(
+    let (minimum, _) = executor.store.browser_event_bounds().await?;
+    let mut resync_required = after > 0
+        && match minimum {
+            Some(minimum) => after.saturating_add(1) < minimum,
+            None => true,
+        };
+    let mut replay = if resync_required {
+        Vec::new()
+    } else {
+        executor.store.replay_browser_events(after, 10_001).await?
+    };
+    if replay.len() > 10_000 {
+        replay.clear();
+        resync_required = true;
+    }
+    let replay_executor = executor.clone();
+    let output = stream! {
+        if resync_required {
+            yield Ok(Event::default().event("resync_required").data("{}"));
+        }
+        for (cursor, event) in replay {
+            yield Ok(Event::default().id(cursor.to_string()).event("nuntius").json_data(event).expect("serializable event"));
+        }
+        loop {
+            match receiver.recv().await {
+                Ok(event) => match replay_executor.store.browser_event_cursor(&event.event_id).await {
+                    Ok(Some(cursor)) => yield Ok(Event::default().id(cursor.to_string()).event("nuntius").json_data(event).expect("serializable event")),
+                    Ok(None) | Err(_) => {
+                        yield Ok(Event::default().event("resync_required").data("{}"));
+                        break;
+                    }
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    yield Ok(Event::default().event("resync_required").data("{}"));
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+    };
+    Ok(Sse::new(output).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keepalive"),
-    )
+    ))
 }

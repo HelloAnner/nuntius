@@ -3,6 +3,7 @@
  * with useSyncExternalStore. */
 
 import type {
+  AttachmentView,
   ApprovalRequestedPayload,
   CommandStatus,
   NuntiusEvent,
@@ -33,6 +34,7 @@ export interface LiveItem {
   text: string;
   status: LiveStatus;
   files: LiveFile[];
+  attachments: AttachmentView[];
 }
 
 export type LiveTurnStatus =
@@ -45,8 +47,12 @@ export type LiveTurnStatus =
 
 export interface LiveTurn {
   id: string;
+  /** React identity remains stable when an optimistic id adopts the server id. */
+  renderKey?: string;
   status: LiveTurnStatus;
   userText: string | null;
+  userAttachments: AttachmentView[];
+  clientMessageId: string | null;
   sendState: CommandStatus | null;
   sendErrorCode: string | null;
   sendErrorMessage: string | null;
@@ -71,6 +77,8 @@ export class ThreadLiveStore {
   private notifyScheduled = false;
   /** commandId -> optimistic echo location */
   private pending = new Map<string, { threadId: string; turnId: string }>();
+  private seenEvents = new Set<string>();
+  private seenEventOrder: string[] = [];
 
   subscribe = (fn: Listener): (() => void) => {
     this.listeners.add(fn);
@@ -85,7 +93,8 @@ export class ThreadLiveStore {
     for (const fn of this.listeners) fn();
   }
 
-  /** Coalesce token deltas into one React update per paint. */
+  /** Coalesce token deltas to a bounded update rate; Markdown parsing at 60fps
+   * is expensive on phones and does not improve perceived streaming quality. */
   private scheduleBump() {
     if (this.notifyScheduled) return;
     this.notifyScheduled = true;
@@ -94,11 +103,7 @@ export class ThreadLiveStore {
       this.notifyScheduled = false;
       this.bump();
     };
-    if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(flush);
-    } else {
-      setTimeout(flush, 16);
-    }
+    setTimeout(flush, 50);
   }
 
   get(threadId: string): ThreadLive {
@@ -110,26 +115,33 @@ export class ThreadLiveStore {
     return t;
   }
 
+  /** Drop disposable realtime overlays before applying a database snapshot. */
+  reset() {
+    this.threads.clear();
+    this.pending.clear();
+    this.seenEvents.clear();
+    this.seenEventOrder = [];
+    this.bump();
+  }
+
   /** optimistic user echo registered right after a 202 receipt */
-  addOptimistic(threadId: string, commandId: string, text: string): string {
+  addOptimistic(
+    threadId: string,
+    commandId: string,
+    text: string,
+    attachments: AttachmentView[] = [],
+    clientMessageId: string | null = null,
+  ): string {
     const live = this.get(threadId);
-    // adopt a race: the authoritative turn.started event may have arrived first
-    for (const t of live.turns) {
-      if (t.userText === text && Date.now() - Date.parse(t.startedAt) < 120_000) {
-        this.pending.set(commandId, { threadId, turnId: t.id });
-        t.sendState = "accepted";
-        t.sendErrorCode = null;
-        t.sendErrorMessage = null;
-        this.bump();
-        return t.id;
-      }
-    }
     const turnId = `local:${commandId}`;
     if (!live.byId[turnId]) {
       const turn: LiveTurn = {
         id: turnId,
+        renderKey: turnId,
         status: "running",
         userText: text,
+        userAttachments: attachments,
+        clientMessageId,
         sendState: "accepted",
         sendErrorCode: null,
         sendErrorMessage: null,
@@ -187,25 +199,80 @@ export class ThreadLiveStore {
   }
 
   /** optimistic echo for a steer sent mid-turn; rendered inline in order */
-  appendSteerEcho(threadId: string, text: string) {
+  appendSteerEcho(
+    threadId: string,
+    text: string,
+    attachments: AttachmentView[] = [],
+    clientMessageId: string | null = null,
+  ) {
     const turn = this.currentTurn(threadId, null) ?? this.ensureTurn(threadId, null);
     const key = `steer:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
     const item = this.ensureItem(turn, key, "user");
     item.text = text;
+    item.attachments = attachments;
+    item.title = clientMessageId ?? "";
     item.status = "completed";
     this.bump();
   }
 
-  /** drop optimistic echoes once the authoritative turn event arrives */
-  private adoptOptimistic(threadId: string, realTurnId: string, text: string | null): LiveTurn {
+  private consumeSteerOptimistic(
+    threadId: string,
+    text: string,
+    clientMessageId: string | null,
+  ): { text: string; attachments: AttachmentView[] } | null {
     const live = this.get(threadId);
-    if (text) {
+    const pendingIds = new Set(
+      [...this.pending.values()]
+        .filter((location) => location.threadId === threadId)
+        .map((location) => location.turnId),
+    );
+    const optimistic = live.turns.find((turn) =>
+      turn.id.startsWith("local:")
+      && pendingIds.has(turn.id)
+      && (clientMessageId
+        ? turn.clientMessageId === clientMessageId
+        : turn.userText === text),
+    );
+    if (!optimistic) return null;
+    delete live.byId[optimistic.id];
+    live.turns = live.turns.filter((turn) => turn !== optimistic);
+    for (const [commandId, location] of this.pending) {
+      if (location.threadId === threadId && location.turnId === optimistic.id) {
+        this.pending.delete(commandId);
+      }
+    }
+    return {
+      text: optimistic.userText ?? "",
+      attachments: optimistic.userAttachments,
+    };
+  }
+
+  /** drop optimistic echoes once the authoritative turn event arrives */
+  private adoptOptimistic(
+    threadId: string,
+    realTurnId: string,
+    text: string | null,
+    clientMessageId: string | null = null,
+  ): LiveTurn {
+    const live = this.get(threadId);
+    if (text || clientMessageId) {
+      const pendingIds = new Set(
+        [...this.pending.values()]
+          .filter((location) => location.threadId === threadId)
+          .map((location) => location.turnId),
+      );
       for (const t of live.turns) {
-        if (t.id.startsWith("local:") && t.userText === text) {
+        if (
+          t.id.startsWith("local:") &&
+          pendingIds.has(t.id) &&
+          (clientMessageId ? t.clientMessageId === clientMessageId : t.userText === text) &&
+          t.items.length === 0
+        ) {
           const optimisticId = t.id;
           delete live.byId[optimisticId];
           const idx = live.turns.indexOf(t);
           t.id = realTurnId;
+          t.renderKey ??= optimisticId;
           live.byId[realTurnId] = t;
           if (idx >= 0) live.turns[idx] = t;
           for (const loc of this.pending.values()) {
@@ -223,6 +290,8 @@ export class ThreadLiveStore {
         id: realTurnId,
         status: "running",
         userText: text,
+        userAttachments: [],
+        clientMessageId,
         sendState: null,
         sendErrorCode: null,
         sendErrorMessage: null,
@@ -237,6 +306,13 @@ export class ThreadLiveStore {
   }
 
   apply(event: NuntiusEvent) {
+    if (this.seenEvents.has(event.eventId)) return;
+    this.seenEvents.add(event.eventId);
+    this.seenEventOrder.push(event.eventId);
+    if (this.seenEventOrder.length > 5_000) {
+      const expired = this.seenEventOrder.splice(0, 1_000);
+      for (const id of expired) this.seenEvents.delete(id);
+    }
     const threadId = event.threadId;
     if (!threadId) return;
     const type = event.eventType;
@@ -245,11 +321,34 @@ export class ThreadLiveStore {
     if (type === "turn.started") {
       const p = event.payload as TurnStartedPayload;
       const turnId = event.turnId ?? `anon:${event.eventId}`;
-      const turn = this.adoptOptimistic(threadId, turnId, p?.text ?? null);
+      const turn = this.adoptOptimistic(
+        threadId,
+        turnId,
+        p?.text ?? null,
+        p?.clientMessageId ?? null,
+      );
       turn.status = "running";
       if (p?.text) turn.userText = p.text;
+      if (p?.attachments) turn.userAttachments = p.attachments;
+      if (p?.clientMessageId) turn.clientMessageId = p.clientMessageId;
       turn.sendState = "completed";
       this.bump();
+      return;
+    }
+    if (type === "turn.steered") {
+      const text = typeof payload.text === "string" ? payload.text : "";
+      const clientMessageId = typeof payload.clientMessageId === "string"
+        ? payload.clientMessageId
+        : null;
+      const optimistic = this.consumeSteerOptimistic(threadId, text, clientMessageId);
+      this.appendSteerEcho(
+        threadId,
+        text || optimistic?.text || "",
+        Array.isArray(payload.attachments)
+          ? payload.attachments as AttachmentView[]
+          : optimistic?.attachments ?? [],
+        clientMessageId,
+      );
       return;
     }
     if (type === "approval.requested") {
@@ -258,6 +357,67 @@ export class ThreadLiveStore {
       if (turn) turn.status = "waiting_approval";
       void p;
       this.bump();
+      return;
+    }
+    if (type.startsWith("agent.")) {
+      const method = type.slice("agent.".length).toLowerCase();
+      if (method === "turn.started") {
+        const turn = this.ensureTurn(threadId, event.turnId);
+        turn.status = "running";
+        this.bump();
+        return;
+      }
+      if (method === "turn.ended") {
+        const turn = this.ensureTurn(threadId, event.turnId);
+        const reason = str(payload.reason)?.toLowerCase();
+        this.finalizeTurn(
+          turn,
+          reason === "cancelled"
+            ? "interrupted"
+            : reason === "failed" || reason === "blocked"
+              ? "failed"
+              : "completed",
+        );
+        this.bump();
+        return;
+      }
+      if (method === "event.session.work_changed") {
+        if (payload.busy === false) {
+          const turn = this.currentTurn(threadId, event.turnId);
+          if (turn) this.finalizeTurn(turn, "completed");
+          this.bump();
+        }
+        return;
+      }
+      if (method === "assistant.delta" || method === "thinking.delta") {
+        const delta = str(payload.delta) ?? "";
+        if (!delta) return;
+        const turn = this.ensureTurn(threadId, event.turnId);
+        const kind: LiveKind = method === "thinking.delta" ? "reasoning" : "agent";
+        const item = this.ensureItem(turn, `${method}:${turn.id}`, kind);
+        item.text += delta;
+        item.status = "running";
+        this.scheduleBump();
+        return;
+      }
+      if (method === "tool.call.started" || method === "tool.progress" || method === "tool.result") {
+        const turn = this.ensureTurn(threadId, event.turnId);
+        const key = str(payload.toolCallId) ?? `tool:${event.eventId}`;
+        const item = this.ensureItem(turn, key, "tool");
+        item.title = str(payload.name) ?? item.title;
+        if (method === "tool.call.started") {
+          item.text = str(payload.description) ?? formatUnknown(payload.args);
+          item.status = "running";
+        } else if (method === "tool.progress") {
+          const update = str(payload.text) ?? str(payload.output);
+          if (update) item.text = update;
+        } else {
+          item.text = (str(payload.output) ?? formatUnknown(payload.output)) || item.text;
+          item.status = payload.isError === true ? "failed" : "completed";
+        }
+        this.bump();
+        return;
+      }
       return;
     }
     if (!type.startsWith("app_server.")) return;
@@ -383,6 +543,7 @@ export class ThreadLiveStore {
       text: "",
       status: "running",
       files: [],
+      attachments: [],
     };
     turn.itemIndex[key] = turn.items.length;
     turn.items.push(item);
@@ -493,4 +654,14 @@ function statusOfItem(item: Record<string, unknown>): LiveStatus {
   if (s.includes("progress") || s.includes("running")) return "running";
   if (s.includes("unknown")) return "unknown";
   return "completed";
+}
+
+function formatUnknown(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
