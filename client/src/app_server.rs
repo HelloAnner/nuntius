@@ -15,6 +15,24 @@ use tokio::{
     sync::{Mutex, broadcast, mpsc, oneshot},
 };
 
+#[derive(Debug, thiserror::Error)]
+#[error("App Server {method} failed with code {code}: {message}")]
+pub struct AppServerCallError {
+    pub method: String,
+    pub code: String,
+    pub message: String,
+}
+
+impl AppServerCallError {
+    pub fn is_missing_thread(&self) -> bool {
+        let message = self.message.to_ascii_lowercase();
+        self.code == "-32600"
+            && (message.contains("no rollout found for thread id")
+                || message.contains("thread not found")
+                || message.contains("unknown thread"))
+    }
+}
+
 #[derive(Clone)]
 pub struct AppServerRuntime {
     config: Arc<ClientConfig>,
@@ -274,7 +292,12 @@ impl AppSessionHandle {
                 .unwrap_or("unknown error")
                 .replace(['\r', '\n'], " ");
             let message: String = message.chars().take(500).collect();
-            bail!("App Server {method} failed with code {code}: {message}")
+            return Err(AppServerCallError {
+                method: method.into(),
+                code,
+                message,
+            }
+            .into());
         }
         Ok(response.get("result").cloned().unwrap_or(Value::Null))
     }

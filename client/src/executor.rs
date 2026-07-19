@@ -1,5 +1,9 @@
 use crate::{
-    app_server::AppServerRuntime, config::ClientConfig, directory, protocol::*, store::ClientStore,
+    app_server::{AppServerCallError, AppServerRuntime},
+    config::ClientConfig,
+    directory,
+    protocol::*,
+    store::ClientStore,
 };
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
@@ -179,17 +183,9 @@ impl CommandExecutor {
         project_id: &str,
         request: &CreateThreadRequest,
     ) -> Result<Value> {
-        let project = self
-            .store
-            .project(project_id, &self.device_id)
-            .await?
-            .context("project not found")?;
-        let mut params = object(project.defaults.clone());
-        params.extend(object(request.options.clone()));
-        params.insert("cwd".into(), json!(project.canonical_path));
-        let result = self.app.call("thread/start", Value::Object(params)).await?;
-        let app_id = extract_id(&result, &["thread/id", "threadId", "id"])
-            .context("thread/start response has no thread id")?;
+        let app_id = self
+            .start_app_thread(project_id, request.options.clone())
+            .await?;
         let id = new_id("thr");
         let title = request
             .title
@@ -203,7 +199,7 @@ impl CommandExecutor {
                     .unwrap_or_else(|| "新对话".into())
             });
         self.store
-            .create_thread(&id, project_id, &app_id, &title)
+            .create_thread(&id, project_id, &app_id, &title, &request.options)
             .await?;
         self.sync_thread(&id).await?;
         if let Some(text) = request
@@ -218,14 +214,45 @@ impl CommandExecutor {
             let _ = self.start_turn(&id, &start).await?;
         }
         let thread = self.thread(&id).await?;
-        Ok(json!({"threadId":id,"appServerThreadId":app_id,"thread":thread}))
+        Ok(json!({
+            "threadId": id,
+            "appServerThreadId": thread.app_server_thread_id,
+            "thread": thread
+        }))
+    }
+
+    async fn start_app_thread(&self, project_id: &str, options: Value) -> Result<String> {
+        let project = self
+            .store
+            .project(project_id, &self.device_id)
+            .await?
+            .context("project not found")?;
+        let mut params = object(project.defaults.clone());
+        params.extend(object(options));
+        params.insert("cwd".into(), json!(project.canonical_path));
+        let result = self.app.call("thread/start", Value::Object(params)).await?;
+        extract_id(&result, &["thread/id", "threadId", "id"])
+            .context("thread/start response has no thread id")
     }
 
     async fn start_turn(&self, thread_id: &str, request: &StartTurnRequest) -> Result<Value> {
         if request.text.trim().is_empty() {
             bail!("turn text cannot be empty")
         };
-        let thread = self.command_thread(thread_id).await?;
+        let mut thread = self.command_thread(thread_id).await?;
+        // A new App Server thread has no rollout until its first turn starts.
+        // Calling thread/resume here is therefore invalid; follow the protocol's
+        // thread/start -> turn/start lifecycle directly.
+        if !self.store.thread_has_turns(thread_id).await? {
+            return match self.begin_turn(&thread, request).await {
+                Ok(result) => Ok(result),
+                Err(error) if is_missing_app_thread(&error) => {
+                    thread = self.recreate_empty_app_thread(&thread).await?;
+                    self.begin_turn(&thread, request).await
+                }
+                Err(error) => Err(error),
+            };
+        }
         let state = self.resume_app_thread(&thread).await?;
         if let Some(app_turn) = state.active_turn_id {
             let result = self
@@ -252,6 +279,14 @@ impl CommandExecutor {
                 state.status
             )
         }
+        self.begin_turn(&thread, request).await
+    }
+
+    async fn begin_turn(
+        &self,
+        thread: &ThreadSummary,
+        request: &StartTurnRequest,
+    ) -> Result<Value> {
         let mut params = object(request.options.clone());
         params.insert("threadId".into(), json!(thread.app_server_thread_id));
         params.insert("input".into(), json!([{"type":"text","text":request.text}]));
@@ -259,19 +294,37 @@ impl CommandExecutor {
         let app_turn = extract_id(&result, &["turn/id", "turnId", "id"]);
         let local_turn = self
             .store
-            .record_user_turn(thread_id, app_turn.as_deref(), &request.text)
+            .record_user_turn(&thread.id, app_turn.as_deref(), &request.text)
             .await?;
-        self.sync_thread(thread_id).await?;
+        self.sync_thread(&thread.id).await?;
         self.emit(
             "turn.started",
             Some(&thread.project_id),
-            Some(thread_id),
+            Some(&thread.id),
             Some(&local_turn),
             json!({"text":request.text,"appServerResult":result}),
             true,
         )
         .await?;
         Ok(json!({"operation":"start","turnId":local_turn,"appServerResult":result}))
+    }
+
+    async fn recreate_empty_app_thread(&self, thread: &ThreadSummary) -> Result<ThreadSummary> {
+        if self.store.thread_has_turns(&thread.id).await? {
+            bail!("refusing to replace an App Server thread that already has local history")
+        }
+        let options = self.store.app_server_options(&thread.id).await?;
+        let app_id = self.start_app_thread(&thread.project_id, options).await?;
+        self.store
+            .rebind_app_server_thread(&thread.id, &app_id)
+            .await?;
+        tracing::info!(
+            thread_id = %thread.id,
+            previous_app_thread_id = ?thread.app_server_thread_id,
+            app_thread_id = %app_id,
+            "recreated empty App Server thread after missing rollout"
+        );
+        self.command_thread(&thread.id).await
     }
 
     async fn resume_app_thread(&self, thread: &ThreadSummary) -> Result<ResumedThreadState> {
@@ -904,6 +957,11 @@ struct ResumedThreadState {
     status: String,
     active_turn_id: Option<String>,
 }
+fn is_missing_app_thread(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<AppServerCallError>()
+        .is_some_and(AppServerCallError::is_missing_thread)
+}
 fn derive_title(text: &str) -> String {
     text.chars().take(40).collect()
 }
@@ -1025,4 +1083,140 @@ fn validate_command(kind: &DeviceCommandKind) -> Result<()> {
         | DeviceCommandKind::HistorySync { .. } => {}
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
+    use tempfile::TempDir;
+
+    fn fake_app_server(temp: &TempDir) -> (PathBuf, PathBuf) {
+        let script = temp.path().join("fake-app-server.sh");
+        let calls = temp.path().join("app-server-calls.jsonl");
+        let source = r#"#!/bin/sh
+calls='__CALLS__'
+thread_number=0
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$calls"
+  id=$(printf '%s\n' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"id":%s,"result":{"userAgent":"fake","platformFamily":"unix","platformOs":"test"}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      thread_number=$((thread_number + 1))
+      printf '{"id":%s,"result":{"thread":{"id":"app_new_%s","status":{"type":"idle"}}}}\n' "$id" "$thread_number"
+      ;;
+    *'"method":"thread/resume"'*)
+      printf '{"id":%s,"error":{"code":-32600,"message":"no rollout found for thread id unexpected"}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*'"threadId":"app_missing"'*)
+      printf '{"id":%s,"error":{"code":-32600,"message":"no rollout found for thread id app_missing"}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{"id":%s,"result":{"turn":{"id":"app_turn_1","status":"inProgress"}}}\n' "$id"
+      ;;
+  esac
+done
+"#
+        .replace("__CALLS__", calls.to_string_lossy().as_ref());
+        std::fs::write(&script, source).unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        (script, calls)
+    }
+
+    async fn executor(temp: &TempDir, script: PathBuf) -> CommandExecutor {
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let data = temp.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let store = ClientStore::open(&data).await.unwrap();
+        store
+            .create_project("prj_test", "Test", &workspace, &json!({}))
+            .await
+            .unwrap();
+        let config = ClientConfig {
+            device_id: Some("dev_test".into()),
+            allowed_roots: vec![workspace],
+            codex_command: script.to_string_lossy().into_owned(),
+            codex_args: Vec::new(),
+            ..ClientConfig::default()
+        };
+        let (events, _) = broadcast::channel(64);
+        let (command_acks, _) = broadcast::channel(64);
+        CommandExecutor {
+            config: Arc::new(config.clone()),
+            store,
+            app: AppServerRuntime::new(Arc::new(config)),
+            device_id: "dev_test".into(),
+            events,
+            command_acks,
+            command_notify: Arc::new(Notify::new()),
+            history_import_lock: Arc::new(Mutex::new(())),
+        }
+    }
+
+    #[tokio::test]
+    async fn starts_first_turn_without_resuming_an_unpersisted_thread() {
+        let temp = TempDir::new().unwrap();
+        let (script, calls) = fake_app_server(&temp);
+        let executor = executor(&temp, script).await;
+        let result = executor
+            .create_thread(
+                "prj_test",
+                &CreateThreadRequest {
+                    title: None,
+                    first_message: Some("hello".into()),
+                    options: json!({"sandbox":"danger-full-access"}),
+                },
+            )
+            .await
+            .unwrap();
+        let thread_id = result.get("threadId").and_then(Value::as_str).unwrap();
+        assert!(executor.store.thread_has_turns(thread_id).await.unwrap());
+        let calls = std::fs::read_to_string(calls).unwrap();
+        assert!(calls.contains("\"method\":\"thread/start\""));
+        assert!(calls.contains("\"method\":\"turn/start\""));
+        assert!(!calls.contains("\"method\":\"thread/resume\""));
+        executor.app.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recreates_an_empty_thread_when_its_rollout_is_missing() {
+        let temp = TempDir::new().unwrap();
+        let (script, calls) = fake_app_server(&temp);
+        let executor = executor(&temp, script).await;
+        executor
+            .store
+            .create_thread(
+                "thr_test",
+                "prj_test",
+                "app_missing",
+                "Thread",
+                &json!({"approvalPolicy":"never"}),
+            )
+            .await
+            .unwrap();
+        executor
+            .start_turn(
+                "thr_test",
+                &StartTurnRequest {
+                    text: "retry".into(),
+                    options: json!({}),
+                },
+            )
+            .await
+            .unwrap();
+        let thread = executor.thread("thr_test").await.unwrap();
+        assert_eq!(thread.app_server_thread_id.as_deref(), Some("app_new_1"));
+        assert!(executor.store.thread_has_turns("thr_test").await.unwrap());
+        let calls = std::fs::read_to_string(calls).unwrap();
+        assert_eq!(calls.matches("\"method\":\"turn/start\"").count(), 2);
+        assert_eq!(calls.matches("\"method\":\"thread/start\"").count(), 1);
+        assert!(!calls.contains("\"method\":\"thread/resume\""));
+        executor.app.shutdown().await.unwrap();
+    }
 }

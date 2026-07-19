@@ -247,9 +247,36 @@ impl ClientStore {
         project_id: &str,
         app_id: &str,
         title: &str,
+        app_server_options: &Value,
     ) -> Result<()> {
         let stamp = now();
-        sqlx::query("INSERT INTO threads(id,project_id,app_server_thread_id,title,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").bind(id).bind(project_id).bind(app_id).bind(title).bind(&stamp).bind(&stamp).bind(&stamp).execute(&self.pool).await?;
+        sqlx::query("INSERT INTO threads(id,project_id,app_server_thread_id,title,app_server_options,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)").bind(id).bind(project_id).bind(app_id).bind(title).bind(serde_json::to_string(app_server_options)?).bind(&stamp).bind(&stamp).bind(&stamp).execute(&self.pool).await?;
+        Ok(())
+    }
+    pub async fn thread_has_turns(&self, id: &str) -> Result<bool> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE thread_id=?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count > 0)
+    }
+    pub async fn app_server_options(&self, id: &str) -> Result<Value> {
+        let encoded: String =
+            sqlx::query_scalar("SELECT app_server_options FROM threads WHERE id=?")
+                .bind(id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(serde_json::from_str(&encoded).unwrap_or_else(|_| Value::Object(Default::default())))
+    }
+    pub async fn rebind_app_server_thread(&self, id: &str, app_id: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE threads SET app_server_thread_id=?,status='idle',updated_at=? WHERE id=?",
+        )
+        .bind(app_id)
+        .bind(now())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
     pub async fn set_thread_archived(&self, id: &str, archived: bool) -> Result<()> {
@@ -1014,9 +1041,34 @@ mod tests {
             .await
             .unwrap();
         store
-            .create_thread("thr_test", "prj_test", "app_thread", "Thread")
+            .create_thread(
+                "thr_test",
+                "prj_test",
+                "app_thread",
+                "Thread",
+                &json!({"sandbox":"danger-full-access"}),
+            )
             .await
             .unwrap();
+        assert!(!store.thread_has_turns("thr_test").await.unwrap());
+        assert_eq!(
+            store.app_server_options("thr_test").await.unwrap(),
+            json!({"sandbox":"danger-full-access"})
+        );
+        store
+            .rebind_app_server_thread("thr_test", "app_thread_rebound")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .thread("thr_test", "dev_test")
+                .await
+                .unwrap()
+                .unwrap()
+                .app_server_thread_id
+                .as_deref(),
+            Some("app_thread_rebound")
+        );
         store
             .record_user_turn("thr_test", Some("app_turn"), "hello")
             .await
