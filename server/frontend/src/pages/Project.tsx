@@ -196,7 +196,6 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
             <Empty
               icon={<IconChat size={24} />}
               headline="还没有会话"
-              hint={canCreate ? "发起第一个对话，让这台电脑开始工作。" : "设备离线时不能创建新会话。"}
               action={
                 canCreate ? (
                   <button className="btn primary" onClick={() => setCreating(true)}>

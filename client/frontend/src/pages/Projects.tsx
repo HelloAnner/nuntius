@@ -32,7 +32,6 @@ export function ProjectsPage() {
             <Empty
               icon={<IconFolder size={24} />}
               headline="还没有项目"
-              hint="把本机的一个工作目录登记为项目，Codex 会话会在这个目录中执行。"
               action={
                 <button className="btn primary" onClick={() => setPickerOpen(true)}>
                   <IconPlus size={15} />

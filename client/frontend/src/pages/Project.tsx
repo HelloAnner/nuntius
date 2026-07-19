@@ -102,7 +102,6 @@ export function ProjectPage({ projectId }: { projectId: string }) {
             <Empty
               icon={<IconChat size={24} />}
               headline="还没有会话"
-              hint={canCreate ? "发起第一个对话，让 Codex 在这个项目里开始工作。" : "App Server 未运行时不能创建会话。"}
               action={
                 canCreate ? (
                   <button className="btn primary" onClick={() => setCreating(true)}>

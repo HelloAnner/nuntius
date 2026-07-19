@@ -22,7 +22,6 @@ export function DevicesPage() {
             <Empty
               icon={<IconDevice size={24} />}
               headline="还没有设备"
-              hint="在电脑上用配对码运行 nuntius-client pair，即可把这台电脑接入控制。配对码可在「设置」中生成。"
             />
           ) : (
             <>
@@ -32,9 +31,6 @@ export function DevicesPage() {
                   <DeviceRow key={d.id} device={d} />
                 ))}
               </div>
-              <p style={{ marginTop: 18, fontSize: 12, color: "var(--ink-4)", textAlign: "center" }}>
-                设备离线时仍可阅读已同步的会话历史
-              </p>
             </>
           )}
         </div>

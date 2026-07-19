@@ -66,6 +66,7 @@ export class ThreadLiveStore {
   private threads = new Map<string, ThreadLive>();
   private listeners = new Set<Listener>();
   private version = 0;
+  private notifyScheduled = false;
   /** commandId -> optimistic echo location */
   private pending = new Map<string, { threadId: string; turnId: string }>();
 
@@ -76,8 +77,26 @@ export class ThreadLiveStore {
   getVersion = (): number => this.version;
 
   private bump() {
+    // An immediate state transition supersedes a queued delta repaint.
+    this.notifyScheduled = false;
     this.version += 1;
     for (const fn of this.listeners) fn();
+  }
+
+  /** Coalesce token deltas into one React update per paint. */
+  private scheduleBump() {
+    if (this.notifyScheduled) return;
+    this.notifyScheduled = true;
+    const flush = () => {
+      if (!this.notifyScheduled) return;
+      this.notifyScheduled = false;
+      this.bump();
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(flush);
+    } else {
+      setTimeout(flush, 16);
+    }
   }
 
   get(threadId: string): ThreadLive {
@@ -250,7 +269,7 @@ export class ThreadLiveStore {
       const item = this.ensureItem(turn, key, kind);
       item.text += delta;
       item.status = "running";
-      this.bump();
+      this.scheduleBump();
       return;
     }
 

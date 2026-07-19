@@ -153,11 +153,15 @@ export function ThreadView({
   // actual content box keeps the latest response visible in every case.
   useEffect(() => {
     const content = contentRef.current;
-    if (!content || typeof ResizeObserver === "undefined") return;
+    const scroller = scrollRef.current;
+    if (!content || !scroller || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
       if (stickRef.current) scrollToBottom(false);
     });
     observer.observe(content);
+    // The composer grows and shrinks independently of the transcript. Watching
+    // the viewport as well keeps its bottom edge pinned while typing/sending.
+    observer.observe(scroller);
     return () => observer.disconnect();
   }, [draftKey, scrollToBottom]);
 
@@ -285,7 +289,7 @@ export function ThreadView({
                 fontStyle: "italic",
               }}
             >
-              还没有记录。说点什么，让这台电脑开始工作。
+              暂无消息
             </div>
           ) : null}
           <div style={{ height: 8 }} />

@@ -58,7 +58,6 @@ export function ApprovalsPage() {
             <Empty
               icon={<IconShield size={24} />}
               headline="没有待处理的审批"
-              hint="当 Codex 请求执行敏感操作时，会实时出现在这里。"
             />
           ) : (
             <>

@@ -92,16 +92,6 @@ export function Composer({
           {busy ? <Spinner sm /> : <IconArrowUp size={17} />}
         </button>
       </div>
-      <div className="hint-row">
-        <span>
-          {locked
-            ? (lockedReason ?? "")
-            : running
-              ? "Enter 发送指导 · 红色按钮中断执行"
-              : "Enter 发送 · Shift+Enter 换行"}
-        </span>
-        {text.length > 0 ? <span className="num">{text.length} / 8000</span> : null}
-      </div>
     </div>
   );
 }

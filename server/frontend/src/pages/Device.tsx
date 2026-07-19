@@ -97,11 +97,6 @@ export function DevicePage({ deviceId }: { deviceId: string }) {
                 <Empty
                   icon={<IconFolder size={24} />}
                   headline="还没有项目"
-                  hint={
-                    online
-                      ? "浏览这台电脑上允许访问的目录，选一个作为工作区。"
-                      : "设备离线时无法创建项目。"
-                  }
                   action={
                     online ? (
                       <button className="btn primary" onClick={() => setPickerOpen(true)}>

@@ -48,6 +48,7 @@ pub fn router(executor: CommandExecutor) -> Router {
 
 async fn local_request_guard(request: Request, next: Next) -> Result<Response, StatusCode> {
     let is_api = request.uri().path().starts_with("/api/");
+    let is_event_stream = request.uri().path() == "/api/v1/events";
     let headers = request.headers();
     let host = headers
         .get(header::HOST)
@@ -72,8 +73,19 @@ async fn local_request_guard(request: Request, next: Next) -> Result<Response, S
     if is_api {
         response.headers_mut().insert(
             header::CACHE_CONTROL,
-            "no-store".parse().expect("static header"),
+            if is_event_stream {
+                "no-cache, no-transform"
+            } else {
+                "no-store"
+            }
+            .parse()
+            .expect("static header"),
         );
+        if is_event_stream {
+            response
+                .headers_mut()
+                .insert("x-accel-buffering", "no".parse().expect("static header"));
+        }
         response.headers_mut().insert(
             header::X_CONTENT_TYPE_OPTIONS,
             "nosniff".parse().expect("static header"),

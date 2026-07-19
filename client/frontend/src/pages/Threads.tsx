@@ -31,7 +31,6 @@ export function ThreadsPage() {
             <Empty
               icon={<IconClock size={24} />}
               headline="还没有会话"
-              hint="进入一个项目，发起第一段对话。"
             />
           ) : (
             <div className="list-group">

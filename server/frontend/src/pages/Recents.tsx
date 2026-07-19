@@ -47,7 +47,6 @@ export function RecentsPage() {
             <Empty
               icon={<IconClock size={24} />}
               headline="还没有会话记录"
-              hint="设备同步上来的会话会按最近活动聚合在这里，设备离线也能阅读。"
             />
           ) : (
             <div className="list-group">
