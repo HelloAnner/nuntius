@@ -3,7 +3,6 @@ import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   IconArchive,
-  IconRefresh,
   Spinner,
   SwipeActionRow,
   ThreadView,
@@ -241,15 +240,15 @@ export function ThreadPage({
     }
   };
 
-  const setArchived = (next: boolean) =>
+  const setArchived = () =>
     confirm({
-      title: next ? "归档这个会话？" : "取消归档？",
-      body: next
-        ? "归档后会话变为只读，历史记录保留，随时可以在列表中找到。"
-        : "会话将恢复为可继续对话的状态。",
-      confirmLabel: next ? "归档" : "取消归档",
+      title: "归档这个会话？",
+      body: "归档后会从所有会话页面隐藏，历史记录仍保留在服务器数据库中。",
+      confirmLabel: "归档",
       action: async () => {
-        await archiveThread(threadId, next);
+        if (await archiveThread(threadId)) {
+          navigate({ name: "project", deviceId, projectId }, { replace: true });
+        }
       },
     });
 
@@ -304,10 +303,10 @@ export function ThreadPage({
           {!unassigned ? (
             <button
               className="icon-btn"
-              onClick={() => setArchived(!archived)}
-              aria-label={archived ? "取消归档" : "归档会话"}
+              onClick={setArchived}
+              aria-label="归档会话"
             >
-              {archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
+              <IconArchive size={18} />
             </button>
           ) : null}
           <ConnIndicator />
@@ -350,11 +349,11 @@ export function ThreadPage({
                 {sortedThreads.map((t) => (
                   <SwipeActionRow
                     key={t.id}
-                    icon={t.archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
-                    label={t.archived ? "恢复" : "归档"}
+                    icon={<IconArchive size={18} />}
+                    label="归档"
                     busy={busyIds.has(t.id)}
                     disabled={!online || unassigned}
-                    onAction={() => archiveThread(t.id, !t.archived)}
+                    onAction={() => archiveThread(t.id)}
                   >
                     <ThreadRow
                       thread={t}

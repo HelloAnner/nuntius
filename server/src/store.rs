@@ -562,7 +562,7 @@ impl ServerStore {
         user_id: &str,
         device_id: &str,
     ) -> Result<Vec<ProjectSummary>> {
-        let rows = sqlx::query("SELECT * FROM projects WHERE user_id=? AND device_id=? AND removed_at IS NULL ORDER BY kind='system_unassigned' DESC,COALESCE(last_activity_at,'') DESC,display_name")
+        let rows = sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id AND t.archived=0) thread_count FROM projects p WHERE p.user_id=? AND p.device_id=? AND p.removed_at IS NULL ORDER BY p.kind='system_unassigned' DESC,COALESCE(p.last_activity_at,'') DESC,p.display_name")
             .bind(user_id).bind(device_id).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(project_from_row).collect())
     }
@@ -605,11 +605,11 @@ impl ServerStore {
         offset: i64,
     ) -> Result<Vec<ThreadSummary>> {
         let rows = match (device_id, project_id) {
-            (_, Some(project)) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND project_id=? ORDER BY COALESCE(last_activity_at,'') DESC,id DESC LIMIT ? OFFSET ?")
+            (_, Some(project)) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND project_id=? AND archived=0 ORDER BY COALESCE(last_activity_at,'') DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(user_id).bind(project).bind(limit).bind(offset).fetch_all(&self.pool).await?,
-            (Some(device), None) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND device_id=? ORDER BY COALESCE(last_activity_at,'') DESC,id DESC LIMIT ? OFFSET ?")
+            (Some(device), None) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND device_id=? AND archived=0 ORDER BY COALESCE(last_activity_at,'') DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(user_id).bind(device).bind(limit).bind(offset).fetch_all(&self.pool).await?,
-            (None, None) => sqlx::query("SELECT * FROM threads WHERE user_id=? ORDER BY COALESCE(last_activity_at,'') DESC,id DESC LIMIT ? OFFSET ?")
+            (None, None) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND archived=0 ORDER BY COALESCE(last_activity_at,'') DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(user_id).bind(limit).bind(offset).fetch_all(&self.pool).await?,
         };
         Ok(rows.into_iter().map(thread_from_row).collect())
@@ -662,7 +662,7 @@ impl ServerStore {
         user_id: &str,
         thread_id: &str,
     ) -> Result<Option<(String, String)>> {
-        let row = sqlx::query("SELECT h.device_id,h.project_id FROM threads h JOIN devices d ON d.id=h.device_id JOIN projects p ON p.id=h.project_id WHERE h.id=? AND h.user_id=? AND d.status='active' AND p.removed_at IS NULL AND p.kind='workspace' AND p.status='active'")
+        let row = sqlx::query("SELECT h.device_id,h.project_id FROM threads h JOIN devices d ON d.id=h.device_id JOIN projects p ON p.id=h.project_id WHERE h.id=? AND h.user_id=? AND h.archived=0 AND d.status='active' AND p.removed_at IS NULL AND p.kind='workspace' AND p.status='active'")
             .bind(thread_id).bind(user_id).fetch_optional(&self.pool).await?;
         Ok(row.map(|r| (r.get("device_id"), r.get("project_id"))))
     }

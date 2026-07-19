@@ -6,7 +6,6 @@ import {
   IconArchive,
   IconChat,
   IconPlus,
-  IconRefresh,
   Sheet,
   Spinner,
   SwipeActionRow,
@@ -258,11 +257,11 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
               {sorted.map((t) => (
                 <SwipeActionRow
                   key={t.id}
-                  icon={t.archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
-                  label={t.archived ? "恢复" : "归档"}
+                  icon={<IconArchive size={18} />}
+                  label="归档"
                   busy={busyIds.has(t.id)}
                   disabled={!canDelete}
-                  onAction={() => archive(t.id, !t.archived)}
+                  onAction={() => archive(t.id)}
                 >
                   <ThreadRow
                     thread={t}

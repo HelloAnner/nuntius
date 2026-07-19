@@ -1,9 +1,8 @@
 /* Thread page (local console): conversation with the on-device Codex. */
 import { useEffect, useMemo, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   IconArchive,
-  IconRefresh,
   Spinner,
   SwipeActionRow,
   ThreadView,
@@ -50,13 +49,11 @@ function groupHistory(records: HistoryRecord[]): HistoryGroup[] {
 
 export function ThreadPage({ projectId, threadId }: { projectId: string; threadId: string }) {
   const toast = useToast();
-  const qc = useQueryClient();
   const navigate = useNavigate();
   const { archive: archiveThread, busyIds } = useArchiveThreadAction();
   const back = useRoute((s) => s.back);
   const wide = useMedia("(min-width: 768px)");
   const { confirm, node: confirmNode } = useConfirmAction();
-  const [actionBusy, setActionBusy] = useState(false);
 
   const info = useQuery({ queryKey: ["info"], queryFn: api.info });
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
@@ -166,24 +163,14 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     }
   };
 
-  const setArchived = (next: boolean) =>
+  const setArchived = () =>
     confirm({
-      title: next ? "归档这个会话？" : "取消归档？",
-      body: next
-        ? "归档后会话变为只读，历史记录保留。"
-        : "会话将恢复为可继续对话的状态。",
-      confirmLabel: next ? "归档" : "取消归档",
+      title: "归档这个会话？",
+      body: "归档后会从所有会话页面隐藏，历史记录仍保留在本机和服务器数据库中。",
+      confirmLabel: "归档",
       action: async () => {
-        setActionBusy(true);
-        try {
-          await api.archiveThread(threadId, next);
-          await qc.invalidateQueries({ queryKey: ["projectThreads", projectId] });
-          await qc.invalidateQueries({ queryKey: ["threads"] });
-          toast(next ? "已归档" : "已恢复");
-        } catch (e) {
-          toast(e instanceof Error ? e.message : "操作失败", { error: true });
-        } finally {
-          setActionBusy(false);
+        if (await archiveThread(threadId)) {
+          navigate({ name: "project", projectId }, { replace: true });
         }
       },
     });
@@ -217,7 +204,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
       running={running}
       runtimeStatus={thread?.status ?? null}
       runtimeConnected={appRunning}
-      busy={actionBusy}
+      busy={busyIds.has(threadId)}
       onSend={send}
       onRetry={retry}
       onInterrupt={interrupt}
@@ -233,11 +220,11 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
         <>
           <button
             className="icon-btn"
-            onClick={() => setArchived(!archived)}
-            aria-label={archived ? "取消归档" : "归档会话"}
-            title={archived ? "取消归档" : "归档会话"}
+            onClick={setArchived}
+            aria-label="归档会话"
+            title="归档会话"
           >
-            {archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
+            <IconArchive size={18} />
           </button>
           <ConnIndicator />
         </>
@@ -273,10 +260,10 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
                 {sortedThreads.map((t) => (
                   <SwipeActionRow
                     key={t.id}
-                    icon={t.archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
-                    label={t.archived ? "恢复" : "归档"}
+                    icon={<IconArchive size={18} />}
+                    label="归档"
                     busy={busyIds.has(t.id)}
-                    onAction={() => archiveThread(t.id, !t.archived)}
+                    onAction={() => archiveThread(t.id)}
                   >
                     <ThreadRow
                       thread={t}

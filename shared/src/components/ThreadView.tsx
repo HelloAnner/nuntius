@@ -86,6 +86,69 @@ export function optimisticEchoIsInHistory(turn: LiveTurn, history: HistoryGroup[
   });
 }
 
+function normalizedMessage(text: string): string {
+  return text.replace(/\r\n/g, "\n").trim();
+}
+
+/** Hide duplicate persisted assistant rows without changing the durable history. */
+export function visibleHistoryItems(items: RenderItem[]): RenderItem[] {
+  const seenAgentMessages = new Set<string>();
+  return items.filter((item) => {
+    if (item.kind !== "agent_message") return true;
+    const signature = normalizedMessage(item.text);
+    if (!signature || seenAgentMessages.has(signature)) return false;
+    seenAgentMessages.add(signature);
+    return true;
+  });
+}
+
+/**
+ * A reconnect snapshot can persist a reply before its replayed live event is
+ * applied. Those two layers may use different turn ids, so reconcile completed
+ * assistant text together with the prompt and timestamp instead of relying on
+ * identity alone.
+ */
+export function liveTurnIsInHistory(turn: LiveTurn, history: HistoryGroup[]): boolean {
+  const liveItems = visibleLiveItems(turn);
+  const agentMessages = liveItems
+    .filter((item) => item.kind === "agent")
+    .map((item) => normalizedMessage(item.text))
+    .filter(Boolean);
+  const userMessages = liveItems.filter((item) => item.kind === "user");
+  if (agentMessages.length === 0) return false;
+
+  const hasPrompt = turn.userText !== null;
+  const liveAt = Date.parse(turn.startedAt);
+  return history.some((group, index) => {
+    const items = visibleHistoryItems(group.items);
+    const persistedAgents = new Set(
+      items
+        .filter((item) => item.kind === "agent_message")
+        .map((item) => normalizedMessage(item.text))
+        .filter(Boolean),
+    );
+    if (!agentMessages.every((message) => persistedAgents.has(message))) return false;
+    const allSteersPersisted = userMessages.every((liveItem) =>
+      items.some(
+        (item) => item.kind === "user_message" && item.text === liveItem.text,
+      ),
+    );
+    if (!allSteersPersisted) return false;
+
+    if (!hasPrompt) return index === history.length - 1;
+    const promptMatches = items.some(
+      (item) => item.kind === "user_message" && item.text === turn.userText,
+    );
+    if (!promptMatches) return false;
+
+    const historyAt = group.turn.startedAt ? Date.parse(group.turn.startedAt) : Number.NaN;
+    if (Number.isFinite(liveAt) && Number.isFinite(historyAt)) {
+      return Math.abs(liveAt - historyAt) < 120_000;
+    }
+    return index === history.length - 1;
+  });
+}
+
 export function ThreadView({
   history,
   live,
@@ -153,6 +216,7 @@ export function ThreadView({
     // orphan optimistic echo: history already persisted this user message
     // under the authoritative turn id (e.g. the live event was missed)
     if (optimisticEchoIsInHistory(t, history)) return false;
+    if (liveTurnIsInHistory(t, history)) return false;
     return true;
   });
 
@@ -265,9 +329,10 @@ export function ThreadView({
           ) : null}
 
           {history.map((group) => {
-            const hasAgent = group.items.some((i) => i.kind === "agent_message");
+            const items = visibleHistoryItems(group.items);
+            const hasAgent = items.some((i) => i.kind === "agent_message");
             const groupUsers = new Set(
-              group.items.filter((item) => item.kind === "user_message").map((item) => item.text),
+              items.filter((item) => item.kind === "user_message").map((item) => item.text),
             );
             const extras = liveExtrasFor(group.turn.id, hasAgent, groupUsers);
             return (
@@ -276,7 +341,7 @@ export function ThreadView({
                   第 {group.turn.ordinal} 轮 · {statusLabel(group.turn.status)}
                   {group.turn.startedAt ? ` · ${clockTime(group.turn.startedAt)}` : ""}
                 </div>
-                {group.items.map((item) => {
+                {items.map((item) => {
                   if (item.kind === "user_message") {
                     return <UserBubble key={item.id} text={item.text} />;
                   }

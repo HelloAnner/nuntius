@@ -31,20 +31,20 @@ export function useArchiveThreadAction() {
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
 
   const archive = useCallback(
-    async (threadId: string, archived = true) => {
+    async (threadId: string) => {
       if (busyIds.has(threadId)) return false;
       setBusyIds((old) => new Set(old).add(threadId));
       try {
-        await api.archiveThread(threadId, archived);
+        await api.archiveThread(threadId, true);
         const update = (old: ThreadSummary[] | undefined) =>
-          old?.map((thread) => (thread.id === threadId ? { ...thread, archived } : thread));
+          old?.filter((thread) => thread.id !== threadId);
         qc.setQueriesData<ThreadSummary[]>({ queryKey: ["projectThreads"] }, update);
         qc.setQueryData<ThreadSummary[]>(["threads"], update);
         await Promise.all([
           qc.invalidateQueries({ queryKey: ["projectThreads"] }),
           qc.invalidateQueries({ queryKey: ["threads"] }),
         ]);
-        toast(archived ? "会话已归档" : "会话已恢复");
+        toast("会话已归档");
         return true;
       } catch (error) {
         await Promise.all([

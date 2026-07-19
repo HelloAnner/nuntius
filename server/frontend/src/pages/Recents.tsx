@@ -5,7 +5,6 @@ import {
   Empty,
   IconArchive,
   IconClock,
-  IconRefresh,
   Segmented,
   Spinner,
   SwipeActionRow,
@@ -62,10 +61,10 @@ export function RecentsPage() {
               {list.map((t) => (
                 <SwipeActionRow
                   key={t.id}
-                  icon={t.archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
-                  label={t.archived ? "恢复" : "归档"}
+                  icon={<IconArchive size={18} />}
+                  label="归档"
                   busy={busyIds.has(t.id)}
-                  onAction={() => archive(t.id, !t.archived)}
+                  onAction={() => archive(t.id)}
                 >
                   <ThreadRow
                     thread={t}

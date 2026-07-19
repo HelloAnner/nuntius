@@ -152,14 +152,14 @@ impl ClientStore {
     }
 
     pub async fn list_projects(&self, device_id: &str) -> Result<Vec<ProjectSummary>> {
-        let rows=sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id) thread_count FROM projects p WHERE status='active' ORDER BY updated_at DESC").fetch_all(&self.pool).await?;
+        let rows=sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id AND t.archived=0) thread_count FROM projects p WHERE status='active' ORDER BY updated_at DESC").fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
             .map(|r| project_summary(&r, device_id))
             .collect())
     }
     pub async fn project(&self, id: &str, device_id: &str) -> Result<Option<ProjectRecord>> {
-        let row=sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id) thread_count FROM projects p WHERE id=? AND status='active'").bind(id).fetch_optional(&self.pool).await?;
+        let row=sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id AND t.archived=0) thread_count FROM projects p WHERE id=? AND status='active'").bind(id).fetch_optional(&self.pool).await?;
         Ok(row.map(|r| ProjectRecord {
             canonical_path: PathBuf::from(r.get::<String, _>("canonical_path")),
             defaults: serde_json::from_str(&r.get::<String, _>("defaults_json"))
@@ -335,9 +335,9 @@ impl ClientStore {
         offset: i64,
     ) -> Result<Vec<ThreadSummary>> {
         let rows = if let Some(project) = project_id {
-            sqlx::query("SELECT * FROM threads WHERE project_id=? ORDER BY COALESCE(last_activity_at,created_at) DESC,id DESC LIMIT ? OFFSET ?").bind(project).bind(limit).bind(offset).fetch_all(&self.pool).await?
+            sqlx::query("SELECT * FROM threads WHERE project_id=? AND archived=0 ORDER BY COALESCE(last_activity_at,created_at) DESC,id DESC LIMIT ? OFFSET ?").bind(project).bind(limit).bind(offset).fetch_all(&self.pool).await?
         } else {
-            sqlx::query("SELECT * FROM threads ORDER BY COALESCE(last_activity_at,created_at) DESC,id DESC LIMIT ? OFFSET ?").bind(limit).bind(offset).fetch_all(&self.pool).await?
+            sqlx::query("SELECT * FROM threads WHERE archived=0 ORDER BY COALESCE(last_activity_at,created_at) DESC,id DESC LIMIT ? OFFSET ?").bind(limit).bind(offset).fetch_all(&self.pool).await?
         };
         Ok(rows
             .into_iter()
@@ -356,7 +356,7 @@ impl ClientStore {
         id: &str,
         device_id: &str,
     ) -> Result<Option<ThreadSummary>> {
-        Ok(sqlx::query("SELECT t.* FROM threads t JOIN projects p ON p.id=t.project_id WHERE t.id=? AND p.kind='workspace' AND p.status='active'")
+        Ok(sqlx::query("SELECT t.* FROM threads t JOIN projects p ON p.id=t.project_id WHERE t.id=? AND t.archived=0 AND p.kind='workspace' AND p.status='active'")
             .bind(id)
             .fetch_optional(&self.pool)
             .await?
@@ -1289,6 +1289,60 @@ fn truncate_utf8(value: String, max_bytes: usize) -> (String, bool) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn archived_threads_remain_stored_but_leave_active_lists() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_archive", "Archive", &workspace, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_thread(
+                "thr_archive",
+                "prj_archive",
+                "app_archive",
+                "Keep me",
+                &json!({}),
+            )
+            .await
+            .unwrap();
+
+        store
+            .set_thread_archived("thr_archive", true)
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .list_threads("dev_test", None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .controllable_thread("thr_archive", "dev_test")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .thread("thr_archive", "dev_test")
+                .await
+                .unwrap()
+                .unwrap()
+                .archived
+        );
+        assert_eq!(
+            store.list_projects("dev_test").await.unwrap()[0].thread_count,
+            0
+        );
+    }
 
     #[tokio::test]
     async fn project_removal_cleans_records_and_blocks_automatic_reimport() {

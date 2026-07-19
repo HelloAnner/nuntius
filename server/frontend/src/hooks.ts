@@ -32,23 +32,23 @@ export function useArchiveThreadAction() {
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
 
   const archive = useCallback(
-    async (threadId: string, archived = true) => {
+    async (threadId: string) => {
       if (busyIds.has(threadId)) return false;
       setBusyIds((old) => new Set(old).add(threadId));
       try {
-        const receipt = await api.archiveThread(threadId, archived);
+        const receipt = await api.archiveThread(threadId, true);
         const update = (old: ThreadSummary[] | undefined) =>
-          old?.map((thread) => (thread.id === threadId ? { ...thread, archived } : thread));
+          old?.filter((thread) => thread.id !== threadId);
         qc.setQueriesData<ThreadSummary[]>({ queryKey: ["projectThreads"] }, update);
         qc.setQueryData<ThreadSummary[]>(["allThreads"], update);
-        trackCommand(qc, receipt.commandId, threadId, archived ? "thread.archive" : "thread.unarchive");
+        trackCommand(qc, receipt.commandId, threadId, "thread.archive");
         await waitForCommand(receipt.commandId);
         await Promise.all([
           qc.invalidateQueries({ queryKey: ["projectThreads"] }),
           qc.invalidateQueries({ queryKey: ["allThreads"] }),
           qc.invalidateQueries({ queryKey: ["devices"] }),
         ]);
-        toast(archived ? "会话已归档" : "会话已恢复");
+        toast("会话已归档");
         return true;
       } catch (error) {
         await Promise.all([

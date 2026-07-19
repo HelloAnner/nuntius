@@ -5,7 +5,6 @@ import {
   Empty,
   IconArchive,
   IconClock,
-  IconRefresh,
   Spinner,
   SwipeActionRow,
 } from "@nuntius/shared";
@@ -46,10 +45,10 @@ export function ThreadsPage() {
               {list.map((t) => (
                 <SwipeActionRow
                   key={t.id}
-                  icon={t.archived ? <IconRefresh size={18} /> : <IconArchive size={18} />}
-                  label={t.archived ? "恢复" : "归档"}
+                  icon={<IconArchive size={18} />}
+                  label="归档"
                   busy={busyIds.has(t.id)}
-                  onAction={() => archive(t.id, !t.archived)}
+                  onAction={() => archive(t.id)}
                 >
                   <ThreadRowLink thread={t} context={projectName(t.projectId)} />
                 </SwipeActionRow>
