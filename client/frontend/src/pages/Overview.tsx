@@ -49,9 +49,9 @@ export function OverviewPage() {
           ) : data ? (
             <>
               <div className="hero">
-                <Avatar text={initials(hostnameOf(data.deviceId))} tint={tintIndex(data.deviceId)} online />
+                <Avatar text={initials(data.displayName)} tint={tintIndex(data.deviceId)} online />
                 <div className="meta">
-                  <div className="name display">{hostnameOf(data.deviceId)}</div>
+                  <div className="name display">{data.displayName}</div>
                   <div className="facts">
                     <span>CLI {data.clientVersion}</span>
                     <span className="mono">{data.localBind}</span>
@@ -110,9 +110,4 @@ function IssueRow({ title, detail }: { title: string; detail?: string }) {
       </div>
     </div>
   );
-}
-
-function hostnameOf(deviceId: string): string {
-  if (deviceId === "unpaired") return "这台电脑";
-  return deviceId.replace(/^dev_/, "").slice(0, 8);
 }

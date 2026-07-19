@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 pub const DEVICE_PROTOCOL_VERSION: u16 = 1;
 pub const DEVICE_SUBPROTOCOL: &str = "nuntius.device.v1";
+pub const DEVICE_DISPLAY_NAME_SYNC_CAPABILITY: &str = "device-display-name-sync.v1";
 
 pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::now_v7())
@@ -349,6 +350,8 @@ pub enum TunnelFrame {
         server_time: String,
         transport_security: TransportSecurity,
         capabilities: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
     },
     Command {
         #[serde(default = "legacy_queue_epoch")]
@@ -394,6 +397,9 @@ pub enum TunnelFrame {
     HeartbeatAck {
         received_at: String,
     },
+    DeviceConfig {
+        display_name: String,
+    },
     ServerNotice {
         code: String,
         message: String,
@@ -422,5 +428,30 @@ mod tests {
         .unwrap();
         assert_eq!(value["type"], "event_ack");
         assert_eq!(value["payload"]["eventId"], "evt_test");
+    }
+
+    #[test]
+    fn welcome_without_display_name_remains_compatible() {
+        let frame: TunnelFrame = serde_json::from_value(serde_json::json!({
+            "type": "welcome",
+            "payload": {
+                "protocolVersion": 1,
+                "connectionId": "conn_test",
+                "connectionEpoch": 1,
+                "commandQueueEpoch": "epoch_test",
+                "serverTime": "2026-01-01T00:00:00Z",
+                "transportSecurity": "insecure",
+                "capabilities": []
+            }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            frame,
+            TunnelFrame::Welcome {
+                display_name: None,
+                ..
+            }
+        ));
     }
 }

@@ -19,6 +19,7 @@ export interface ClientInfo {
   buildSha: string;
   releaseSequence: number;
   deviceId: string;
+  displayName: string;
   paired: boolean;
   localBind: string;
   appServerRunning: boolean;

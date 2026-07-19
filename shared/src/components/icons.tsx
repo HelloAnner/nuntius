@@ -96,6 +96,12 @@ export const IconCopy = (p: P) =>
     <path d="M5.5 15h-1a2 2 0 0 1-2-2V5.5a2 2 0 0 1 2-2H12a2 2 0 0 1 2 2v1" />
   </>);
 
+export const IconEdit = (p: P) =>
+  base(p, <>
+    <path d="m4 20 4.2-1 10.9-10.9a2.1 2.1 0 0 0-3-3L5.2 16Z" />
+    <path d="m14.7 6.5 2.8 2.8M4 20l1.1-4" />
+  </>);
+
 export const IconCheck = (p: P) => base(p, <path d="m4.5 12.5 5 5 10-11" />);
 export const IconX = (p: P) => base(p, <path d="M6 6l12 12M18 6 6 18" />);
 

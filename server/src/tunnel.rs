@@ -4,7 +4,7 @@ use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicI64, Ordering},
@@ -17,6 +17,9 @@ struct Connection {
     epoch: i64,
     sender: mpsc::Sender<TunnelFrame>,
     supersede: Option<oneshot::Sender<()>>,
+    capabilities: HashSet<String>,
+    ready: bool,
+    pending_display_name: Option<String>,
 }
 
 #[derive(Default)]
@@ -39,6 +42,7 @@ impl TunnelRegistry {
         device_id: &str,
         sender: mpsc::Sender<TunnelFrame>,
         supersede: oneshot::Sender<()>,
+        capabilities: HashSet<String>,
     ) -> i64 {
         let epoch = self.next_epoch.fetch_add(1, Ordering::Relaxed);
         let previous = self.connections.write().await.insert(
@@ -47,6 +51,9 @@ impl TunnelRegistry {
                 epoch,
                 sender,
                 supersede: Some(supersede),
+                capabilities,
+                ready: false,
+                pending_display_name: None,
             },
         );
         if let Some(mut previous) = previous
@@ -75,8 +82,28 @@ impl TunnelRegistry {
         }
     }
 
+    async fn disconnect_epoch(&self, device_id: &str, epoch: i64) {
+        let mut connections = self.connections.write().await;
+        if connections
+            .get(device_id)
+            .map(|connection| connection.epoch)
+            != Some(epoch)
+        {
+            return;
+        }
+        if let Some(mut connection) = connections.remove(device_id)
+            && let Some(cancel) = connection.supersede.take()
+        {
+            let _ = cancel.send(());
+        }
+    }
+
     pub async fn is_online(&self, device_id: &str) -> bool {
-        self.connections.read().await.contains_key(device_id)
+        self.connections
+            .read()
+            .await
+            .get(device_id)
+            .is_some_and(|connection| connection.ready)
     }
 
     pub async fn send(&self, device_id: &str, frame: TunnelFrame) -> Result<()> {
@@ -85,6 +112,7 @@ impl TunnelRegistry {
             .read()
             .await
             .get(device_id)
+            .filter(|connection| connection.ready)
             .map(|c| c.sender.clone())
             .ok_or_else(|| anyhow!("device offline"))?;
         tokio::time::timeout(std::time::Duration::from_secs(2), sender.send(frame))
@@ -108,6 +136,68 @@ impl TunnelRegistry {
             }
         }
         delivered
+    }
+
+    pub async fn sync_display_name(&self, device_id: &str, display_name: &str) -> Result<bool> {
+        let (epoch, sender) = {
+            let mut connections = self.connections.write().await;
+            let Some(connection) = connections.get_mut(device_id) else {
+                return Ok(false);
+            };
+            if !connection
+                .capabilities
+                .contains(DEVICE_DISPLAY_NAME_SYNC_CAPABILITY)
+            {
+                return Ok(false);
+            }
+            if !connection.ready {
+                connection.pending_display_name = Some(display_name.to_owned());
+                return Ok(true);
+            }
+            (connection.epoch, connection.sender.clone())
+        };
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sender.send(TunnelFrame::DeviceConfig {
+                display_name: display_name.to_owned(),
+            }),
+        )
+        .await
+        .map_err(|_| anyhow!("device connection send queue timed out"))
+        .and_then(|result| result.map_err(|_| anyhow!("device connection closed")));
+        if let Err(error) = sent {
+            self.disconnect_epoch(device_id, epoch).await;
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    async fn activate(&self, device_id: &str, epoch: i64, display_name: String) -> Result<()> {
+        let mut connections = self.connections.write().await;
+        let connection = connections
+            .get_mut(device_id)
+            .filter(|connection| connection.epoch == epoch)
+            .ok_or_else(|| anyhow!("device connection was superseded"))?;
+        if connection
+            .capabilities
+            .contains(DEVICE_DISPLAY_NAME_SYNC_CAPABILITY)
+        {
+            let display_name = connection
+                .pending_display_name
+                .take()
+                .unwrap_or(display_name);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                connection
+                    .sender
+                    .send(TunnelFrame::DeviceConfig { display_name }),
+            )
+            .await
+            .map_err(|_| anyhow!("device connection send queue timed out"))?
+            .map_err(|_| anyhow!("device connection closed"))?;
+        }
+        connection.ready = true;
+        Ok(())
     }
 
     pub async fn query(&self, device_id: &str, query: DeviceQuery) -> Result<Value, String> {
@@ -181,7 +271,14 @@ async fn run_socket(
         return Err(anyhow!("first frame must be text hello"));
     };
     let hello: TunnelFrame = serde_json::from_str(&text)?;
-    let (device_id, agent_version, security, last_sequence, client_queue_epoch) = match hello {
+    let (
+        device_id,
+        agent_version,
+        security,
+        last_sequence,
+        client_queue_epoch,
+        client_capabilities,
+    ) = match hello {
         TunnelFrame::Hello {
             protocol_version,
             device_id,
@@ -189,6 +286,7 @@ async fn run_socket(
             transport_security,
             last_server_command_seq,
             command_queue_epoch,
+            capabilities,
             ..
         } if protocol_version == DEVICE_PROTOCOL_VERSION && device_id == authenticated_device => (
             device_id,
@@ -196,6 +294,7 @@ async fn run_socket(
             transport_security,
             last_server_command_seq,
             command_queue_epoch,
+            capabilities,
         ),
         _ => return Err(anyhow!("invalid hello")),
     };
@@ -212,7 +311,12 @@ async fn run_socket(
     let (supersede_tx, mut superseded) = oneshot::channel();
     let epoch = state
         .tunnels
-        .register(&device_id, out_tx.clone(), supersede_tx)
+        .register(
+            &device_id,
+            out_tx.clone(),
+            supersede_tx,
+            client_capabilities.into_iter().collect(),
+        )
         .await;
     let mut writer = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
@@ -227,6 +331,11 @@ async fn run_socket(
             .store
             .mark_device_seen(&device_id, &agent_version, security, None)
             .await?;
+        let display_name = state
+            .store
+            .device_display_name(user_id, &device_id)
+            .await?
+            .ok_or_else(|| anyhow!("device is not active"))?;
         out_tx
             .send(TunnelFrame::Welcome {
                 protocol_version: DEVICE_PROTOCOL_VERSION,
@@ -241,7 +350,9 @@ async fn run_socket(
                     "history.v1".into(),
                     "directory-browser.v1".into(),
                     "project-delete.v1".into(),
+                    DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into(),
                 ],
+                display_name: Some(display_name.clone()),
             })
             .await?;
         let replay_after = if client_queue_epoch.as_deref() == Some(state.store.queue_epoch()) {
@@ -262,6 +373,10 @@ async fn run_socket(
                 })
                 .await?;
         }
+        state
+            .tunnels
+            .activate(&device_id, epoch, display_name)
+            .await?;
         publish_device_event(
             &state,
             user_id,
@@ -491,6 +606,7 @@ async fn handle_frame(
         | TunnelFrame::HistoryAck { .. }
         | TunnelFrame::Query { .. }
         | TunnelFrame::HeartbeatAck { .. }
+        | TunnelFrame::DeviceConfig { .. }
         | TunnelFrame::ServerNotice { .. } => return Err(anyhow!("frame not allowed from device")),
     }
     Ok(())
@@ -524,4 +640,41 @@ pub async fn publish_device_event(
         event,
     });
     Ok(cursor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rename_during_handshake_replaces_the_initial_snapshot() {
+        let registry = TunnelRegistry::new();
+        let (sender, mut receiver) = mpsc::channel(4);
+        let (supersede, _superseded) = oneshot::channel();
+        let epoch = registry
+            .register(
+                "dev_test",
+                sender,
+                supersede,
+                HashSet::from([DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into()]),
+            )
+            .await;
+
+        assert!(
+            registry
+                .sync_display_name("dev_test", "Newest name")
+                .await
+                .unwrap()
+        );
+        registry
+            .activate("dev_test", epoch, "Stale handshake name".into())
+            .await
+            .unwrap();
+
+        assert!(registry.is_online("dev_test").await);
+        assert!(matches!(
+            receiver.recv().await,
+            Some(TunnelFrame::DeviceConfig { display_name }) if display_name == "Newest name"
+        ));
+    }
 }

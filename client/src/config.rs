@@ -76,7 +76,10 @@ pub fn config_path() -> Result<PathBuf> {
 impl ClientConfig {
     pub fn load() -> Result<Self> {
         let path = config_path()?;
-        let source = fs::read_to_string(&path).with_context(|| {
+        Self::load_from_path(&path)
+    }
+    fn load_from_path(path: &Path) -> Result<Self> {
+        let source = fs::read_to_string(path).with_context(|| {
             format!(
                 "failed to read {}; run `nuntius-client init`",
                 path.display()
@@ -92,7 +95,22 @@ impl ClientConfig {
         let path = config_path()?;
         atomic_private_write(&path, toml::to_string_pretty(self)?.as_bytes())
     }
+    pub fn update_display_name(display_name: &str) -> Result<String> {
+        Self::update_display_name_at(&config_path()?, display_name)
+    }
+    fn update_display_name_at(path: &Path, display_name: &str) -> Result<String> {
+        let display_name = normalized_display_name(display_name)?.to_owned();
+        let mut config = Self::load_from_path(path)?;
+        if config.display_name == display_name {
+            return Ok(display_name);
+        }
+        config.display_name = display_name.clone();
+        config.validate()?;
+        atomic_private_write(path, toml::to_string_pretty(&config)?.as_bytes())?;
+        Ok(display_name)
+    }
     pub fn validate(&self) -> Result<()> {
+        normalized_display_name(&self.display_name)?;
         let url = Url::parse(&self.server_url).context("server_url is invalid")?;
         match url.scheme() {
             "https" => {}
@@ -161,6 +179,14 @@ impl ClientConfig {
             crate::protocol::TransportSecurity::Insecure
         }
     }
+}
+
+fn normalized_display_name(value: &str) -> Result<&str> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 128 {
+        bail!("display_name must contain 1 to 128 bytes")
+    }
+    Ok(value)
 }
 
 fn validate_remote_path(path: Option<&Path>, name: &str) -> Result<()> {
@@ -300,5 +326,33 @@ mod tests {
         };
 
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validates_device_display_name_for_server_sync() {
+        assert_eq!(
+            normalized_display_name("  Studio Mac  ").unwrap(),
+            "Studio Mac"
+        );
+        assert!(normalized_display_name("   ").is_err());
+        assert!(normalized_display_name(&"名".repeat(43)).is_err());
+    }
+
+    #[test]
+    fn display_name_update_preserves_the_rest_of_the_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(CONFIG_FILE);
+        let config = ClientConfig {
+            display_name: "Old name".into(),
+            codex_command: "custom-codex".into(),
+            ..ClientConfig::default()
+        };
+        fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+        ClientConfig::update_display_name_at(&path, "  Studio Mac  ").unwrap();
+
+        let updated = ClientConfig::load_from_path(&path).unwrap();
+        assert_eq!(updated.display_name, "Studio Mac");
+        assert_eq!(updated.codex_command, "custom-codex");
     }
 }

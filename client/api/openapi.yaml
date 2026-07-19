@@ -12,7 +12,28 @@ paths:
   /info:
     get:
       operationId: getClientInfo
-      responses: {'200': {description: Agent、配对、队列和 App Server 状态, content: {application/json: {schema: {type: object, additionalProperties: true}}}}}
+      responses:
+        '200':
+          description: Agent、设备名称、配对、队列和 App Server 状态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [apiVersion, clientVersion, buildSha, deviceId, displayName, paired, localBind, appServerRunning, projects, pendingCommands, pendingEvents, activeTurns, capabilities]
+                properties:
+                  apiVersion: {type: string}
+                  clientVersion: {type: string}
+                  buildSha: {type: string}
+                  deviceId: {type: string}
+                  displayName: {type: string}
+                  paired: {type: boolean}
+                  localBind: {type: string}
+                  appServerRunning: {type: boolean}
+                  projects: {type: integer}
+                  pendingCommands: {type: integer}
+                  pendingEvents: {type: integer}
+                  activeTurns: {type: integer}
+                  capabilities: {type: array, items: {type: string}}
   /directories/roots:
     get:
       operationId: listLocalDirectoryRoots

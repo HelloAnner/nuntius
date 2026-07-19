@@ -96,6 +96,7 @@ async fn run_connection(
                 "history.v1".into(),
                 "directory-browser.v1".into(),
                 "project-delete.v1".into(),
+                DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into(),
             ],
         },
     )
@@ -107,19 +108,23 @@ async fn run_connection(
     let Message::Text(text) = welcome else {
         bail!("server welcome was not text")
     };
-    let server_queue_epoch = match serde_json::from_str::<TunnelFrame>(&text)? {
+    let (server_queue_epoch, display_name) = match serde_json::from_str::<TunnelFrame>(&text)? {
         TunnelFrame::Welcome {
             protocol_version,
             transport_security,
             command_queue_epoch,
+            display_name,
             ..
         } if protocol_version == DEVICE_PROTOCOL_VERSION
             && transport_security == executor.config.transport_security() =>
         {
-            command_queue_epoch
+            (command_queue_epoch, display_name)
         }
         other => bail!("invalid server welcome: {other:?}"),
     };
+    if let Some(display_name) = display_name {
+        executor.apply_device_display_name(&display_name).await?;
+    }
     executor
         .store
         .state_set("active_command_queue_epoch", &server_queue_epoch)
@@ -237,6 +242,9 @@ async fn handle_server_frame(
             executor.maybe_emit_inventory_complete().await?;
         }
         TunnelFrame::HeartbeatAck { .. } => {}
+        TunnelFrame::DeviceConfig { display_name } => {
+            executor.apply_device_display_name(&display_name).await?
+        }
         TunnelFrame::ServerNotice { code, message } => {
             if code == "update_available" {
                 tracing::info!(%message, "release notification received from server");

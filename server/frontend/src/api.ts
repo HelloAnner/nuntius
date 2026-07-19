@@ -90,6 +90,8 @@ export const api = {
   createPairingCode: () => req<PairingCodeView>("POST", "/pairing-codes"),
 
   devices: () => req<DeviceSummary[]>("GET", "/devices"),
+  renameDevice: (deviceId: string, displayName: string) =>
+    req<DeviceSummary>("PATCH", `/devices/${deviceId}`, { displayName }),
   revokeDevice: (deviceId: string) => req<void>("DELETE", `/devices/${deviceId}`),
 
   projects: (deviceId: string) =>
