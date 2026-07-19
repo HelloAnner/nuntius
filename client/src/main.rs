@@ -260,7 +260,7 @@ async fn run() -> Result<()> {
     let _pid = PidGuard::acquire()?;
     let root = config::data_dir()?;
     let store = ClientStore::open(&root).await?;
-    store.recover_process_state().await?;
+    let recovery_candidates = store.recover_process_state().await?;
     let (events, _) = tokio::sync::broadcast::channel(4096);
     let (command_acks, _) = tokio::sync::broadcast::channel(1024);
     let agents = AgentRuntimes::new(cfg.clone());
@@ -276,6 +276,29 @@ async fn run() -> Result<()> {
         command_notify: Arc::new(tokio::sync::Notify::new()),
         history_import_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
+    // Subscribe before `thread/resume`: resumed threads may begin streaming
+    // notifications as soon as the App Server accepts the request.
+    let app_events_task = tokio::spawn(executor::process_app_events(executor.clone()));
+    let kimi_event_stream_task = tokio::spawn(agents.kimi.clone().run_event_stream());
+    let kimi_events_task = tokio::spawn(executor::process_kimi_events(executor.clone()));
+    if !recovery_candidates.is_empty() {
+        tracing::info!(
+            count = recovery_candidates.len(),
+            "recovering running threads after restart"
+        );
+    }
+    // This is the startup synchronization barrier. The public tunnel must not
+    // project the old process state until every candidate received one resume
+    // attempt and was either resolved or explicitly left as `recovering`.
+    let pending_recovery = executor.recover_threads_once(&recovery_candidates).await;
+    let startup_recovery_task = if pending_recovery.is_empty() {
+        None
+    } else {
+        let recovery = executor.clone();
+        Some(tokio::spawn(async move {
+            recovery.retry_thread_recovery(pending_recovery).await;
+        }))
+    };
     let command_queue_task = tokio::spawn(command_queue::run(executor.clone()));
     let maintenance_store = executor.store.clone();
     let maintenance_task = tokio::spawn(async move {
@@ -288,9 +311,6 @@ async fn run() -> Result<()> {
             }
         }
     });
-    let app_events_task = tokio::spawn(executor::process_app_events(executor.clone()));
-    let kimi_event_stream_task = tokio::spawn(agents.kimi.clone().run_event_stream());
-    let kimi_events_task = tokio::spawn(executor::process_kimi_events(executor.clone()));
     let history_monitor_task = tokio::spawn(history_monitor::run(executor.clone()));
     let discovery = executor.clone();
     let discovery_task = tokio::spawn(async move {
@@ -379,6 +399,9 @@ async fn run() -> Result<()> {
     health_marker_task.abort();
     if let Some(task) = tunnel_task {
         task.abort()
+    }
+    if let Some(task) = startup_recovery_task {
+        task.abort();
     }
     discovery_task.abort();
     history_monitor_task.abort();

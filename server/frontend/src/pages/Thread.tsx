@@ -180,8 +180,11 @@ export function ThreadPage({
   // The server SQLite projection is authoritative. Browser memory is only a
   // transient rendering layer for streamed output.
   const running = thread?.status === "active";
+  const recovering = thread?.status === "recovering";
 
-  const canSend = Boolean(online && providerAvailable && !unassigned && !archived && thread);
+  const canSend = Boolean(
+    online && providerAvailable && !unassigned && !archived && !recovering && thread,
+  );
   const lockedReason = !thread
     ? "会话加载中…"
     : archived
@@ -192,7 +195,9 @@ export function ThreadPage({
           ? `设备${statusLabel(device?.status ?? "offline")}`
           : !providerAvailable
             ? `${providerLabel(thread.provider)} 未安装或不可用`
-          : null;
+          : recovering
+            ? "正在恢复运行连接…"
+            : null;
 
   const send = async (text: string) => {
     const idemKey = newIdemKey();

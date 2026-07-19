@@ -47,6 +47,7 @@ const STATUS_LABELS: Record<string, string> = {
   pairing: "配对中",
   revoked: "已撤销",
   active: "进行中",
+  recovering: "恢复中",
   idle: "空闲",
   running: "运行中",
   interrupted: "已中断",

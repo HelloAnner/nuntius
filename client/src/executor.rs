@@ -7,10 +7,14 @@ use crate::{
     store::ClientStore,
 };
 use anyhow::{Context, Result, bail};
+use futures_util::{StreamExt, stream};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Notify, RwLock, broadcast};
+
+const STARTUP_RECOVERY_CONCURRENCY: usize = 4;
+const STARTUP_RECOVERY_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 pub struct CommandExecutor {
@@ -211,6 +215,101 @@ impl CommandExecutor {
                 Ok(json!({"queued":true}))
             }
         }
+    }
+
+    /// Reattach every thread that was active before the client process
+    /// restarted. Failed candidates remain `recovering` and are returned for
+    /// the background retry loop.
+    pub async fn recover_threads_once(&self, thread_ids: &[String]) -> Vec<String> {
+        stream::iter(thread_ids.iter().cloned().map(|thread_id| {
+            let executor = self.clone();
+            async move {
+                let result = executor.recover_thread(&thread_id).await;
+                (thread_id, result)
+            }
+        }))
+        .buffer_unordered(STARTUP_RECOVERY_CONCURRENCY)
+        .filter_map(|(thread_id, result)| async move {
+            match result {
+                Ok(()) => None,
+                Err(error) => {
+                    tracing::warn!(%thread_id,error=?error,"running thread recovery deferred");
+                    Some(thread_id)
+                }
+            }
+        })
+        .collect()
+        .await
+    }
+
+    pub async fn retry_thread_recovery(&self, mut pending: Vec<String>) {
+        let mut delay = Duration::from_secs(2);
+        while !pending.is_empty() {
+            tokio::time::sleep(delay).await;
+            let previous = pending.len();
+            pending = self.recover_threads_once(&pending).await;
+            if pending.len() < previous {
+                tracing::info!(
+                    remaining = pending.len(),
+                    "running thread recovery made progress"
+                );
+                delay = Duration::from_secs(2);
+            } else {
+                delay = (delay * 2).min(Duration::from_secs(30));
+            }
+        }
+        tracing::info!("all running threads recovered after restart");
+    }
+
+    async fn recover_thread(&self, thread_id: &str) -> Result<()> {
+        let thread = self.thread(thread_id).await?;
+        let state = match self
+            .resume_provider_thread_with_timeout(&thread, STARTUP_RECOVERY_CALL_TIMEOUT)
+            .await
+        {
+            Ok(state) => state,
+            Err(error) if is_missing_app_thread(&error) => {
+                self.store.set_thread_status(thread_id, "unknown").await?;
+                self.sync_thread(thread_id).await?;
+                self.emit_thread_summary(thread_id).await?;
+                tracing::warn!(%thread_id,"previously running App Server thread no longer exists");
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+
+        match state.status.as_str() {
+            "active" => {
+                self.store
+                    .mark_app_turn_started(thread_id, state.active_turn_id.as_deref())
+                    .await?;
+            }
+            "idle" => {
+                self.store
+                    .complete_app_turn(thread_id, state.active_turn_id.as_deref(), "completed")
+                    .await?;
+            }
+            status => {
+                self.store
+                    .complete_app_turn(thread_id, state.active_turn_id.as_deref(), "failed")
+                    .await?;
+                self.store.set_thread_status(thread_id, status).await?;
+            }
+        }
+
+        // Resume establishes the live App Server attachment. A bounded full
+        // read immediately fills output missed while the processes restarted;
+        // rollout monitoring remains the fallback if this optional backfill
+        // is temporarily unavailable.
+        if let Err(error) = self
+            .refresh_thread_history_with_timeout(thread_id, STARTUP_RECOVERY_CALL_TIMEOUT)
+            .await
+        {
+            tracing::warn!(%thread_id,error=?error,"recovered thread history backfill deferred");
+            self.sync_thread(thread_id).await?;
+        }
+        self.emit_thread_summary(thread_id).await?;
+        Ok(())
     }
 
     async fn create_project(&self, request: &CreateProjectRequest) -> Result<Value> {
@@ -510,6 +609,16 @@ impl CommandExecutor {
         Ok(state)
     }
 
+    async fn resume_provider_thread_with_timeout(
+        &self,
+        thread: &ThreadSummary,
+        timeout: Duration,
+    ) -> Result<AgentThreadState> {
+        tokio::time::timeout(timeout, self.resume_provider_thread(thread))
+            .await
+            .context("provider thread resume timed out")?
+    }
+
     async fn thread(&self, id: &str) -> Result<ThreadSummary> {
         self.store
             .thread(id, &self.device_id)
@@ -588,16 +697,27 @@ impl CommandExecutor {
         Ok(())
     }
     pub async fn refresh_thread_history(&self, thread_id: &str) -> Result<()> {
+        self.refresh_thread_history_with_timeout(thread_id, Duration::from_secs(180))
+            .await
+    }
+
+    async fn refresh_thread_history_with_timeout(
+        &self,
+        thread_id: &str,
+        timeout: Duration,
+    ) -> Result<()> {
         let _guard = self.history_import_lock.lock().await;
         let thread = self.thread(thread_id).await?;
         let app_thread_id = thread
             .app_server_thread_id
             .as_deref()
             .context("thread has no provider session id")?;
-        let provider_thread = self
-            .agents
-            .read_thread(thread.provider, app_thread_id)
-            .await?;
+        let provider_thread = tokio::time::timeout(
+            timeout,
+            self.agents.read_thread(thread.provider, app_thread_id),
+        )
+        .await
+        .context("provider thread history read timed out")??;
         self.store
             .import_app_history(thread_id, &provider_thread)
             .await?;
@@ -1597,8 +1717,23 @@ while IFS= read -r line; do
       thread_number=$((thread_number + 1))
       printf '{"id":%s,"result":{"thread":{"id":"app_new_%s","status":{"type":"idle"}}}}\n' "$id" "$thread_number"
       ;;
+    *'"method":"thread/resume"'*'"threadId":"app_active"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"app_active","status":{"type":"active"}},"initialTurnsPage":{"data":[{"id":"app_active_turn","status":"inProgress"}]}}}\n' "$id"
+      ;;
+    *'"method":"thread/resume"'*'"threadId":"app_idle"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"app_idle","status":{"type":"idle"}},"initialTurnsPage":{"data":[]}}}\n' "$id"
+      ;;
+    *'"method":"thread/resume"'*'"threadId":"app_unavailable"'*)
+      printf '{"id":%s,"error":{"code":-32000,"message":"provider temporarily unavailable"}}\n' "$id"
+      ;;
     *'"method":"thread/resume"'*)
       printf '{"id":%s,"error":{"code":-32600,"message":"no rollout found for thread id unexpected"}}\n' "$id"
+      ;;
+    *'"method":"thread/read"'*'"threadId":"app_active"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"app_active","status":{"type":"active"},"turns":[{"id":"app_active_turn","status":"inProgress","items":[]}]}}}\n' "$id"
+      ;;
+    *'"method":"thread/read"'*'"threadId":"app_idle"'*)
+      printf '{"id":%s,"result":{"thread":{"id":"app_idle","status":{"type":"idle"},"turns":[{"id":"app_idle_turn","status":"completed","items":[]}]}}}\n' "$id"
       ;;
     *'"method":"turn/start"'*'"threadId":"app_missing"'*)
       printf '{"id":%s,"error":{"code":-32600,"message":"no rollout found for thread id app_missing"}}\n' "$id"
@@ -1710,6 +1845,64 @@ done
         assert_eq!(calls.matches("\"method\":\"turn/start\"").count(), 2);
         assert_eq!(calls.matches("\"method\":\"thread/start\"").count(), 1);
         assert!(!calls.contains("\"method\":\"thread/resume\""));
+        executor.agents.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovers_each_running_thread_and_retries_only_unavailable_ones() {
+        let temp = TempDir::new().unwrap();
+        let (script, calls) = fake_app_server(&temp);
+        let executor = executor(&temp, script).await;
+        for (local_id, app_id, turn_id) in [
+            ("thr_active", "app_active", "app_active_turn"),
+            ("thr_idle", "app_idle", "app_idle_turn"),
+            ("thr_unavailable", "app_unavailable", "app_unavailable_turn"),
+        ] {
+            executor
+                .store
+                .create_thread(local_id, "prj_test", app_id, "Restarted thread", &json!({}))
+                .await
+                .unwrap();
+            executor
+                .store
+                .mark_app_turn_started(local_id, Some(turn_id))
+                .await
+                .unwrap();
+        }
+
+        let candidates = executor.store.recover_process_state().await.unwrap();
+        let pending = executor.recover_threads_once(&candidates).await;
+        assert_eq!(pending, vec!["thr_unavailable"]);
+        assert_eq!(
+            executor.thread("thr_active").await.unwrap().status,
+            "active"
+        );
+        assert_eq!(executor.thread("thr_idle").await.unwrap().status, "idle");
+        assert_eq!(
+            executor.thread("thr_unavailable").await.unwrap().status,
+            "recovering"
+        );
+        assert_eq!(
+            executor
+                .store
+                .active_app_turn_id("thr_active")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("app_active_turn")
+        );
+        assert!(
+            executor
+                .store
+                .active_app_turn_id("thr_idle")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let calls = std::fs::read_to_string(calls).unwrap();
+        for app_id in ["app_active", "app_idle", "app_unavailable"] {
+            assert!(calls.contains(&format!("\"threadId\":\"{app_id}\"")));
+        }
         executor.agents.shutdown().await.unwrap();
     }
 }
