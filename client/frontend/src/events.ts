@@ -119,8 +119,11 @@ export function startEvents(qc: QueryClient): () => void {
     es = new EventSource("/api/v1/events");
     es.onopen = () => {
       useSse.getState().set("live");
-      if (everLive) resync();
       everLive = true;
+      // Establish the stream first, then refresh SQLite-backed queries. This
+      // closes the initial snapshot/subscription race without replaying an
+      // entire historical journal into the transient live store.
+      resync();
     };
     es.addEventListener("nuntius", (e) => {
       try {

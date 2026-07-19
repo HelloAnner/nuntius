@@ -3,10 +3,9 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   IconArchive,
-  Spinner,
   SwipeActionRow,
   ThreadView,
-  compareByRecentActivity,
+  compareThreadActivity,
   newIdemKey,
   providerLabel,
   useConfirmAction,
@@ -23,9 +22,10 @@ import { ConnIndicator, ThreadRow, TopBar } from "../components";
 
 function groupHistory(records: HistoryRecord[]): HistoryGroup[] {
   const groups: HistoryGroup[] = [];
+  const byTurn = new Map<string, HistoryGroup>();
   for (const r of records) {
     if (r.turn) {
-      groups.push({
+      const group: HistoryGroup = {
         turn: {
           id: r.turn.id,
           ordinal: r.turn.ordinal,
@@ -34,15 +34,22 @@ function groupHistory(records: HistoryRecord[]): HistoryGroup[] {
           completedAt: r.turn.completedAt,
         },
         items: [],
-      });
-    } else if (r.item && groups.length > 0) {
-      groups[groups.length - 1].items.push({
+      };
+      groups.push(group);
+      byTurn.set(r.turn.id, group);
+    }
+  }
+  for (const r of records) {
+    if (r.item) {
+      byTurn.get(r.item.turnId)?.items.push({
         id: r.item.id,
+        ordinal: r.item.ordinal,
         kind: r.item.kind,
         text:
           r.item.contentText ??
           (r.item.structuredDetail ? JSON.stringify(r.item.structuredDetail, null, 2) : ""),
         status: r.item.status,
+        occurredAt: r.item.occurredAt,
         truncated: r.item.isTruncated,
       });
     }
@@ -191,12 +198,9 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
 
   const groups = useMemo(() => groupHistory(history.data ?? []), [history.data]);
 
-  const threadView = history.isLoading ? (
-    <div style={{ flex: 1, display: "grid", placeItems: "center" }}>
-      <Spinner />
-    </div>
-  ) : (
+  const threadView = (
     <ThreadView
+      loading={history.isLoading}
       history={groups}
       live={live}
       approvals={threadApprovals}
@@ -248,7 +252,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     );
   }
 
-  const sortedThreads = [...(projectThreads.data ?? [])].sort(compareByRecentActivity);
+  const sortedThreads = [...(projectThreads.data ?? [])].sort(compareThreadActivity);
 
   return (
     <div className="page">

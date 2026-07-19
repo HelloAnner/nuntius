@@ -1355,7 +1355,7 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
     }
     let durable = !method.ends_with("/delta");
     let event_type = format!("app_server.{}", method.replace('/', "."));
-    executor
+    let emitted = executor
         .emit(
             &event_type,
             project_id.as_deref(),
@@ -1383,6 +1383,7 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
                     app_item.as_deref(),
                     &text,
                     item,
+                    &emitted.occurred_at,
                 )
                 .await?;
             executor.sync_thread(local_thread).await?;

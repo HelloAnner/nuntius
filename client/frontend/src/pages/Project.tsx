@@ -10,7 +10,7 @@ import {
   Sheet,
   Spinner,
   SwipeActionRow,
-  compareByRecentActivity,
+  compareThreadActivity,
   useConfirmAction,
   useToast,
   type AgentProvider,
@@ -57,7 +57,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
   const selectedProviderAvailable =
     providerStatuses.find((status) => status.provider === provider)?.available ?? provider === "codex";
   const canCreate = Boolean(!unassigned && providerStatuses.some((status) => status.available));
-  const sorted = [...(threads.data ?? [])].sort(compareByRecentActivity);
+  const sorted = [...(threads.data ?? [])].sort(compareThreadActivity);
 
   const create = async () => {
     const text = firstMessage.trim();

@@ -6,6 +6,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -169,7 +170,7 @@ impl ClientStore {
     }
 
     pub async fn list_projects(&self, device_id: &str) -> Result<Vec<ProjectSummary>> {
-        let rows=sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id AND t.archived=0) thread_count FROM projects p WHERE status='active' ORDER BY updated_at DESC").fetch_all(&self.pool).await?;
+        let rows=sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id AND t.archived=0) thread_count FROM projects p WHERE status='active' ORDER BY julianday(updated_at) DESC,id DESC").fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
             .map(|r| project_summary(&r, device_id))
@@ -368,9 +369,9 @@ impl ClientStore {
         offset: i64,
     ) -> Result<Vec<ThreadSummary>> {
         let rows = if let Some(project) = project_id {
-            sqlx::query("SELECT * FROM threads WHERE project_id=? AND archived=0 ORDER BY CASE WHEN last_activity_at IS NULL OR updated_at>last_activity_at THEN updated_at ELSE last_activity_at END DESC,id DESC LIMIT ? OFFSET ?").bind(project).bind(limit).bind(offset).fetch_all(&self.pool).await?
+            sqlx::query("SELECT * FROM threads WHERE project_id=? AND archived=0 ORDER BY julianday(COALESCE(last_activity_at,created_at)) DESC,id DESC LIMIT ? OFFSET ?").bind(project).bind(limit).bind(offset).fetch_all(&self.pool).await?
         } else {
-            sqlx::query("SELECT * FROM threads WHERE archived=0 ORDER BY CASE WHEN last_activity_at IS NULL OR updated_at>last_activity_at THEN updated_at ELSE last_activity_at END DESC,id DESC LIMIT ? OFFSET ?").bind(limit).bind(offset).fetch_all(&self.pool).await?
+            sqlx::query("SELECT * FROM threads WHERE archived=0 ORDER BY julianday(COALESCE(last_activity_at,created_at)) DESC,id DESC LIMIT ? OFFSET ?").bind(limit).bind(offset).fetch_all(&self.pool).await?
         };
         Ok(rows
             .into_iter()
@@ -662,6 +663,7 @@ impl ClientStore {
         app_item_id: Option<&str>,
         text: &str,
         detail: &Value,
+        occurred_at: &str,
     ) -> Result<String> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let existing = if let Some(app_turn) = app_turn_id {
@@ -690,7 +692,7 @@ impl ClientStore {
                 id
             } else {
                 let id = new_id("trn");
-                sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at) VALUES(?,?,NULL,1,'active',?)").bind(&id).bind(thread_id).bind(now()).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at) VALUES(?,?,NULL,1,'active',?)").bind(&id).bind(thread_id).bind(occurred_at).execute(&mut *tx).await?;
                 id
             }
         } else {
@@ -701,23 +703,62 @@ impl ClientStore {
             .fetch_one(&mut *tx)
             .await?;
             let id = new_id("trn");
-            sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at) VALUES(?,?,?,?,'active',?)").bind(&id).bind(thread_id).bind(app_turn_id).bind(ordinal).bind(now()).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at) VALUES(?,?,?,?,'active',?)").bind(&id).bind(thread_id).bind(app_turn_id).bind(ordinal).bind(occurred_at).execute(&mut *tx).await?;
             id
         };
-        let ordinal: i64 =
-            sqlx::query_scalar("SELECT COALESCE(MAX(ordinal),0)+1 FROM items WHERE turn_id=?")
-                .bind(&turn_id)
-                .fetch_one(&mut *tx)
+        let encoded_detail = serde_json::to_string(detail)?;
+        let existing_item = if let Some(app_item_id) = app_item_id {
+            sqlx::query_scalar::<_, String>(
+                "SELECT id FROM items WHERE turn_id=? AND app_server_item_id=?",
+            )
+            .bind(&turn_id)
+            .bind(app_item_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        } else {
+            None
+        };
+        if let Some(item_id) = existing_item {
+            // Replayed item/completed notifications update the durable row in
+            // place. They must never allocate a second ordinal or second id.
+            sqlx::query("UPDATE items SET status='completed',content_text=?,structured_detail=?,occurred_at=CASE WHEN julianday(?)<julianday(occurred_at) THEN ? ELSE occurred_at END,completed_at=COALESCE(completed_at,?),revision=CASE WHEN content_text IS NOT ? OR structured_detail IS NOT ? THEN revision+1 ELSE revision END WHERE id=?")
+                .bind(text)
+                .bind(&encoded_detail)
+                .bind(occurred_at)
+                .bind(occurred_at)
+                .bind(occurred_at)
+                .bind(text)
+                .bind(&encoded_detail)
+                .bind(item_id)
+                .execute(&mut *tx)
                 .await?;
-        let item_id = new_id("itm");
-        let stamp = now();
-        sqlx::query("INSERT OR IGNORE INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,content_text,structured_detail,occurred_at,completed_at) VALUES(?,?,?,?,'agent_message','completed',?,?,?,?)").bind(&item_id).bind(&turn_id).bind(app_item_id).bind(ordinal).bind(text).bind(serde_json::to_string(detail)?).bind(&stamp).bind(&stamp).execute(&mut *tx).await?;
+        } else {
+            let ordinal: i64 =
+                sqlx::query_scalar("SELECT COALESCE(MAX(ordinal),0)+1 FROM items WHERE turn_id=?")
+                    .bind(&turn_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            let item_id = new_id("itm");
+            sqlx::query("INSERT INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,content_text,structured_detail,occurred_at,completed_at) VALUES(?,?,?,?,'agent_message','completed',?,?,?,?)")
+                .bind(&item_id)
+                .bind(&turn_id)
+                .bind(app_item_id)
+                .bind(ordinal)
+                .bind(text)
+                .bind(encoded_detail)
+                .bind(occurred_at)
+                .bind(occurred_at)
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query(
-            "UPDATE threads SET status=CASE WHEN EXISTS(SELECT 1 FROM turns WHERE thread_id=? AND status IN ('active','running','inProgress')) THEN 'active' ELSE status END,last_activity_at=?,updated_at=? WHERE id=?",
+            "UPDATE threads SET status=CASE WHEN EXISTS(SELECT 1 FROM turns WHERE thread_id=? AND status IN ('active','running','inProgress')) THEN 'active' ELSE status END,last_activity_at=CASE WHEN last_activity_at IS NULL OR julianday(?)>julianday(last_activity_at) THEN ? ELSE last_activity_at END,updated_at=CASE WHEN julianday(?)>julianday(updated_at) THEN ? ELSE updated_at END WHERE id=?",
         )
         .bind(thread_id)
-        .bind(&stamp)
-        .bind(&stamp)
+        .bind(occurred_at)
+        .bind(occurred_at)
+        .bind(occurred_at)
+        .bind(occurred_at)
         .bind(thread_id)
         .execute(&mut *tx)
         .await?;
@@ -784,11 +825,11 @@ impl ClientStore {
         let title = imported_thread_title(thread);
         let stamp = unix_value_to_rfc3339(thread.get("updatedAt")).unwrap_or_else(now);
         let status = value_status(thread.get("status"), "idle");
-        sqlx::query(
-            "UPDATE threads SET title=?,status=?,last_activity_at=?,updated_at=? WHERE id=?",
-        )
+        sqlx::query("UPDATE threads SET title=?,status=?,last_activity_at=CASE WHEN last_activity_at IS NULL OR julianday(?)>julianday(last_activity_at) THEN ? ELSE last_activity_at END,updated_at=CASE WHEN julianday(?)>julianday(updated_at) THEN ? ELSE updated_at END WHERE id=?")
         .bind(title)
         .bind(status)
+        .bind(&stamp)
+        .bind(&stamp)
         .bind(&stamp)
         .bind(&stamp)
         .bind(id)
@@ -828,6 +869,7 @@ impl ClientStore {
             let completed = unix_value_to_rfc3339(turn.get("completedAt"));
             sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at,completed_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ordinal=excluded.ordinal,status=excluded.status,started_at=COALESCE(excluded.started_at,turns.started_at),completed_at=COALESCE(excluded.completed_at,turns.completed_at)")
                 .bind(&turn_id).bind(thread_id).bind(app_turn).bind(turn_index as i64+1).bind(status).bind(&started).bind(&completed).execute(&mut *tx).await?;
+            let mut claimed_item_ids = HashSet::new();
             for item in turn
                 .get("items")
                 .and_then(Value::as_array)
@@ -852,8 +894,12 @@ impl ClientStore {
                     .await?
                 };
                 if existing.is_none() && kind == "user_message" {
-                    existing = sqlx::query_scalar::<_, String>("SELECT id FROM items WHERE turn_id=? AND kind='user_message' AND app_server_item_id IS NULL ORDER BY ordinal LIMIT 1")
-                        .bind(&turn_id).fetch_optional(&mut *tx).await?;
+                    existing = sqlx::query_scalar::<_, String>("SELECT id FROM items WHERE turn_id=? AND kind='user_message' AND app_server_item_id IS NULL ORDER BY ordinal,id")
+                        .bind(&turn_id)
+                        .fetch_all(&mut *tx)
+                        .await?
+                        .into_iter()
+                        .find(|id| !claimed_item_ids.contains(id));
                 }
                 let text = app_item_text(item);
                 if existing.is_none()
@@ -863,21 +909,27 @@ impl ClientStore {
                     // which does not always match the id the history endpoint returns; fall back
                     // to a content match so backfill never duplicates a recorded message.
                     existing = sqlx::query_scalar::<_, String>(
-                        "SELECT id FROM items WHERE turn_id=? AND kind=? AND content_text=? ORDER BY ordinal LIMIT 1",
+                        "SELECT id FROM items WHERE turn_id=? AND kind=? AND content_text=? ORDER BY ordinal,id",
                     )
                     .bind(&turn_id)
-                    .bind(kind)
+                    .bind(&kind)
                     .bind(content)
-                    .fetch_optional(&mut *tx)
-                    .await?;
+                    .fetch_all(&mut *tx)
+                    .await?
+                    .into_iter()
+                    .find(|id| !claimed_item_ids.contains(id));
                 }
                 let item_id = existing.unwrap_or_else(|| new_id("itm"));
-                let stamp = started.clone().unwrap_or_else(now);
+                claimed_item_ids.insert(item_id.clone());
+                let stamp = app_item_occurred_at(item)
+                    .or_else(|| started.clone())
+                    .or_else(|| completed.clone())
+                    .unwrap_or_else(now);
                 // New rows take the next free ordinal instead of the app-side index: live-recorded
                 // items (user/agent messages) already occupy ordinals, and the (turn_id, ordinal)
                 // unique index must never abort the whole history import. Existing rows keep their
                 // ordinal so re-imports cannot reshuffle what the live path already persisted.
-                sqlx::query("INSERT INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,revision,content_text,structured_detail,occurred_at,completed_at) VALUES(?,?,NULLIF(?,''),COALESCE((SELECT MAX(ordinal)+1 FROM items WHERE turn_id=?),1),?,'completed',1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET app_server_item_id=COALESCE(excluded.app_server_item_id,items.app_server_item_id),kind=excluded.kind,content_text=excluded.content_text,structured_detail=excluded.structured_detail,completed_at=COALESCE(excluded.completed_at,items.completed_at),revision=CASE WHEN items.app_server_item_id IS NOT COALESCE(excluded.app_server_item_id,items.app_server_item_id) OR items.kind IS NOT excluded.kind OR items.content_text IS NOT excluded.content_text OR items.structured_detail IS NOT excluded.structured_detail OR (excluded.completed_at IS NOT NULL AND items.completed_at IS NOT excluded.completed_at) THEN items.revision+1 ELSE items.revision END")
+                sqlx::query("INSERT INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,revision,content_text,structured_detail,occurred_at,completed_at) VALUES(?,?,NULLIF(?,''),COALESCE((SELECT MAX(ordinal)+1 FROM items WHERE turn_id=?),1),?,'completed',1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET app_server_item_id=COALESCE(excluded.app_server_item_id,items.app_server_item_id),kind=excluded.kind,content_text=excluded.content_text,structured_detail=excluded.structured_detail,occurred_at=CASE WHEN julianday(excluded.occurred_at)<julianday(items.occurred_at) THEN excluded.occurred_at ELSE items.occurred_at END,completed_at=COALESCE(excluded.completed_at,items.completed_at),revision=CASE WHEN items.app_server_item_id IS NOT COALESCE(excluded.app_server_item_id,items.app_server_item_id) OR items.kind IS NOT excluded.kind OR items.content_text IS NOT excluded.content_text OR items.structured_detail IS NOT excluded.structured_detail OR (excluded.completed_at IS NOT NULL AND items.completed_at IS NOT excluded.completed_at) THEN items.revision+1 ELSE items.revision END")
                     .bind(&item_id).bind(&turn_id).bind(app_item).bind(&turn_id).bind(kind).bind(text).bind(serde_json::to_string(item)?).bind(&stamp).bind(&completed).execute(&mut *tx).await?;
             }
             tx.commit().await?;
@@ -929,7 +981,7 @@ impl ClientStore {
                 item: None,
             });
         }
-        let turns = sqlx::query("SELECT * FROM turns WHERE thread_id=? ORDER BY ordinal")
+        let turns = sqlx::query("SELECT * FROM turns WHERE thread_id=? ORDER BY COALESCE(julianday(started_at),julianday(completed_at)),ordinal,id")
             .bind(thread_id)
             .fetch_all(&self.pool)
             .await?;
@@ -948,10 +1000,12 @@ impl ClientStore {
                 turn: Some(turn),
                 item: None,
             });
-            let items = sqlx::query("SELECT * FROM items WHERE turn_id=? ORDER BY ordinal")
-                .bind(&turn_id)
-                .fetch_all(&self.pool)
-                .await?;
+            let items = sqlx::query(
+                "SELECT * FROM items WHERE turn_id=? ORDER BY julianday(occurred_at),ordinal,id",
+            )
+            .bind(&turn_id)
+            .fetch_all(&self.pool)
+            .await?;
             for item in items {
                 let (content_text, content_truncated) = item
                     .get::<Option<String>, _>("content_text")
@@ -1391,11 +1445,37 @@ fn value_status(value: Option<&Value>, fallback: &str) -> String {
 }
 
 fn unix_value_to_rfc3339(value: Option<&Value>) -> Option<String> {
-    let seconds = value?.as_i64()?;
+    let value = value?;
+    if let Some(text) = value.as_str() {
+        return OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+            .ok()?
+            .format(&time::format_description::well_known::Rfc3339)
+            .ok();
+    }
+    let raw = value.as_i64()?;
+    // App Server versions have used seconds and milliseconds in different
+    // payloads. Normalize both before persisting so every consumer parses the
+    // same instant rather than comparing untyped integers.
+    let (seconds, nanos) = if raw.abs() >= 10_000_000_000 {
+        (
+            raw.div_euclid(1_000),
+            raw.rem_euclid(1_000) as i128 * 1_000_000,
+        )
+    } else {
+        (raw, 0)
+    };
     OffsetDateTime::from_unix_timestamp(seconds)
+        .ok()?
+        .replace_nanosecond(nanos as u32)
         .ok()?
         .format(&time::format_description::well_known::Rfc3339)
         .ok()
+}
+
+fn app_item_occurred_at(item: &Value) -> Option<String> {
+    ["occurredAt", "createdAt", "startedAt", "timestamp"]
+        .into_iter()
+        .find_map(|field| unix_value_to_rfc3339(item.get(field)))
 }
 
 fn app_item_text(item: &Value) -> Option<String> {
@@ -1814,6 +1894,18 @@ mod tests {
                 Some("app_item"),
                 "world",
                 &json!({"type":"agentMessage"}),
+                &now(),
+            )
+            .await
+            .unwrap();
+        store
+            .record_agent_message(
+                "thr_test",
+                Some("app_turn"),
+                Some("app_item"),
+                "world",
+                &json!({"type":"agentMessage"}),
+                &now(),
             )
             .await
             .unwrap();
@@ -1822,7 +1914,8 @@ mod tests {
                 "thr_test",
                 &json!({"turns":[{"id":"app_turn","status":"completed","items":[
                     {"id":"app_user","type":"userMessage","content":[{"type":"text","text":"hello"}]},
-                    {"id":"app_item","type":"agentMessage","text":"world"}
+                    {"id":"app_item","type":"agentMessage","text":"world"},
+                    {"id":"app_item_repeat","type":"agentMessage","text":"world"}
                 ]}]}),
             )
             .await
@@ -1834,7 +1927,7 @@ mod tests {
                 .iter()
                 .filter(|record| record.item.is_some())
                 .count(),
-            2
+            3
         );
         let revisions_before = history
             .iter()
@@ -1845,7 +1938,8 @@ mod tests {
                 "thr_test",
                 &json!({"turns":[{"id":"app_turn","status":"completed","items":[
                     {"id":"app_user","type":"userMessage","content":[{"type":"text","text":"hello"}]},
-                    {"id":"app_item","type":"agentMessage","text":"world"}
+                    {"id":"app_item","type":"agentMessage","text":"world"},
+                    {"id":"app_item_repeat","type":"agentMessage","text":"world"}
                 ]}]}),
             )
             .await

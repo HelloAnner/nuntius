@@ -1048,14 +1048,20 @@ async fn events(
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok());
-    let after = header_after.or(query.after).unwrap_or(0);
     let mut receiver = state.events.subscribe();
-    let (minimum, _) = state.store.event_bounds(&session.user_id).await?;
+    let (minimum, maximum) = state.store.event_bounds(&session.user_id).await?;
+    // A fresh page obtains its state from the REST snapshot and must start at
+    // the live edge. Replaying the complete journal into an empty browser store
+    // used to resurrect old turns and race the history request. EventSource
+    // reconnects still carry Last-Event-ID and therefore replay their gap.
+    let after = header_after
+        .or(query.after)
+        .unwrap_or_else(|| maximum.unwrap_or(0));
     let mut resync_required = after > 0
-        && match minimum {
+        && (match minimum {
             Some(minimum) => after.saturating_add(1) < minimum,
             None => true,
-        };
+        } || maximum.is_none_or(|maximum| after > maximum));
     let mut replay = if resync_required {
         Vec::new()
     } else {
@@ -1070,9 +1076,21 @@ async fn events(
     }
     let user_id = session.user_id;
     let output = stream! {
+        let mut last_cursor = after;
         if resync_required { yield Ok(Event::default().event("resync_required").data("{}")); }
-        for(cursor,event)in replay{yield Ok(Event::default().id(cursor.to_string()).event("nuntius").json_data(event).expect("serializable event"));}
-        loop{match receiver.recv().await{Ok(PublishedEvent{cursor,user_id:event_user,event})if event_user==user_id=>yield Ok(Event::default().id(cursor.to_string()).event("nuntius").json_data(event).expect("serializable event")),Ok(_)=>{},Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{yield Ok(Event::default().event("resync_required").data("{}"));break},Err(_)=>break}}
+        for(cursor,event)in replay{
+            if cursor <= last_cursor { continue; }
+            last_cursor = cursor;
+            yield Ok(Event::default().id(cursor.to_string()).event("nuntius").json_data(event).expect("serializable event"));
+        }
+        loop{match receiver.recv().await{Ok(PublishedEvent{cursor,user_id:event_user,event})if event_user==user_id=>{
+            // The receiver is subscribed before the replay query so events
+            // cannot be lost in between. That intentionally creates overlap;
+            // the cursor gate removes the duplicate half of that overlap.
+            if cursor <= last_cursor { continue; }
+            last_cursor = cursor;
+            yield Ok(Event::default().id(cursor.to_string()).event("nuntius").json_data(event).expect("serializable event"));
+        },Ok(_)=>{},Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{yield Ok(Event::default().event("resync_required").data("{}"));break},Err(_)=>break}}
     };
     Ok(Sse::new(output).keep_alive(
         KeepAlive::new()

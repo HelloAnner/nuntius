@@ -39,19 +39,19 @@ export function fullTime(iso: string | null | undefined): string {
   return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}`;
 }
 
-type RecentActivityItem = {
-  id: string;
-  lastActivityAt: string | null | undefined;
-};
+/** Newest activity first, with a deterministic fallback for missing/equal timestamps. */
+export function compareThreadActivity(
+  left: { id: string; lastActivityAt?: string | null },
+  right: { id: string; lastActivityAt?: string | null },
+): number {
+  const leftAt = Date.parse(left.lastActivityAt ?? "");
+  const rightAt = Date.parse(right.lastActivityAt ?? "");
+  const leftValid = Number.isFinite(leftAt);
+  const rightValid = Number.isFinite(rightAt);
 
-/** Newest meaningful activity first; missing or invalid timestamps stay last. */
-export function compareByRecentActivity(a: RecentActivityItem, b: RecentActivityItem): number {
-  const time = (value: string | null | undefined) => {
-    const parsed = value ? Date.parse(value) : Number.NaN;
-    return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
-  };
-  const difference = time(b.lastActivityAt) - time(a.lastActivityAt);
-  return difference || a.id.localeCompare(b.id);
+  if (leftValid && rightValid && leftAt !== rightAt) return rightAt - leftAt;
+  if (leftValid !== rightValid) return leftValid ? -1 : 1;
+  return right.id.localeCompare(left.id);
 }
 
 const STATUS_LABELS: Record<string, string> = {
