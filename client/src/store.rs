@@ -368,9 +368,9 @@ impl ClientStore {
         offset: i64,
     ) -> Result<Vec<ThreadSummary>> {
         let rows = if let Some(project) = project_id {
-            sqlx::query("SELECT * FROM threads WHERE project_id=? AND archived=0 ORDER BY COALESCE(last_activity_at,created_at) DESC,id DESC LIMIT ? OFFSET ?").bind(project).bind(limit).bind(offset).fetch_all(&self.pool).await?
+            sqlx::query("SELECT * FROM threads WHERE project_id=? AND archived=0 ORDER BY CASE WHEN last_activity_at IS NULL OR updated_at>last_activity_at THEN updated_at ELSE last_activity_at END DESC,id DESC LIMIT ? OFFSET ?").bind(project).bind(limit).bind(offset).fetch_all(&self.pool).await?
         } else {
-            sqlx::query("SELECT * FROM threads WHERE archived=0 ORDER BY COALESCE(last_activity_at,created_at) DESC,id DESC LIMIT ? OFFSET ?").bind(limit).bind(offset).fetch_all(&self.pool).await?
+            sqlx::query("SELECT * FROM threads WHERE archived=0 ORDER BY CASE WHEN last_activity_at IS NULL OR updated_at>last_activity_at THEN updated_at ELSE last_activity_at END DESC,id DESC LIMIT ? OFFSET ?").bind(limit).bind(offset).fetch_all(&self.pool).await?
         };
         Ok(rows
             .into_iter()
@@ -1336,6 +1336,12 @@ fn project_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ProjectSumma
     }
 }
 fn thread_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ThreadSummary {
+    let last_activity_at = r.get::<Option<String>, _>("last_activity_at");
+    let updated_at = r.get::<String, _>("updated_at");
+    let recent_activity_at = match last_activity_at {
+        Some(value) if value >= updated_at => value,
+        _ => updated_at,
+    };
     ThreadSummary {
         id: r.get("id"),
         device_id: device_id.into(),
@@ -1347,7 +1353,7 @@ fn thread_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ThreadSummary
         archived: r.get("archived"),
         history_completeness: HistoryCompleteness::Complete,
         last_synced_at: None,
-        last_activity_at: r.get("last_activity_at"),
+        last_activity_at: Some(recent_activity_at),
     }
 }
 
@@ -1429,6 +1435,65 @@ fn truncate_utf8(value: String, max_bytes: usize) -> (String, bool) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn threads_are_sorted_by_the_newest_update_or_conversation() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_recent", "Recent", &workspace, &json!({}))
+            .await
+            .unwrap();
+
+        for (id, app_id) in [
+            ("thr_created", "app_created"),
+            ("thr_updated", "app_updated"),
+            ("thr_conversation", "app_conversation"),
+        ] {
+            store
+                .create_thread(id, "prj_recent", app_id, id, &json!({}))
+                .await
+                .unwrap();
+        }
+
+        sqlx::query(
+            "UPDATE threads SET last_activity_at='2026-07-19T08:00:00Z',updated_at='2026-07-19T08:00:00Z' WHERE id='thr_created'",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE threads SET last_activity_at='2026-07-19T08:00:00Z',updated_at='2026-07-19T10:00:00Z' WHERE id='thr_updated'",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE threads SET last_activity_at='2026-07-19T11:00:00Z',updated_at='2026-07-19T09:00:00Z' WHERE id='thr_conversation'",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        let threads = store.list_threads("dev_test", None).await.unwrap();
+        assert_eq!(
+            threads
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["thr_conversation", "thr_updated", "thr_created"]
+        );
+        assert_eq!(
+            threads[0].last_activity_at.as_deref(),
+            Some("2026-07-19T11:00:00Z")
+        );
+        assert_eq!(
+            threads[1].last_activity_at.as_deref(),
+            Some("2026-07-19T10:00:00Z")
+        );
+    }
 
     #[tokio::test]
     async fn archived_threads_remain_stored_but_leave_active_lists() {

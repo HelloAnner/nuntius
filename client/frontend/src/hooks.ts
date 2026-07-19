@@ -1,7 +1,7 @@
 /* misc hooks */
 import { useCallback, useSyncExternalStore } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useToast } from "@nuntius/shared";
+import { useToast, type ThreadSummary } from "@nuntius/shared";
 import {
   queueArchive,
   submitArchive,
@@ -38,6 +38,22 @@ export function useArchiveThreadAction() {
     async (threadId: string) => {
       if (busyIds.has(threadId)) return false;
       queueArchive(threadId);
+      const cachedThread = [
+        ...qc
+          .getQueriesData<ThreadSummary[]>({ queryKey: ["projectThreads"] })
+          .flatMap(([, threads]) => threads ?? []),
+        ...(qc.getQueryData<ThreadSummary[]>(["threads"]) ?? []),
+      ].find((thread) => thread.id === threadId);
+      if (cachedThread) {
+        qc.setQueryData<ThreadSummary>(["threadSnapshot", threadId], {
+          ...cachedThread,
+          archived: true,
+        });
+      }
+      const removeArchived = (old: ThreadSummary[] | undefined) =>
+        old?.filter((thread) => thread.id !== threadId);
+      qc.setQueriesData<ThreadSummary[]>({ queryKey: ["projectThreads"] }, removeArchived);
+      qc.setQueryData<ThreadSummary[]>(["threads"], removeArchived);
       toast("归档请求已保存；如果本地服务正在重启，恢复后会自动完成");
       void submitArchive(threadId, qc, toast);
       return true;

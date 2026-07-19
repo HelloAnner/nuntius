@@ -1,7 +1,7 @@
 /* App shell: auth gate, SSE lifecycle, routing, responsive chrome. */
 import { useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Spinner, ToastHost, useTheme } from "@nuntius/shared";
+import { Spinner, ToastHost, useTheme, type ThreadSummary } from "@nuntius/shared";
 import { api, setCsrfProvider, ApiError } from "./api";
 import { startEvents } from "./events";
 import { useArchiveOutboxRunner } from "./archiveOutbox";
@@ -111,7 +111,12 @@ function RouterView() {
 function RecentThreadRoute({ threadId }: { threadId: string }) {
   const navigate = useRoute((state) => state.navigate);
   const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
-  const thread = threads.data?.find((item) => item.id === threadId);
+  const snapshot = useQuery<ThreadSummary | undefined>({
+    queryKey: ["threadSnapshot", threadId],
+    queryFn: async () => undefined,
+    enabled: false,
+  });
+  const thread = threads.data?.find((item) => item.id === threadId) ?? snapshot.data;
 
   useEffect(() => {
     if (threads.isSuccess && !thread) navigate({ name: "recents" }, { replace: true });
