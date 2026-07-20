@@ -611,7 +611,8 @@ async fn create_archive(binary: &Path, destination: &Path) -> Result<()> {
         .arg(destination)
         .arg("-C")
         .arg(parent)
-        .arg(name);
+        .arg(name)
+        .env("COPYFILE_DISABLE", "1");
     checked(command, "package release archive", Duration::from_secs(120)).await?;
     Ok(())
 }
@@ -671,6 +672,7 @@ async fn deploy_release(config: &OpsConfig, output: &BuildOutput) -> Result<()> 
             "tar",
             "-xzf",
             &remote_server_archive,
+            "--no-same-owner",
             "-C",
             &remote_server_dir,
         ],
@@ -738,6 +740,12 @@ async fn deploy_release(config: &OpsConfig, output: &BuildOutput) -> Result<()> 
             &remote_desired,
         ],
         "install desired client release",
+    )
+    .await?;
+    remote_checked(
+        config,
+        ["rm", "-f", &remote_client_upload, &remote_desired_upload],
+        "remove uploaded staging files",
     )
     .await?;
     remote_checked(
