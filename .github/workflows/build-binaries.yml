@@ -334,15 +334,27 @@ jobs:
       - name: Publish binaries then manifest
         if: steps.head.outputs.publish == 'true'
         run: |
-          gh release upload continuous \
+          retry_github() {
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -eq 8 ]; then
+                return 1
+              fi
+              echo "::warning::GitHub release operation failed (attempt $attempt/8); retrying in 10s"
+              attempt=$((attempt + 1))
+              sleep 10
+            done
+          }
+          retry_github gh release upload continuous \
             release/nuntius-server-linux-x86_64-*.tar.gz \
             release/nuntius-client-macos-arm64-*.tar.gz \
-            --repo "$GITHUB_REPOSITORY"
-          gh release upload continuous \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          retry_github gh release upload continuous \
             release/manifest.json \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
-          gh release edit continuous \
+          retry_github gh release edit continuous \
             --repo "$GITHUB_REPOSITORY" \
             --title "Continuous build · $GITHUB_SHA" \
             --notes "Rolling self-update channel for commit $GITHUB_SHA. The manifest points to immutable commit assets."
