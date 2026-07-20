@@ -1552,31 +1552,75 @@
               "children": [
                 {
                   "type": "frame",
-                  "id": "aBwf7",
+                  "id": "wtfhv",
                   "name": "Conn",
-                  "gap": 8,
+                  "fill": "$success-soft",
+                  "cornerRadius": "$r-pill",
+                  "gap": 7,
                   "padding": [
-                    0,
-                    8
+                    5,
+                    11
                   ],
                   "alignItems": "center",
                   "children": [
                     {
-                      "type": "ellipse",
-                      "id": "eIIM3",
-                      "name": "Dot",
-                      "fill": "$success",
-                      "width": 8,
-                      "height": 8
+                      "type": "frame",
+                      "id": "S1DMo",
+                      "name": "Pulse",
+                      "width": 14,
+                      "height": 14,
+                      "layout": "none",
+                      "children": [
+                        {
+                          "type": "ellipse",
+                          "id": "hY6xf",
+                          "x": 0,
+                          "y": 0,
+                          "name": "Ring2",
+                          "fill": "#178A4C1F",
+                          "width": 14,
+                          "height": 14
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "nIHjq",
+                          "x": 2.5,
+                          "y": 2.5,
+                          "name": "Ring1",
+                          "fill": "#178A4C4D",
+                          "width": 9,
+                          "height": 9
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "TK1CL",
+                          "x": 4,
+                          "y": 4,
+                          "name": "Dot",
+                          "fill": "$success",
+                          "width": 6,
+                          "height": 6
+                        }
+                      ]
                     },
                     {
                       "type": "text",
-                      "id": "LY5Ny",
+                      "id": "JfIwI",
                       "name": "Label",
-                      "fill": "$ink2",
-                      "content": "已连接 · Live",
+                      "fill": "$success",
+                      "content": "已连接",
                       "fontFamily": "$font-sans",
-                      "fontSize": 12,
+                      "fontSize": 11.5,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "MALGp",
+                      "name": "Latency",
+                      "fill": "$success",
+                      "content": "45ms",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 10.5,
                       "fontWeight": "normal"
                     }
                   ]
@@ -1836,7 +1880,7 @@
             },
             {
               "type": "frame",
-              "id": "xQ5lN",
+              "id": "UXMSO",
               "name": "SessionList",
               "clip": true,
               "width": "fill_container",
@@ -1848,7 +1892,7 @@
               "children": [
                 {
                   "type": "frame",
-                  "id": "yilcd",
+                  "id": "KzsJg",
                   "name": "Group 今天 · 3",
                   "width": "fill_container",
                   "padding": [
@@ -1860,7 +1904,7 @@
                   "children": [
                     {
                       "type": "text",
-                      "id": "lsb9i",
+                      "id": "p7C1BG",
                       "name": "Label",
                       "fill": "$ink3",
                       "content": "今天 · 3",
@@ -1871,9 +1915,9 @@
                   ]
                 },
                 {
-                  "id": "a9mO3K",
+                  "id": "bcgTK",
                   "type": "ref",
-                  "ref": "j0SoM",
+                  "ref": "k6x5Hp",
                   "name": "Row / 重构设备隧道重连逻辑",
                   "width": "fill_container",
                   "stroke": "$border",
@@ -1881,36 +1925,26 @@
                     "bottom": 1
                   },
                   "descendants": {
-                    "PjHzD": {
-                      "fill": "$surface2"
-                    },
-                    "zSVDZ": {
-                      "icon": "message-square",
-                      "fill": "$ink2"
-                    },
-                    "S6BeLj": {
+                    "rJ9Ro": {
                       "content": "重构设备隧道重连逻辑",
                       "fill": "$ink"
                     },
-                    "k9KlIB": {
-                      "content": "Mac Studio · nuntius · 2 分钟前"
+                    "Zyk36": {
+                      "content": "Mac Studio"
                     },
-                    "nCD9K": {
-                      "fill": "$primary-soft"
+                    "n2ba7": {
+                      "content": "nuntius"
                     },
-                    "BeMpt": {
-                      "fill": "$primary"
-                    },
-                    "NTBOa": {
-                      "content": "执行中",
-                      "fill": "$primary"
+                    "L5fNqZ": {
+                      "content": "2 分钟前",
+                      "fill": "$ink3"
                     }
                   }
                 },
                 {
-                  "id": "r47Y36",
+                  "id": "SmlKg",
                   "type": "ref",
-                  "ref": "j0SoM",
+                  "ref": "k6x5Hp",
                   "name": "Row / 升级依赖并修复构建告警",
                   "width": "fill_container",
                   "stroke": "$border",
@@ -1918,36 +1952,48 @@
                     "bottom": 1
                   },
                   "descendants": {
-                    "PjHzD": {
-                      "fill": "$danger-soft"
+                    "Xl8D4": {
+                      "fill": "#B96A001A"
                     },
-                    "zSVDZ": {
-                      "icon": "shield-alert",
-                      "fill": "$danger"
+                    "GTjp1": {
+                      "fill": "#B96A0040"
                     },
-                    "S6BeLj": {
+                    "FQ6iV": {
+                      "fill": "$warning"
+                    },
+                    "rJ9Ro": {
                       "content": "升级依赖并修复构建告警",
                       "fill": "$ink"
                     },
-                    "k9KlIB": {
-                      "content": "Mac Studio · nuntius · 5 分钟前"
+                    "Zyk36": {
+                      "content": "Mac Studio"
                     },
-                    "nCD9K": {
-                      "fill": "$danger-soft"
+                    "n2ba7": {
+                      "content": "nuntius"
                     },
-                    "BeMpt": {
-                      "fill": "$danger"
+                    "L5fNqZ": {
+                      "content": "5 分钟前",
+                      "fill": "$ink3"
                     },
-                    "NTBOa": {
-                      "content": "待审批",
-                      "fill": "$danger"
+                    "MGdCk": {
+                      "fill": "$codex-soft"
+                    },
+                    "MGdCk/tHqwb": {
+                      "fill": "$codex"
+                    },
+                    "MGdCk/r7iaP": {
+                      "content": "C"
+                    },
+                    "MGdCk/QIWt6": {
+                      "content": "Codex",
+                      "fill": "$codex"
                     }
                   }
                 },
                 {
-                  "id": "Ly3Bc",
+                  "id": "mFS1V",
                   "type": "ref",
-                  "ref": "j0SoM",
+                  "ref": "k6x5Hp",
                   "name": "Row / 修复 SQLite WAL checkpoint 告警",
                   "width": "fill_container",
                   "stroke": "$border",
@@ -1955,35 +2001,34 @@
                     "bottom": 1
                   },
                   "descendants": {
-                    "PjHzD": {
-                      "fill": "$surface2"
+                    "Xl8D4": {
+                      "enabled": false
                     },
-                    "zSVDZ": {
-                      "icon": "message-square",
-                      "fill": "$ink2"
+                    "GTjp1": {
+                      "enabled": false
                     },
-                    "S6BeLj": {
+                    "FQ6iV": {
+                      "fill": "$success"
+                    },
+                    "rJ9Ro": {
                       "content": "修复 SQLite WAL checkpoint 告警",
                       "fill": "$ink"
                     },
-                    "k9KlIB": {
-                      "content": "Mac Studio · ops-dashboard · 1 小时前"
+                    "Zyk36": {
+                      "content": "Mac Studio"
                     },
-                    "nCD9K": {
-                      "fill": "$surface2"
+                    "n2ba7": {
+                      "content": "ops-dashboard"
                     },
-                    "BeMpt": {
+                    "L5fNqZ": {
+                      "content": "1 小时前",
                       "fill": "$ink3"
-                    },
-                    "NTBOa": {
-                      "content": "空闲",
-                      "fill": "$ink2"
                     }
                   }
                 },
                 {
                   "type": "frame",
-                  "id": "GzqCy",
+                  "id": "rGd0q",
                   "name": "Group 昨天 · 2",
                   "width": "fill_container",
                   "padding": [
@@ -1995,7 +2040,7 @@
                   "children": [
                     {
                       "type": "text",
-                      "id": "ArRF6",
+                      "id": "zhIOH",
                       "name": "Label",
                       "fill": "$ink3",
                       "content": "昨天 · 2",
@@ -2006,9 +2051,9 @@
                   ]
                 },
                 {
-                  "id": "Oy4Rn",
+                  "id": "r8N67E",
                   "type": "ref",
-                  "ref": "j0SoM",
+                  "ref": "k6x5Hp",
                   "name": "Row / 整理 zsh 配置与 alias",
                   "width": "fill_container",
                   "stroke": "$border",
@@ -2016,36 +2061,48 @@
                     "bottom": 1
                   },
                   "descendants": {
-                    "PjHzD": {
-                      "fill": "$surface2"
+                    "Xl8D4": {
+                      "enabled": false
                     },
-                    "zSVDZ": {
-                      "icon": "message-square",
-                      "fill": "$ink2"
+                    "GTjp1": {
+                      "enabled": false
                     },
-                    "S6BeLj": {
+                    "FQ6iV": {
+                      "fill": "$ink3"
+                    },
+                    "rJ9Ro": {
                       "content": "整理 zsh 配置与 alias",
                       "fill": "$ink"
                     },
-                    "k9KlIB": {
-                      "content": "MacBook Air · dotfiles · 昨天 18:22"
+                    "Zyk36": {
+                      "content": "MacBook Air"
                     },
-                    "nCD9K": {
-                      "fill": "$surface2"
+                    "n2ba7": {
+                      "content": "dotfiles"
                     },
-                    "BeMpt": {
+                    "L5fNqZ": {
+                      "content": "昨天 18:22",
                       "fill": "$ink3"
                     },
-                    "NTBOa": {
-                      "content": "空闲",
-                      "fill": "$ink2"
+                    "MGdCk": {
+                      "fill": "$codex-soft"
+                    },
+                    "MGdCk/tHqwb": {
+                      "fill": "$codex"
+                    },
+                    "MGdCk/r7iaP": {
+                      "content": "C"
+                    },
+                    "MGdCk/QIWt6": {
+                      "content": "Codex",
+                      "fill": "$codex"
                     }
                   }
                 },
                 {
-                  "id": "Apkua",
+                  "id": "Y3DQhJ",
                   "type": "ref",
-                  "ref": "j0SoM",
+                  "ref": "k6x5Hp",
                   "name": "Row / 家庭服务器备份脚本",
                   "width": "fill_container",
                   "stroke": "$border",
@@ -2053,35 +2110,34 @@
                     "bottom": 1
                   },
                   "descendants": {
-                    "PjHzD": {
-                      "fill": "$surface2"
+                    "Xl8D4": {
+                      "enabled": false
                     },
-                    "zSVDZ": {
-                      "icon": "cloud-off",
-                      "fill": "$ink3"
+                    "GTjp1": {
+                      "enabled": false
                     },
-                    "S6BeLj": {
+                    "FQ6iV": {
+                      "fill": "$danger"
+                    },
+                    "rJ9Ro": {
                       "content": "家庭服务器备份脚本",
-                      "fill": "$ink2"
+                      "fill": "$ink"
                     },
-                    "k9KlIB": {
-                      "content": "家里 PC · home-server · 已离线 · 同步至昨天 09:14"
+                    "Zyk36": {
+                      "content": "家里 PC"
                     },
-                    "nCD9K": {
-                      "fill": "$surface2"
+                    "n2ba7": {
+                      "content": "home-server"
                     },
-                    "BeMpt": {
-                      "fill": "$ink3"
-                    },
-                    "NTBOa": {
-                      "content": "离线",
-                      "fill": "$ink2"
+                    "L5fNqZ": {
+                      "content": "执行失败 · 昨天 09:14",
+                      "fill": "$danger"
                     }
                   }
                 },
                 {
                   "type": "frame",
-                  "id": "D9OShr",
+                  "id": "DxoL3",
                   "name": "Group 更早 · 1",
                   "width": "fill_container",
                   "padding": [
@@ -2093,7 +2149,7 @@
                   "children": [
                     {
                       "type": "text",
-                      "id": "m9gq40",
+                      "id": "fYRjW",
                       "name": "Label",
                       "fill": "$ink3",
                       "content": "更早 · 1",
@@ -2104,37 +2160,49 @@
                   ]
                 },
                 {
-                  "id": "LiUpU",
+                  "id": "V2CjIS",
                   "type": "ref",
-                  "ref": "j0SoM",
+                  "ref": "k6x5Hp",
                   "name": "Row / 迁移到 Bun workspace",
                   "width": "fill_container",
                   "stroke": "$border",
                   "strokeWidth": 0,
                   "descendants": {
-                    "PjHzD": {
-                      "fill": "$surface2"
+                    "Xl8D4": {
+                      "enabled": false
                     },
-                    "zSVDZ": {
-                      "icon": "archive",
+                    "GTjp1": {
+                      "enabled": false
+                    },
+                    "FQ6iV": {
                       "fill": "$ink3"
                     },
-                    "S6BeLj": {
+                    "rJ9Ro": {
                       "content": "迁移到 Bun workspace",
                       "fill": "$ink2"
                     },
-                    "k9KlIB": {
-                      "content": "MacBook Air · blog · 3 天前"
+                    "Zyk36": {
+                      "content": "MacBook Air"
                     },
-                    "nCD9K": {
-                      "fill": "$surface2"
+                    "n2ba7": {
+                      "content": "blog"
                     },
-                    "BeMpt": {
+                    "L5fNqZ": {
+                      "content": "3 天前",
                       "fill": "$ink3"
                     },
-                    "NTBOa": {
-                      "content": "已归档",
-                      "fill": "$ink3"
+                    "MGdCk": {
+                      "fill": "$codex-soft"
+                    },
+                    "MGdCk/tHqwb": {
+                      "fill": "$codex"
+                    },
+                    "MGdCk/r7iaP": {
+                      "content": "C"
+                    },
+                    "MGdCk/QIWt6": {
+                      "content": "Codex",
+                      "fill": "$codex"
                     }
                   }
                 }
@@ -2385,31 +2453,75 @@
               "children": [
                 {
                   "type": "frame",
-                  "id": "V3CybH",
+                  "id": "qh8lK",
                   "name": "Conn",
-                  "gap": 8,
+                  "fill": "$success-soft",
+                  "cornerRadius": "$r-pill",
+                  "gap": 7,
                   "padding": [
-                    0,
-                    8
+                    5,
+                    11
                   ],
                   "alignItems": "center",
                   "children": [
                     {
-                      "type": "ellipse",
-                      "id": "E5AxR",
-                      "name": "Dot",
-                      "fill": "$success",
-                      "width": 8,
-                      "height": 8
+                      "type": "frame",
+                      "id": "iY25c",
+                      "name": "Pulse",
+                      "width": 14,
+                      "height": 14,
+                      "layout": "none",
+                      "children": [
+                        {
+                          "type": "ellipse",
+                          "id": "y2XCZ",
+                          "x": 0,
+                          "y": 0,
+                          "name": "Ring2",
+                          "fill": "#178A4C1F",
+                          "width": 14,
+                          "height": 14
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "dpGhy",
+                          "x": 2.5,
+                          "y": 2.5,
+                          "name": "Ring1",
+                          "fill": "#178A4C4D",
+                          "width": 9,
+                          "height": 9
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "CuEE0",
+                          "x": 4,
+                          "y": 4,
+                          "name": "Dot",
+                          "fill": "$success",
+                          "width": 6,
+                          "height": 6
+                        }
+                      ]
                     },
                     {
                       "type": "text",
-                      "id": "dGahE",
+                      "id": "iCj5M",
                       "name": "Label",
-                      "fill": "$ink2",
-                      "content": "已连接 · Live",
+                      "fill": "$success",
+                      "content": "已连接",
                       "fontFamily": "$font-sans",
-                      "fontSize": 12,
+                      "fontSize": 11.5,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "mVVrC",
+                      "name": "Latency",
+                      "fill": "$success",
+                      "content": "45ms",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 10.5,
                       "fontWeight": "normal"
                     }
                   ]
@@ -3396,31 +3508,75 @@
               "children": [
                 {
                   "type": "frame",
-                  "id": "TQ5TF",
+                  "id": "SuHxd",
                   "name": "Conn",
-                  "gap": 8,
+                  "fill": "$success-soft",
+                  "cornerRadius": "$r-pill",
+                  "gap": 7,
                   "padding": [
-                    0,
-                    8
+                    5,
+                    11
                   ],
                   "alignItems": "center",
                   "children": [
                     {
-                      "type": "ellipse",
-                      "id": "V9nrwn",
-                      "name": "Dot",
-                      "fill": "$success",
-                      "width": 8,
-                      "height": 8
+                      "type": "frame",
+                      "id": "UgCLr",
+                      "name": "Pulse",
+                      "width": 14,
+                      "height": 14,
+                      "layout": "none",
+                      "children": [
+                        {
+                          "type": "ellipse",
+                          "id": "GkkWE",
+                          "x": 0,
+                          "y": 0,
+                          "name": "Ring2",
+                          "fill": "#178A4C1F",
+                          "width": 14,
+                          "height": 14
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "lNNvO",
+                          "x": 2.5,
+                          "y": 2.5,
+                          "name": "Ring1",
+                          "fill": "#178A4C4D",
+                          "width": 9,
+                          "height": 9
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "G0Pt3",
+                          "x": 4,
+                          "y": 4,
+                          "name": "Dot",
+                          "fill": "$success",
+                          "width": 6,
+                          "height": 6
+                        }
+                      ]
                     },
                     {
                       "type": "text",
-                      "id": "QpkOx",
+                      "id": "FIaN3",
                       "name": "Label",
-                      "fill": "$ink2",
-                      "content": "已连接 · Live",
+                      "fill": "$success",
+                      "content": "已连接",
                       "fontFamily": "$font-sans",
-                      "fontSize": 12,
+                      "fontSize": 11.5,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "QGjjz",
+                      "name": "Latency",
+                      "fill": "$success",
+                      "content": "45ms",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 10.5,
                       "fontWeight": "normal"
                     }
                   ]
@@ -4337,31 +4493,75 @@
               "children": [
                 {
                   "type": "frame",
-                  "id": "MTRHK",
+                  "id": "qshGC",
                   "name": "Conn",
-                  "gap": 8,
+                  "fill": "$success-soft",
+                  "cornerRadius": "$r-pill",
+                  "gap": 7,
                   "padding": [
-                    0,
-                    8
+                    5,
+                    11
                   ],
                   "alignItems": "center",
                   "children": [
                     {
-                      "type": "ellipse",
-                      "id": "POPI1",
-                      "name": "Dot",
-                      "fill": "$success",
-                      "width": 8,
-                      "height": 8
+                      "type": "frame",
+                      "id": "z1LCz",
+                      "name": "Pulse",
+                      "width": 14,
+                      "height": 14,
+                      "layout": "none",
+                      "children": [
+                        {
+                          "type": "ellipse",
+                          "id": "XyRTL",
+                          "x": 0,
+                          "y": 0,
+                          "name": "Ring2",
+                          "fill": "#178A4C1F",
+                          "width": 14,
+                          "height": 14
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "WSDTe",
+                          "x": 2.5,
+                          "y": 2.5,
+                          "name": "Ring1",
+                          "fill": "#178A4C4D",
+                          "width": 9,
+                          "height": 9
+                        },
+                        {
+                          "type": "ellipse",
+                          "id": "p0zQe",
+                          "x": 4,
+                          "y": 4,
+                          "name": "Dot",
+                          "fill": "$success",
+                          "width": 6,
+                          "height": 6
+                        }
+                      ]
                     },
                     {
                       "type": "text",
-                      "id": "ipb8E",
+                      "id": "J3LQb",
                       "name": "Label",
-                      "fill": "$ink2",
-                      "content": "已连接 · Live",
+                      "fill": "$success",
+                      "content": "已连接",
                       "fontFamily": "$font-sans",
-                      "fontSize": 12,
+                      "fontSize": 11.5,
+                      "fontWeight": "600"
+                    },
+                    {
+                      "type": "text",
+                      "id": "uPUxV",
+                      "name": "Latency",
+                      "fill": "$success",
+                      "content": "45ms",
+                      "fontFamily": "$font-mono",
+                      "fontSize": 10.5,
                       "fontWeight": "normal"
                     }
                   ]
@@ -4840,6 +5040,12 @@
                   ]
                 },
                 {
+                  "id": "nTSIO",
+                  "type": "ref",
+                  "ref": "N5RhfT",
+                  "name": "ModelBadge"
+                },
+                {
                   "id": "k2CCNi",
                   "type": "ref",
                   "ref": "QhBUb",
@@ -5266,7 +5472,7 @@
           "children": [
             {
               "type": "frame",
-              "id": "LvZxv",
+              "id": "kGhKr",
               "name": "SessionList",
               "clip": true,
               "width": "fill_container",
@@ -5278,7 +5484,7 @@
               "children": [
                 {
                   "type": "frame",
-                  "id": "W7xpfz",
+                  "id": "X20aCy",
                   "name": "Group 今天",
                   "width": "fill_container",
                   "padding": [
@@ -5290,7 +5496,7 @@
                   "children": [
                     {
                       "type": "text",
-                      "id": "uUXcF",
+                      "id": "S99Hv",
                       "name": "Label",
                       "fill": "$ink3",
                       "content": "今天",
@@ -5301,9 +5507,9 @@
                   ]
                 },
                 {
-                  "id": "IhPFp",
+                  "id": "t5cd3v",
                   "type": "ref",
-                  "ref": "j0SoM",
+                  "ref": "k6x5Hp",
                   "name": "Row / 重构设备隧道重连逻辑",
                   "width": "fill_container",
                   "padding": [
@@ -5315,42 +5521,29 @@
                     "bottom": 1
                   },
                   "descendants": {
-                    "PjHzD": {
-                      "fill": "$surface2",
-                      "width": 34,
-                      "height": 34
-                    },
-                    "zSVDZ": {
-                      "icon": "message-square",
-                      "fill": "$ink2"
-                    },
-                    "S6BeLj": {
+                    "rJ9Ro": {
                       "content": "重构设备隧道重连逻辑",
-                      "fill": "$ink",
                       "fontSize": 14
                     },
-                    "k9KlIB": {
-                      "content": "Mac Studio · nuntius · 2 分钟前"
+                    "Zyk36": {
+                      "content": "Mac Studio"
                     },
-                    "nCD9K": {
-                      "fill": "$primary-soft"
+                    "n2ba7": {
+                      "content": "nuntius"
                     },
-                    "BeMpt": {
-                      "fill": "$primary"
+                    "L5fNqZ": {
+                      "content": "2 分钟前",
+                      "fill": "$ink3"
                     },
-                    "NTBOa": {
-                      "content": "执行中",
-                      "fill": "$primary"
-                    },
-                    "bEpGH": {
+                    "S2Di0": {
                       "enabled": false
                     }
                   }
                 },
                 {
-                  "id": "wuaEc",
+                  "id": "W0s2K",
                   "type": "ref",
-                  "ref": "j0SoM",
+                  "ref": "k6x5Hp",
                   "name": "Row / 升级依赖并修复构建告警",
                   "width": "fill_container",
                   "padding": [
@@ -5362,42 +5555,51 @@
                     "bottom": 1
                   },
                   "descendants": {
-                    "PjHzD": {
-                      "fill": "$danger-soft",
-                      "width": 34,
-                      "height": 34
+                    "Xl8D4": {
+                      "fill": "#B96A001A"
                     },
-                    "zSVDZ": {
-                      "icon": "shield-alert",
-                      "fill": "$danger"
+                    "GTjp1": {
+                      "fill": "#B96A0040"
                     },
-                    "S6BeLj": {
+                    "FQ6iV": {
+                      "fill": "$warning"
+                    },
+                    "rJ9Ro": {
                       "content": "升级依赖并修复构建告警",
-                      "fill": "$ink",
                       "fontSize": 14
                     },
-                    "k9KlIB": {
-                      "content": "Mac Studio · nuntius · 5 分钟前"
+                    "Zyk36": {
+                      "content": "Mac Studio"
                     },
-                    "nCD9K": {
-                      "fill": "$danger-soft"
+                    "n2ba7": {
+                      "content": "nuntius"
                     },
-                    "BeMpt": {
-                      "fill": "$danger"
+                    "L5fNqZ": {
+                      "content": "5 分钟前",
+                      "fill": "$ink3"
                     },
-                    "NTBOa": {
-                      "content": "待审批",
-                      "fill": "$danger"
+                    "MGdCk": {
+                      "fill": "$codex-soft"
                     },
-                    "bEpGH": {
+                    "MGdCk/tHqwb": {
+                      "fill": "$codex"
+                    },
+                    "MGdCk/r7iaP": {
+                      "content": "C"
+                    },
+                    "MGdCk/QIWt6": {
+                      "content": "Codex",
+                      "fill": "$codex"
+                    },
+                    "S2Di0": {
                       "enabled": false
                     }
                   }
                 },
                 {
-                  "id": "N6vIde",
+                  "id": "xDp0N",
                   "type": "ref",
-                  "ref": "j0SoM",
+                  "ref": "k6x5Hp",
                   "name": "Row / 修复 WAL checkpoint 告警",
                   "width": "fill_container",
                   "padding": [
@@ -5409,41 +5611,37 @@
                     "bottom": 1
                   },
                   "descendants": {
-                    "PjHzD": {
-                      "fill": "$surface2",
-                      "width": 34,
-                      "height": 34
+                    "Xl8D4": {
+                      "enabled": false
                     },
-                    "zSVDZ": {
-                      "icon": "message-square",
-                      "fill": "$ink2"
+                    "GTjp1": {
+                      "enabled": false
                     },
-                    "S6BeLj": {
+                    "FQ6iV": {
+                      "fill": "$success"
+                    },
+                    "rJ9Ro": {
                       "content": "修复 WAL checkpoint 告警",
-                      "fill": "$ink",
                       "fontSize": 14
                     },
-                    "k9KlIB": {
-                      "content": "Mac Studio · ops · 1 小时前"
+                    "Zyk36": {
+                      "content": "Mac Studio"
                     },
-                    "nCD9K": {
-                      "fill": "$surface2"
+                    "n2ba7": {
+                      "content": "ops-dashboard"
                     },
-                    "BeMpt": {
+                    "L5fNqZ": {
+                      "content": "1 小时前",
                       "fill": "$ink3"
                     },
-                    "NTBOa": {
-                      "content": "空闲",
-                      "fill": "$ink2"
-                    },
-                    "bEpGH": {
+                    "S2Di0": {
                       "enabled": false
                     }
                   }
                 },
                 {
                   "type": "frame",
-                  "id": "S8j7aL",
+                  "id": "S8CGv",
                   "name": "Group 昨天",
                   "width": "fill_container",
                   "padding": [
@@ -5455,7 +5653,7 @@
                   "children": [
                     {
                       "type": "text",
-                      "id": "h9dplu",
+                      "id": "BJTZX",
                       "name": "Label",
                       "fill": "$ink3",
                       "content": "昨天",
@@ -5466,9 +5664,9 @@
                   ]
                 },
                 {
-                  "id": "ak0Mr",
+                  "id": "xmvxv",
                   "type": "ref",
-                  "ref": "j0SoM",
+                  "ref": "k6x5Hp",
                   "name": "Row / 整理 zsh 配置与 alias",
                   "width": "fill_container",
                   "padding": [
@@ -5480,42 +5678,51 @@
                     "bottom": 1
                   },
                   "descendants": {
-                    "PjHzD": {
-                      "fill": "$surface2",
-                      "width": 34,
-                      "height": 34
+                    "Xl8D4": {
+                      "enabled": false
                     },
-                    "zSVDZ": {
-                      "icon": "message-square",
-                      "fill": "$ink2"
+                    "GTjp1": {
+                      "enabled": false
                     },
-                    "S6BeLj": {
-                      "content": "整理 zsh 配置与 alias",
-                      "fill": "$ink",
-                      "fontSize": 14
-                    },
-                    "k9KlIB": {
-                      "content": "MacBook Air · dotfiles · 18:22"
-                    },
-                    "nCD9K": {
-                      "fill": "$surface2"
-                    },
-                    "BeMpt": {
+                    "FQ6iV": {
                       "fill": "$ink3"
                     },
-                    "NTBOa": {
-                      "content": "空闲",
-                      "fill": "$ink2"
+                    "rJ9Ro": {
+                      "content": "整理 zsh 配置与 alias",
+                      "fontSize": 14
                     },
-                    "bEpGH": {
+                    "Zyk36": {
+                      "content": "MacBook Air"
+                    },
+                    "n2ba7": {
+                      "content": "dotfiles"
+                    },
+                    "L5fNqZ": {
+                      "content": "18:22",
+                      "fill": "$ink3"
+                    },
+                    "MGdCk": {
+                      "fill": "$codex-soft"
+                    },
+                    "MGdCk/tHqwb": {
+                      "fill": "$codex"
+                    },
+                    "MGdCk/r7iaP": {
+                      "content": "C"
+                    },
+                    "MGdCk/QIWt6": {
+                      "content": "Codex",
+                      "fill": "$codex"
+                    },
+                    "S2Di0": {
                       "enabled": false
                     }
                   }
                 },
                 {
-                  "id": "Ynn3M",
+                  "id": "OUm7z",
                   "type": "ref",
-                  "ref": "j0SoM",
+                  "ref": "k6x5Hp",
                   "name": "Row / 家庭服务器备份脚本",
                   "width": "fill_container",
                   "padding": [
@@ -5525,34 +5732,30 @@
                   "stroke": "$border",
                   "strokeWidth": 0,
                   "descendants": {
-                    "PjHzD": {
-                      "fill": "$surface2",
-                      "width": 34,
-                      "height": 34
+                    "Xl8D4": {
+                      "enabled": false
                     },
-                    "zSVDZ": {
-                      "icon": "cloud-off",
-                      "fill": "$ink3"
+                    "GTjp1": {
+                      "enabled": false
                     },
-                    "S6BeLj": {
+                    "FQ6iV": {
+                      "fill": "$danger"
+                    },
+                    "rJ9Ro": {
                       "content": "家庭服务器备份脚本",
-                      "fill": "$ink2",
                       "fontSize": 14
                     },
-                    "k9KlIB": {
-                      "content": "家里 PC · 已离线 · 同步至 09:14"
+                    "Zyk36": {
+                      "content": "家里 PC"
                     },
-                    "nCD9K": {
-                      "fill": "$surface2"
+                    "n2ba7": {
+                      "content": "home-server"
                     },
-                    "BeMpt": {
-                      "fill": "$ink3"
+                    "L5fNqZ": {
+                      "content": "执行失败 · 09:14",
+                      "fill": "$danger"
                     },
-                    "NTBOa": {
-                      "content": "离线",
-                      "fill": "$ink2"
-                    },
-                    "bEpGH": {
+                    "S2Di0": {
                       "enabled": false
                     }
                   }
@@ -6861,7 +7064,7 @@
                       "id": "D8H3KO",
                       "name": "Txt",
                       "fill": "$ink2",
-                      "content": "Mac Studio / nuntius · 在线",
+                      "content": "Mac Studio / nuntius · Kimi · 在线",
                       "fontFamily": "$font-sans",
                       "fontSize": 11,
                       "fontWeight": "normal"
@@ -7100,6 +7303,675 @@
               "fill": "$ink",
               "width": 134,
               "height": 5
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "N5RhfT",
+      "x": 6200,
+      "y": 0,
+      "name": "Comp / ModelBadge",
+      "reusable": true,
+      "fill": "$kimi-soft",
+      "cornerRadius": "$r-pill",
+      "gap": 5,
+      "padding": [
+        3,
+        9,
+        3,
+        6
+      ],
+      "alignItems": "center",
+      "children": [
+        {
+          "type": "frame",
+          "id": "tHqwb",
+          "name": "Mark",
+          "width": 14,
+          "height": 14,
+          "fill": "$kimi",
+          "cornerRadius": 4.5,
+          "justifyContent": "center",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "r7iaP",
+              "name": "Letter",
+              "fill": "#FFFFFF",
+              "content": "K",
+              "fontFamily": "$font-sans",
+              "fontSize": 9,
+              "fontWeight": "700"
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "id": "QIWt6",
+          "name": "Label",
+          "fill": "$kimi",
+          "content": "Kimi",
+          "fontFamily": "$font-sans",
+          "fontSize": 11,
+          "fontWeight": "600"
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "k6x5Hp",
+      "x": 6200,
+      "y": 60,
+      "name": "Comp / ThreadRow",
+      "reusable": true,
+      "width": 780,
+      "fill": "$surface",
+      "gap": 12,
+      "padding": [
+        14,
+        16
+      ],
+      "alignItems": "center",
+      "children": [
+        {
+          "type": "frame",
+          "id": "HLDdO",
+          "name": "DotCell",
+          "width": 18,
+          "height": 18,
+          "layout": "none",
+          "children": [
+            {
+              "type": "ellipse",
+              "id": "Xl8D4",
+              "x": 0,
+              "y": 0,
+              "name": "Ring2",
+              "fill": "#2E5BFF1A",
+              "width": 18,
+              "height": 18
+            },
+            {
+              "type": "ellipse",
+              "id": "GTjp1",
+              "x": 3,
+              "y": 3,
+              "name": "Ring1",
+              "fill": "#2E5BFF40",
+              "width": 12,
+              "height": 12
+            },
+            {
+              "type": "ellipse",
+              "id": "FQ6iV",
+              "x": 5.5,
+              "y": 5.5,
+              "name": "Dot",
+              "fill": "$primary",
+              "width": 7,
+              "height": 7
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "ymBmV",
+          "name": "Main",
+          "width": "fill_container",
+          "layout": "vertical",
+          "gap": 4,
+          "children": [
+            {
+              "type": "text",
+              "id": "rJ9Ro",
+              "name": "Title",
+              "fill": "$ink",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "重构设备隧道重连逻辑",
+              "fontFamily": "$font-sans",
+              "fontSize": 15,
+              "fontWeight": "500"
+            },
+            {
+              "type": "frame",
+              "id": "fScG5",
+              "name": "Meta",
+              "gap": 5,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "icon",
+                  "id": "U8176c",
+                  "name": "DevIcon",
+                  "width": 11,
+                  "height": 11,
+                  "icon": "monitor",
+                  "library": "lucide",
+                  "fill": "$ink3"
+                },
+                {
+                  "type": "text",
+                  "id": "Zyk36",
+                  "name": "DevName",
+                  "fill": "$ink2",
+                  "content": "Mac Studio",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "R0y51q",
+                  "name": "Sep1",
+                  "fill": "$ink3",
+                  "content": "·",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "icon",
+                  "id": "maMng",
+                  "name": "ProjIcon",
+                  "width": 11,
+                  "height": 11,
+                  "icon": "folder-git-2",
+                  "library": "lucide",
+                  "fill": "$ink3"
+                },
+                {
+                  "type": "text",
+                  "id": "n2ba7",
+                  "name": "ProjName",
+                  "fill": "$ink2",
+                  "content": "nuntius",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "aIPXd",
+                  "name": "Sep2",
+                  "fill": "$ink3",
+                  "content": "·",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                },
+                {
+                  "type": "text",
+                  "id": "L5fNqZ",
+                  "name": "TimeAgo",
+                  "fill": "$ink3",
+                  "content": "2 分钟前",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 12,
+                  "fontWeight": "normal"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "MGdCk",
+          "type": "ref",
+          "ref": "N5RhfT",
+          "name": "Model"
+        },
+        {
+          "type": "icon",
+          "id": "S2Di0",
+          "name": "Chevron",
+          "width": 16,
+          "height": 16,
+          "icon": "chevron-right",
+          "library": "lucide",
+          "fill": "$ink3"
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "o1MW4W",
+      "x": 7040,
+      "y": 0,
+      "name": "状态点规范",
+      "width": 300,
+      "fill": "$surface",
+      "cornerRadius": "$r-l",
+      "stroke": "$border",
+      "strokeWidth": 1,
+      "layout": "vertical",
+      "gap": 12,
+      "padding": 18,
+      "children": [
+        {
+          "type": "text",
+          "id": "MFboT",
+          "name": "Title",
+          "fill": "$ink",
+          "content": "会话状态点规范",
+          "fontFamily": "$font-sans",
+          "fontSize": 13,
+          "fontWeight": "700"
+        },
+        {
+          "type": "frame",
+          "id": "bwTvD",
+          "name": "State / 运行中",
+          "width": "fill_container",
+          "gap": 10,
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "frame",
+              "id": "Z1jj0M",
+              "name": "DotCell",
+              "width": 18,
+              "height": 18,
+              "layout": "none",
+              "children": [
+                {
+                  "type": "ellipse",
+                  "id": "gOLmz",
+                  "x": 0,
+                  "y": 0,
+                  "name": "Ring2",
+                  "fill": "#2E5BFF1A",
+                  "width": 18,
+                  "height": 18
+                },
+                {
+                  "type": "ellipse",
+                  "id": "lo9u8",
+                  "x": 3,
+                  "y": 3,
+                  "name": "Ring1",
+                  "fill": "#2E5BFF40",
+                  "width": 12,
+                  "height": 12
+                },
+                {
+                  "type": "ellipse",
+                  "id": "QrbgF",
+                  "x": 5.5,
+                  "y": 5.5,
+                  "name": "Dot",
+                  "fill": "$primary",
+                  "width": 7,
+                  "height": 7
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "gwp3a",
+              "name": "Col",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 1,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "qSCSh",
+                  "name": "Name",
+                  "fill": "$ink",
+                  "content": "运行中",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 12,
+                  "fontWeight": "600"
+                },
+                {
+                  "type": "text",
+                  "id": "bjedg",
+                  "name": "Note",
+                  "fill": "$ink3",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "双环扩散脉冲 · 1.4s ease-out 无限",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 10.5,
+                  "fontWeight": "normal"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "NrHH8",
+          "name": "State / 待审批",
+          "width": "fill_container",
+          "gap": 10,
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "frame",
+              "id": "SLQHq",
+              "name": "DotCell",
+              "width": 18,
+              "height": 18,
+              "layout": "none",
+              "children": [
+                {
+                  "type": "ellipse",
+                  "id": "C9Rpt",
+                  "x": 0,
+                  "y": 0,
+                  "name": "Ring2",
+                  "fill": "#B96A001A",
+                  "width": 18,
+                  "height": 18
+                },
+                {
+                  "type": "ellipse",
+                  "id": "r4JLP",
+                  "x": 3,
+                  "y": 3,
+                  "name": "Ring1",
+                  "fill": "#B96A0040",
+                  "width": 12,
+                  "height": 12
+                },
+                {
+                  "type": "ellipse",
+                  "id": "OgeHO",
+                  "x": 5.5,
+                  "y": 5.5,
+                  "name": "Dot",
+                  "fill": "$warning",
+                  "width": 7,
+                  "height": 7
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "BHbZP",
+              "name": "Col",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 1,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "dx4Gd",
+                  "name": "Name",
+                  "fill": "$ink",
+                  "content": "待审批",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 12,
+                  "fontWeight": "600"
+                },
+                {
+                  "type": "text",
+                  "id": "sNqGO",
+                  "name": "Note",
+                  "fill": "$ink3",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "琥珀色呼吸脉冲 · 等待用户决策",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 10.5,
+                  "fontWeight": "normal"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "j98EyS",
+          "name": "State / 正常结束",
+          "width": "fill_container",
+          "gap": 10,
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "frame",
+              "id": "H8g8lm",
+              "name": "DotCell",
+              "width": 18,
+              "height": 18,
+              "layout": "none",
+              "children": [
+                {
+                  "type": "ellipse",
+                  "id": "H2T1C",
+                  "x": 5.5,
+                  "y": 5.5,
+                  "name": "Dot",
+                  "fill": "$success",
+                  "width": 7,
+                  "height": 7
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "LW9ZD",
+              "name": "Col",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 1,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "d6ImtY",
+                  "name": "Name",
+                  "fill": "$ink",
+                  "content": "正常结束",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 12,
+                  "fontWeight": "600"
+                },
+                {
+                  "type": "text",
+                  "id": "r5Js1",
+                  "name": "Note",
+                  "fill": "$ink3",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "静态 · 无动画",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 10.5,
+                  "fontWeight": "normal"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "mmESM",
+          "name": "State / 异常",
+          "width": "fill_container",
+          "gap": 10,
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "frame",
+              "id": "ZKXW8",
+              "name": "DotCell",
+              "width": 18,
+              "height": 18,
+              "layout": "none",
+              "children": [
+                {
+                  "type": "ellipse",
+                  "id": "U8mGeZ",
+                  "x": 5.5,
+                  "y": 5.5,
+                  "name": "Dot",
+                  "fill": "$danger",
+                  "width": 7,
+                  "height": 7
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "M8FBHw",
+              "name": "Col",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 1,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "N256US",
+                  "name": "Name",
+                  "fill": "$ink",
+                  "content": "异常",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 12,
+                  "fontWeight": "600"
+                },
+                {
+                  "type": "text",
+                  "id": "JZfF4",
+                  "name": "Note",
+                  "fill": "$ink3",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "静态 · 时间文案标红",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 10.5,
+                  "fontWeight": "normal"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "aHB9H",
+          "name": "State / 空闲",
+          "width": "fill_container",
+          "gap": 10,
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "frame",
+              "id": "QjUzc",
+              "name": "DotCell",
+              "width": 18,
+              "height": 18,
+              "layout": "none",
+              "children": [
+                {
+                  "type": "ellipse",
+                  "id": "Hh1CR",
+                  "x": 5.5,
+                  "y": 5.5,
+                  "name": "Dot",
+                  "fill": "$ink3",
+                  "width": 7,
+                  "height": 7
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "A74wY",
+              "name": "Col",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 1,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "kyFZj",
+                  "name": "Name",
+                  "fill": "$ink",
+                  "content": "空闲",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 12,
+                  "fontWeight": "600"
+                },
+                {
+                  "type": "text",
+                  "id": "NSxok",
+                  "name": "Note",
+                  "fill": "$ink3",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "静态 · 无动画",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 10.5,
+                  "fontWeight": "normal"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "iRgkT",
+          "name": "State / 离线",
+          "width": "fill_container",
+          "gap": 10,
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "frame",
+              "id": "fNycG",
+              "name": "DotCell",
+              "width": 18,
+              "height": 18,
+              "layout": "none",
+              "children": [
+                {
+                  "type": "ellipse",
+                  "id": "Qubap",
+                  "x": 5,
+                  "y": 5,
+                  "name": "Dot",
+                  "fill": "#00000000",
+                  "width": 8,
+                  "height": 8,
+                  "stroke": "$ink3",
+                  "strokeWidth": 1.5
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "SgZEq",
+              "name": "Col",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 1,
+              "children": [
+                {
+                  "type": "text",
+                  "id": "VHsq5",
+                  "name": "Name",
+                  "fill": "$ink",
+                  "content": "离线",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 12,
+                  "fontWeight": "600"
+                },
+                {
+                  "type": "text",
+                  "id": "j9wrO",
+                  "name": "Note",
+                  "fill": "$ink3",
+                  "textGrowth": "fixed-width",
+                  "width": "fill_container",
+                  "content": "空心描边 · 历史只读",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 10.5,
+                  "fontWeight": "normal"
+                }
+              ]
             }
           ]
         }
@@ -7424,6 +8296,74 @@
         },
         {
           "value": "#362811",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "codex": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#0E9F70",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#34D399",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "codex-soft": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#E4F4EE",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#0F2E24",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "kimi": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#6D4FC4",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#A48FF0",
+          "theme": {
+            "mode": "dark"
+          }
+        }
+      ]
+    },
+    "kimi-soft": {
+      "type": "color",
+      "value": [
+        {
+          "value": "#F0ECFB",
+          "theme": {
+            "mode": "light"
+          }
+        },
+        {
+          "value": "#241D3D",
           "theme": {
             "mode": "dark"
           }
