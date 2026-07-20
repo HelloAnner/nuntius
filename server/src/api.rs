@@ -137,18 +137,18 @@ async fn api_response_headers(request: Request, next: Next) -> Response {
     let is_event_stream = request.uri().path() == "/api/v1/events";
     let mut response = next.run(request).await;
     if is_api {
-        response.headers_mut().insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static(if is_event_stream {
-                "no-cache, no-transform"
-            } else {
-                "no-store"
-            }),
-        );
         if is_event_stream {
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-cache, no-transform"),
+            );
             response
                 .headers_mut()
                 .insert("x-accel-buffering", HeaderValue::from_static("no"));
+        } else if !response.headers().contains_key(header::CACHE_CONTROL) {
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         }
         response.headers_mut().insert(
             header::X_CONTENT_TYPE_OPTIONS,
