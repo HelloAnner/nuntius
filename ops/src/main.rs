@@ -977,7 +977,10 @@ fn prepare_state_dirs(config: &OpsConfig) -> Result<()> {
         fs::create_dir_all(&path)?;
     }
     let dockerfile = config.state_dir.join("bootstrap/server-builder.Dockerfile");
-    if !dockerfile.exists() {
+    let synchronized = fs::read(&dockerfile)
+        .map(|contents| contents == SERVER_BUILDER_DOCKERFILE.as_bytes())
+        .unwrap_or(false);
+    if !synchronized {
         atomic_write(&dockerfile, SERVER_BUILDER_DOCKERFILE.as_bytes())?;
     }
     Ok(())
