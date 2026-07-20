@@ -4,6 +4,8 @@ run-name: Build binaries · ${{ github.ref_name }} · ${{ github.sha }}
 
 on:
   push:
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -13,11 +15,23 @@ env:
   CARGO_TERM_COLOR: always
   # Cargo.lock currently includes SQLx 0.9, whose MSRV is Rust 1.94.
   RUST_VERSION: "1.94.0"
-  NUNTIUS_BUILD_SEQUENCE: ${{ github.run_id }}
 
 jobs:
+  release_sequence:
+    name: Prepare build identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      value: ${{ steps.sequence.outputs.value }}
+
+    steps:
+      - name: Allocate a time-ordered release sequence
+        id: sequence
+        run: echo "value=$(date +%s%3N)" >> "$GITHUB_OUTPUT"
+
   frontend:
     name: Frontend · build and typecheck
+    needs: release_sequence
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     concurrency:
@@ -81,12 +95,14 @@ jobs:
 
   server-linux-x86_64:
     name: Server · CentOS 7 x86_64
-    needs: frontend
+    needs: [release_sequence, frontend]
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     concurrency:
       group: server-linux-x86_64-${{ github.ref }}
       cancel-in-progress: true
+    env:
+      NUNTIUS_BUILD_SEQUENCE: ${{ needs.release_sequence.outputs.value }}
 
     steps:
       - name: Check out source
@@ -162,7 +178,7 @@ jobs:
 
   client-macos-arm64:
     name: Client · macOS ARM64
-    needs: frontend
+    needs: [release_sequence, frontend]
     runs-on: macos-14
     timeout-minutes: 40
     concurrency:
@@ -170,6 +186,7 @@ jobs:
       cancel-in-progress: true
     env:
       NUNTIUS_BUILD_SHA: ${{ github.sha }}
+      NUNTIUS_BUILD_SEQUENCE: ${{ needs.release_sequence.outputs.value }}
       NUNTIUS_BUILD_TARGET: aarch64-apple-darwin
 
     steps:
@@ -229,8 +246,8 @@ jobs:
 
   publish-continuous:
     name: Publish · continuous self-update channel
-    needs: [test, server-linux-x86_64, client-macos-arm64]
-    if: github.ref == 'refs/heads/main'
+    needs: [release_sequence, test, server-linux-x86_64, client-macos-arm64]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     concurrency:
@@ -240,6 +257,7 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      NUNTIUS_BUILD_SEQUENCE: ${{ needs.release_sequence.outputs.value }}
 
     steps:
       - name: Reject a superseded main build
@@ -285,7 +303,7 @@ jobs:
         if: steps.head.outputs.publish == 'true'
         working-directory: release
         run: |
-          release_sequence="$GITHUB_RUN_ID"
+          release_sequence="$NUNTIUS_BUILD_SEQUENCE"
           asset_revision="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           server_asset="nuntius-server-linux-x86_64-${GITHUB_SHA}-${asset_revision}.tar.gz"
           client_asset="nuntius-client-macos-arm64-${GITHUB_SHA}-${asset_revision}.tar.gz"
@@ -372,7 +390,7 @@ jobs:
             echo "Update notice secrets are not configured; periodic polling remains active." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          body="$(jq -cn --arg commitSha "$GITHUB_SHA" --argjson releaseSequence "$GITHUB_RUN_ID" '{commitSha:$commitSha,releaseSequence:$releaseSequence}')"
+          body="$(jq -cn --arg commitSha "$GITHUB_SHA" --argjson releaseSequence "$NUNTIUS_BUILD_SEQUENCE" '{commitSha:$commitSha,releaseSequence:$releaseSequence}')"
           if ! curl --fail-with-body --silent --show-error \
             --retry 5 --retry-all-errors --retry-delay 2 \
             -H "Authorization: Bearer $UPDATE_NOTICE_TOKEN" \
