@@ -94,6 +94,11 @@ export interface DeviceSummary {
   historyCompleteness: HistoryCompleteness;
   historyLastSyncedAt: string | null;
   transportSecurity: TransportSecurity | null;
+  appServerStatus?: string | null;
+  storageStatus?: string | null;
+  inboxDepth?: number;
+  outboxDepth?: number;
+  historyBackfillDepth?: number;
   providers: AgentProviderStatus[];
 }
 

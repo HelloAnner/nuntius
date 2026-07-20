@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ModelPicker,
   ProviderPicker,
+  SelectMenu,
   Sheet,
   agentThreadOptions,
   defaultAgentSelection,
@@ -96,6 +97,8 @@ export function NewThreadSheet({
   );
   const [busy, setBusy] = useState(false);
   const providerStatuses = devices.data?.find((device) => device.id === effectiveDeviceId)?.providers ?? [];
+  const scopeDevice = devices.data?.find((device) => device.id === effectiveDeviceId);
+  const scopeProject = projects.data?.find((project) => project.id === effectiveProjectId);
   const selectedProviderStatus = providerStatuses.find(
     (status) => status.provider === provider,
   );
@@ -214,38 +217,52 @@ export function NewThreadSheet({
   };
 
   return (
-    <Sheet open={open} onClose={onClose} title="新建会话">
+    <Sheet
+      open={open}
+      onClose={onClose}
+      className="new-thread-sheet"
+      title={
+        <span className="new-thread-title">
+          <strong>新建会话</strong>
+          {scopeDevice && scopeProject ? <small>{scopeDevice.displayName} · {scopeProject.displayName}</small> : null}
+        </span>
+      }
+    >
       <div className="new-thread-form">
         {!fixedScope ? (
           <div className="new-thread-scope">
             <div className="field">
-              <label htmlFor="new-thread-device">设备</label>
-              <select
-                id="new-thread-device"
+              <label>设备</label>
+              <SelectMenu
+                className="field-select"
+                label="设备"
                 value={effectiveDeviceId}
-                onChange={(event) => {
-                  setScopeDeviceId(event.target.value);
+                onChange={(value) => {
+                  setScopeDeviceId(value);
                   setScopeProjectId("");
                 }}
                 disabled={busy}
-              >
-                {(devices.data ?? []).filter((device) => device.status === "online").map((device) => (
-                  <option key={device.id} value={device.id}>{device.displayName}</option>
-                ))}
-              </select>
+                options={(devices.data ?? []).filter((device) => device.status === "online").map((device) => ({
+                  value: device.id,
+                  label: device.displayName,
+                  description: `${device.projectCount} 个项目 · 在线`,
+                }))}
+              />
             </div>
             <div className="field">
-              <label htmlFor="new-thread-project">项目</label>
-              <select
-                id="new-thread-project"
+              <label>项目</label>
+              <SelectMenu
+                className="field-select"
+                label="项目"
                 value={effectiveProjectId}
-                onChange={(event) => setScopeProjectId(event.target.value)}
+                onChange={setScopeProjectId}
                 disabled={busy || !effectiveDeviceId}
-              >
-                {(projects.data ?? []).filter((project) => project.kind === "workspace").map((project) => (
-                  <option key={project.id} value={project.id}>{project.displayName}</option>
-                ))}
-              </select>
+                options={(projects.data ?? []).filter((project) => project.kind === "workspace").map((project) => ({
+                  value: project.id,
+                  label: project.displayName,
+                  description: project.pathHint ?? project.repoName ?? undefined,
+                }))}
+              />
             </div>
           </div>
         ) : null}

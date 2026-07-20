@@ -1,6 +1,7 @@
 import { useId } from "react";
 import { modelsForProvider } from "../agent-config";
 import type { AgentProvider, AgentProviderStatus } from "../types";
+import { SelectMenu } from "./ui";
 
 const EFFORT_LABELS: Record<string, string> = {
   none: "关闭",
@@ -42,28 +43,28 @@ export function ModelPicker({
         <span>模型配置</span>
         <small>{provider === "kimi" ? "Kimi Code" : "OpenAI Codex"}</small>
       </div>
-      <label className="agent-model-field" htmlFor={`${controlId}-model`}>
+      <div className="agent-model-field">
         <span>模型</span>
-        <select
-          id={`${controlId}-model`}
+        <SelectMenu
+          className="agent-model-select"
+          label="模型"
           value={selected?.id ?? ""}
           disabled={disabled || models.length === 0}
-          onChange={(event) => {
-            const next = models.find((candidate) => candidate.id === event.target.value);
+          options={models.map((candidate) => ({
+            value: candidate.id,
+            label: `${candidate.label}${candidate.isDefault ? " · 默认" : ""}`,
+            description: candidate.description ?? undefined,
+          }))}
+          onChange={(modelId) => {
+            const next = models.find((candidate) => candidate.id === modelId);
             if (!next) return;
             onChange(
               next.id,
               next.defaultReasoningEffort ?? next.reasoningEfforts[0] ?? "",
             );
           }}
-        >
-          {models.map((candidate) => (
-            <option key={candidate.id} value={candidate.id}>
-              {candidate.label}{candidate.isDefault ? " · 默认" : ""}
-            </option>
-          ))}
-        </select>
-      </label>
+        />
+      </div>
       {selected?.description ? (
         <p className="agent-model-description">{selected.description}</p>
       ) : null}

@@ -5,10 +5,10 @@ import {
   Empty,
   IconArchive,
   IconClock,
+  IconList,
+  IconMore,
   IconPlus,
-  Segmented,
   Spinner,
-  SwipeActionRow,
   ThreadView,
   compareThreadCreation,
   newIdemKey,
@@ -25,15 +25,9 @@ import {
 } from "@nuntius/shared";
 import { api, ApiError } from "../api";
 import { trackCommand } from "../events";
-import {
-  projectNameFrom,
-  useArchiveThreadAction,
-  useMedia,
-  useNavigate,
-  useProjectNameMap,
-} from "../hooks";
+import { useArchiveThreadAction, useMedia, useNavigate } from "../hooks";
 import { liveStore, useAccessMode, useApprovals, useThreadLive } from "../stores";
-import { ConnIndicator, ThreadRow, TopBar } from "../components";
+import { ProviderBadge, StatusDot, ThreadListItem, TopBar, threadTone } from "../components";
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
 import { ThreadSwitcher } from "../sheets/ThreadSwitcher";
 
@@ -72,7 +66,7 @@ export function ThreadPage({
   const fromRecents = navigationContext === "recents";
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [recentFilter, setRecentFilter] = useState("all");
+  const [menuOpen, setMenuOpen] = useState(false);
   const [turnCount, setTurnCount] = useState(12);
   const [routeGraceElapsed, setRouteGraceElapsed] = useState(false);
   const { confirm, node: confirmNode } = useConfirmAction();
@@ -115,7 +109,6 @@ export function ThreadPage({
     queryFn: async () => undefined,
     enabled: false,
   });
-  const projectNames = useProjectNameMap((devices.data ?? []).map((item) => item.id));
 
   const history = useQuery({
     queryKey: ["threadHistory", threadId, turnCount],
@@ -347,42 +340,53 @@ export function ThreadPage({
     />
   );
 
-  const topbar = (
+  const pendingApproval = threadApprovals.some((approval) => approval.state === "pending");
+  const currentTone = thread ? (pendingApproval ? "warning" : threadTone(thread)) : "offline";
+  const currentStateLabel = pendingApproval ? "等待审批" : statusLabel(thread?.status ?? "offline");
+
+  const mobileTopbar = (
     <TopBar
       title={truncateEnd(fullThreadTitle)}
       titleHint={fullThreadTitle}
-      subtitle={device && project
-        ? `${online ? device.displayName : statusLabel(device.status)} · ${project.displayName}${thread ? ` · ${providerLabel(thread.provider)}` : ""}`
-        : undefined}
+      subtitle={device && project ? (
+        <span className="thread-mobile-context">
+          <StatusDot tone={online ? "success" : "offline"} />
+          {device.displayName} / {project.displayName}{thread ? ` · ${providerLabel(thread.provider)}` : ""} · {online ? "在线" : statusLabel(device.status)}
+        </span>
+      ) : undefined}
       onBack={() =>
         fromRecents
           ? navigate({ name: "recents" }, { replace: true })
           : navigate({ name: "project", deviceId, projectId }, { replace: true })
       }
-      onTitleClick={() => setSwitcherOpen(true)}
       trailing={
         <>
-          {project && !unassigned ? (
-            <button
-              className="icon-btn"
-              onClick={() => setCreating(true)}
-              disabled={!online}
-              aria-label={online ? "在当前项目新建会话" : "设备离线，无法新建会话"}
-              title={online ? "在当前项目新建会话" : "设备离线，无法新建会话"}
-            >
-              <IconPlus size={19} />
-            </button>
-          ) : null}
+          <button className="icon-btn" onClick={() => setSwitcherOpen(true)} aria-label="切换会话">
+            <IconList size={20} />
+          </button>
+          <button className="icon-btn" onClick={() => setMenuOpen((value) => !value)} aria-label="更多会话操作" aria-expanded={menuOpen}>
+            <IconMore size={20} />
+          </button>
+        </>
+      }
+    />
+  );
+
+  const desktopTopbar = (
+    <TopBar
+      title={truncateEnd(fullThreadTitle)}
+      titleHint={fullThreadTitle}
+      subtitle={device && project ? `${device.displayName} / ${project.displayName}` : undefined}
+      trailing={
+        <>
+          {thread ? <ProviderBadge provider={thread.provider} /> : null}
+          <span className={`status-pill ${currentTone}`}><span className="status-dot" />{currentStateLabel}</span>
           {!unassigned && !archived ? (
-            <button
-              className="icon-btn"
-              onClick={setArchived}
-              aria-label="归档会话"
-            >
-              <IconArchive size={18} />
-            </button>
+            <button className="icon-btn" onClick={setArchived} aria-label="归档会话"><IconArchive size={18} /></button>
           ) : null}
-          <ConnIndicator />
+          <button className="icon-btn" onClick={() => setMenuOpen((value) => !value)} aria-label="更多会话操作" aria-expanded={menuOpen}>
+            <IconMore size={19} />
+          </button>
         </>
       }
     />
@@ -400,14 +404,31 @@ export function ThreadPage({
     />
   ) : null;
 
+  const threadMenu = menuOpen ? (
+    <div className="thread-actions-menu" role="menu">
+      {project && !unassigned ? (
+        <button role="menuitem" onClick={() => { setMenuOpen(false); setCreating(true); }} disabled={!online}>
+          <IconPlus size={15} />新建会话
+        </button>
+      ) : null}
+      {!unassigned && !archived ? (
+        <button role="menuitem" onClick={() => { setMenuOpen(false); setArchived(); }}>
+          <IconArchive size={15} />归档会话
+        </button>
+      ) : null}
+    </div>
+  ) : null;
+
   if (!wide) {
     return (
       <div className="page thread-page">
-        {topbar}
+        {mobileTopbar}
         {threadView}
+        {threadMenu}
         <ThreadSwitcher
           open={switcherOpen}
           onClose={() => setSwitcherOpen(false)}
+          onNewThread={project && !unassigned && online ? () => setCreating(true) : undefined}
           currentThreadId={threadId}
           navigationContext={navigationContext}
         />
@@ -417,99 +438,112 @@ export function ThreadPage({
     );
   }
 
-  const recentOptions = [
-    { value: "all", label: "全部" },
-    ...(devices.data ?? []).map((item) => ({ value: item.id, label: item.displayName })),
-  ];
-  const sortedThreads = [
-    ...(fromRecents ? (allThreads.data ?? []) : (projectThreads.data ?? [])),
-  ].sort(compareThreadCreation);
-  const sidebarThreads =
-    fromRecents && recentFilter !== "all"
-      ? sortedThreads.filter((item) => item.deviceId === recentFilter)
-      : sortedThreads;
-  const deviceName = (id: string) =>
-    devices.data?.find((item) => item.id === id)?.displayName ?? "设备";
+  const sidebarThreads = [...(projectThreads.data ?? [])].sort(compareThreadCreation);
+  const pendingThreadIds = new Set(
+    Object.values(approvals)
+      .flatMap((approval) => approval.state === "pending" && approval.threadId ? [approval.threadId] : []),
+  );
+  const ongoingThreads = sidebarThreads.filter(
+    (item) => item.status === "active" || pendingThreadIds.has(item.id),
+  );
+  const recentThreads = sidebarThreads.filter(
+    (item) => item.status !== "active" && !pendingThreadIds.has(item.id),
+  );
+  const selectSidebarThread = (item: ThreadSummary) =>
+    navigate(
+      fromRecents
+        ? { name: "recentThread", threadId: item.id }
+        : { name: "thread", deviceId, projectId, threadId: item.id },
+    );
 
   return (
     <div className="page thread-page">
       <div className="detail-grid">
         <aside className="detail-side">
-          <TopBar
-            title={fromRecents ? "最近会话" : (project?.displayName ?? "项目")}
-            subtitle={fromRecents ? `${sidebarThreads.length} 个会话` : device?.displayName}
-            onBack={
-              fromRecents
-                ? undefined
-                : () => navigate({ name: "device", deviceId }, { replace: true })
-            }
-          />
-          <div className="page-scroll">
-            <div className="page-col">
-              {fromRecents && recentOptions.length > 2 ? (
-                <div className="detail-filter">
-                  <Segmented
-                    options={recentOptions}
-                    value={recentFilter}
-                    onChange={setRecentFilter}
+          <div className="thread-sidebar-scroll">
+            <button className="thread-sidebar-context" onClick={() => navigate({ name: "project", deviceId, projectId })}>
+              <strong>{project?.displayName ?? "项目"}</strong>
+              <span>{device?.displayName ?? "设备"}{project?.pathHint ? ` · ${project.pathHint}` : ""}</span>
+            </button>
+            {project && !unassigned ? (
+              <button className="quick-new-thread" onClick={() => setCreating(true)} disabled={!online}>
+                <IconPlus size={15} />
+                <strong>新建会话</strong>
+                <small>同设备 · 同项目</small>
+              </button>
+            ) : null}
+            {projectThreads.isLoading ? (
+              <div className="detail-list-state"><Spinner /></div>
+            ) : sidebarThreads.length === 0 ? (
+              <Empty icon={<IconClock size={22} />} headline="还没有会话" />
+            ) : (
+              <>
+                {ongoingThreads.length ? (
+                  <ThreadSidebarGroup
+                    label="进行中"
+                    threads={ongoingThreads}
+                    pendingThreadIds={pendingThreadIds}
+                    currentThreadId={threadId}
+                    onSelect={selectSidebarThread}
                   />
-                </div>
-              ) : null}
-              {fromRecents && allThreads.isLoading ? (
-                <div className="detail-list-state"><Spinner /></div>
-              ) : sidebarThreads.length === 0 ? (
-                <Empty
-                  icon={<IconClock size={22} />}
-                  headline={fromRecents ? "没有符合条件的会话" : "还没有会话"}
-                />
-              ) : (
-                <div className="list-group detail-thread-list">
-                  {sidebarThreads.map((item) => (
-                    <SwipeActionRow
-                      key={item.id}
-                      icon={<IconArchive size={18} />}
-                      label="归档"
-                      busy={busyIds.has(item.id)}
-                      disabled={fromRecents ? false : !online || unassigned}
-                      onAction={() => archiveThread(item.id)}
-                    >
-                      <ThreadRow
-                        thread={item}
-                        deviceName={deviceName(item.deviceId)}
-                        projectName={projectNameFrom(
-                          projectNames,
-                          item.deviceId,
-                          item.projectId,
-                        )}
-                        selected={item.id === threadId}
-                        onClick={() =>
-                          navigate(
-                            fromRecents
-                              ? { name: "recentThread", threadId: item.id }
-                              : { name: "thread", deviceId, projectId, threadId: item.id },
-                          )
-                        }
-                      />
-                    </SwipeActionRow>
-                  ))}
-                </div>
-              )}
-            </div>
+                ) : null}
+                {recentThreads.length ? (
+                  <ThreadSidebarGroup
+                    label="最近"
+                    threads={recentThreads}
+                    pendingThreadIds={pendingThreadIds}
+                    currentThreadId={threadId}
+                    onSelect={selectSidebarThread}
+                  />
+                ) : null}
+              </>
+            )}
           </div>
         </aside>
         <div className="detail-main">
-          {topbar}
+          {desktopTopbar}
           {threadView}
+          {threadMenu}
         </div>
       </div>
       <ThreadSwitcher
         open={switcherOpen}
         onClose={() => setSwitcherOpen(false)}
+        onNewThread={project && !unassigned && online ? () => setCreating(true) : undefined}
         currentThreadId={threadId}
         navigationContext={navigationContext}
       />
       {newThreadSheet}
       {confirmNode}
     </div>
+  );
+}
+
+function ThreadSidebarGroup({
+  label,
+  threads,
+  pendingThreadIds,
+  currentThreadId,
+  onSelect,
+}: {
+  label: string;
+  threads: ThreadSummary[];
+  pendingThreadIds: Set<string>;
+  currentThreadId: string;
+  onSelect: (thread: ThreadSummary) => void;
+}) {
+  return (
+    <section className="thread-sidebar-group">
+      <div className="thread-sidebar-label">{label}</div>
+      {threads.map((thread) => (
+        <ThreadListItem
+          key={thread.id}
+          thread={thread}
+          pendingApproval={pendingThreadIds.has(thread.id)}
+          selected={thread.id === currentThreadId}
+          onClick={() => onSelect(thread)}
+        />
+      ))}
+    </section>
   );
 }

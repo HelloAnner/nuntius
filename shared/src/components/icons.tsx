@@ -37,6 +37,12 @@ export const IconMobile = (p: P) =>
 export const IconFolder = (p: P) =>
   base(p, <path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z" />);
 
+export const IconFolderPlus = (p: P) =>
+  base(p, <>
+    <path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z" />
+    <path d="M12 11v5M9.5 13.5h5" />
+  </>);
+
 export const IconGit = (p: P) =>
   base(p, <>
     <circle cx="6.5" cy="6" r="2.4" />
@@ -74,6 +80,20 @@ export const IconArrowUp = (p: P) => base(p, <path d="M12 19V5M5.5 11.5 12 5l6.5
 export const IconArrowDown = (p: P) => base(p, <path d="M12 5v14M5.5 12.5 12 19l6.5-6.5" />);
 
 export const IconPlus = (p: P) => base(p, <path d="M12 5v14M5 12h14" />);
+
+export const IconList = (p: P) =>
+  base(p, <>
+    <path d="M9 6h11M9 12h11M9 18h11" />
+    <circle cx="4.5" cy="6" r="0.8" fill="currentColor" stroke="none" />
+    <circle cx="4.5" cy="12" r="0.8" fill="currentColor" stroke="none" />
+    <circle cx="4.5" cy="18" r="0.8" fill="currentColor" stroke="none" />
+  </>);
+
+export const IconBook = (p: P) =>
+  base(p, <>
+    <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5Z" />
+    <path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5Z" />
+  </>);
 export const IconImage = (p: P) =>
   base(p, <>
     <rect x="3.5" y="4" width="17" height="16" rx="2.3" />
@@ -88,6 +108,12 @@ export const IconArchive = (p: P) =>
   base(p, <>
     <rect x="3.5" y="4.5" width="17" height="4.5" rx="1.4" />
     <path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13.5h4" />
+  </>);
+
+export const IconTrash = (p: P) =>
+  base(p, <>
+    <path d="M4 7h16M9 7V4.5h6V7M7 7l1 13h8l1-13" />
+    <path d="M10 11v5M14 11v5" />
   </>);
 
 export const IconSearch = (p: P) =>

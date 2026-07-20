@@ -160,31 +160,25 @@ body {
 .console-search input::placeholder { color: var(--ink-3); }
 
 .filter-select {
-  position: relative;
   display: inline-flex;
   min-width: 0;
 }
 
-.filter-select select {
+.filter-select .select-menu-trigger {
   max-width: 180px;
   height: 34px;
-  appearance: none;
-  padding: 0 30px 0 12px;
+  min-height: 34px;
+  padding: 0 10px 0 12px;
   color: var(--ink-2);
-  background-color: var(--surface);
-  background-image: linear-gradient(45deg, transparent 50%, var(--ink-3) 50%), linear-gradient(135deg, var(--ink-3) 50%, transparent 50%);
-  background-position: calc(100% - 14px) 14px, calc(100% - 10px) 14px;
-  background-size: 4px 4px, 4px 4px;
-  background-repeat: no-repeat;
+  background: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: 999px;
-  outline: none;
   font-size: 12.5px;
   font-weight: 520;
-  cursor: pointer;
 }
 
-.filter-select select:focus { border-color: var(--accent); }
+.filter-select.open .select-menu-trigger { color: var(--accent); }
+.filter-select .select-menu-popover { min-width: min(260px, calc(100vw - 32px)); }
 
 .console-connection {
   width: fit-content;
@@ -230,6 +224,10 @@ body {
 .status-orbit.danger { color: var(--danger); }
 .status-orbit.idle,
 .status-orbit.offline { color: var(--ink-3); }
+.status-orbit.success,
+.status-orbit.danger,
+.status-orbit.idle,
+.status-orbit.offline { background: transparent; }
 .status-orbit.pulse { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent); }
 .status-orbit.pulse span { animation: pulse-dot 1.2s infinite; }
 
@@ -353,5 +351,5 @@ body {
 
 @media (max-width: 520px) {
   .topbar .btn { min-width: 36px; width: 36px; height: 36px; padding: 0; display: grid; place-items: center; }
-  .filter-select select { max-width: 128px; padding-left: 10px; font-size: 11.5px; }
+  .filter-select .select-menu-trigger { max-width: 128px; padding-left: 10px; font-size: 11.5px; }
 }

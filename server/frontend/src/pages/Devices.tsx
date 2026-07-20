@@ -1,6 +1,6 @@
 /* Device fleet overview and connection diagnostics. */
 import { useQuery } from "@tanstack/react-query";
-import { Empty, IconDevice, IconPlus } from "@nuntius/shared";
+import { Empty, IconBook, IconDevice, IconPlus, IconTerminal, statusLabel } from "@nuntius/shared";
 import { api } from "../api";
 import { useNavigate } from "../hooks";
 import { DeviceRow, StatusDot, TopBar } from "../components";
@@ -18,10 +18,16 @@ export function DevicesPage() {
     <div className="page devices-page">
       <TopBar
         title="设备"
-        subtitle={`${sorted.length} 台已配对设备 · ${onlineCount} 台在线 · 离线设备的历史仍可阅读`}
+        subtitle={
+          <>
+            <span className="desktop-only">{sorted.length} 台已配对设备 · {onlineCount} 台在线 · 离线设备的历史仍可阅读</span>
+            <span className="mobile-only">{sorted.length} 台已配对 · {onlineCount} 台在线</span>
+          </>
+        }
         trailing={
           <div className="page-actions">
             <button className="btn outline desktop-only" onClick={() => navigate({ name: "settings" })}>
+              <IconBook size={16} />
               配对指南
             </button>
             <button className="btn primary" onClick={() => navigate({ name: "settings" })} aria-label="配对新设备">
@@ -50,31 +56,30 @@ export function DevicesPage() {
               <section className="diagnostics-panel">
                 <header>
                   <strong>连接与同步诊断</strong>
-                  <span>状态随实时事件更新</span>
+                  <span>每 30s 心跳更新</span>
                 </header>
                 <div className="diagnostics-table-wrap">
                   <table>
                     <thead>
                       <tr>
                         <th>设备</th>
-                        <th>设备通道</th>
-                        <th>Agent 提供方</th>
+                        <th>设备隧道</th>
+                        <th>App Server</th>
                         <th>历史同步</th>
-                        <th>待审批</th>
+                        <th>待处理命令</th>
                       </tr>
                     </thead>
                     <tbody>
                       {sorted.map((device) => {
                         const channelTone = device.status === "online" ? "success" : device.status === "syncing" ? "warning" : "offline";
-                        const providers = device.providers.filter((provider) => provider.available);
                         return (
                           <tr key={device.id}>
                             <td><strong>{device.displayName}</strong></td>
-                            <td><DiagnosticValue tone={channelTone} text={device.status === "online" ? "已连接" : device.status === "syncing" ? "同步中" : "未连接"} /></td>
+                            <td><DiagnosticValue tone={channelTone} text={tunnelLabel(device)} /></td>
                             <td>
                               <DiagnosticValue
-                                tone={providers.length ? "success" : device.status === "online" ? "warning" : "offline"}
-                                text={providers.length ? providers.map((provider) => provider.label).join(" · ") : "不可用"}
+                                tone={appServerTone(device.appServerStatus, device.status)}
+                                text={appServerLabel(device.appServerStatus, device.status)}
                               />
                             </td>
                             <td>
@@ -83,7 +88,7 @@ export function DevicesPage() {
                                 text={historyLabel(device.historyCompleteness)}
                               />
                             </td>
-                            <td className="num">{device.pendingApprovalCount || "—"}</td>
+                            <td className="num">{device.outboxDepth || "—"}</td>
                           </tr>
                         );
                       })}
@@ -92,7 +97,7 @@ export function DevicesPage() {
                 </div>
               </section>
               <button className="mobile-pair-card" onClick={() => navigate({ name: "settings" })}>
-                <span className="device-icon"><IconPlus size={18} /></span>
+                <IconTerminal size={18} />
                 <span><strong>配对新设备</strong><small>生成配对码并运行 nuntius-client</small></span>
               </button>
             </>
@@ -101,6 +106,24 @@ export function DevicesPage() {
       </div>
     </div>
   );
+}
+
+function tunnelLabel(device: { status: string; transportSecurity: string | null }) {
+  if (device.status === "online") return `${device.transportSecurity === "secure" ? "WSS" : "WS"} · 已连接`;
+  if (device.status === "syncing") return `${device.transportSecurity === "secure" ? "WSS" : "WS"} · 同步中`;
+  return "未连接";
+}
+
+function appServerTone(status: string | null | undefined, deviceStatus: string) {
+  if (deviceStatus === "offline" || deviceStatus === "revoked") return "offline" as const;
+  if (status === "running" || status === "online" || status === "healthy") return "success" as const;
+  return "warning" as const;
+}
+
+function appServerLabel(status: string | null | undefined, deviceStatus: string) {
+  if (deviceStatus === "offline" || deviceStatus === "revoked") return "未知";
+  if (status === "running" || status === "online" || status === "healthy") return "运行中";
+  return status ? statusLabel(status) : "状态待确认";
 }
 
 function DiagnosticValue({ tone, text }: { tone: "success" | "warning" | "danger" | "offline"; text: string }) {

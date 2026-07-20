@@ -8,9 +8,11 @@ import {
   IconDevice,
   IconFolder,
   IconGit,
+  IconMore,
   IconSearch,
   IconSettings,
   IconShield,
+  SelectMenu,
   initials,
   osLabel,
   providerLabel,
@@ -203,14 +205,13 @@ export function FilterSelect({
   label: string;
 }) {
   return (
-    <label className="filter-select">
-      <span className="sr-only">{label}</span>
-      <select value={value} onChange={(event) => onChange(event.target.value)} aria-label={label}>
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>{option.label}</option>
-        ))}
-      </select>
-    </label>
+    <SelectMenu
+      className="filter-select"
+      value={value}
+      onChange={onChange}
+      options={options}
+      label={label}
+    />
   );
 }
 
@@ -238,15 +239,13 @@ function deviceTone(device: DeviceSummary): StatusTone {
 
 export function DeviceRow({ device }: { device: DeviceSummary }) {
   const navigate = useNavigate();
-  const online = device.status === "online";
-  const historyText =
-    device.historyCompleteness === "backfilling"
-      ? "历史同步中"
-      : device.historyCompleteness === "complete"
-        ? "历史已同步"
-        : device.historyCompleteness === "error"
-          ? "历史同步异常"
-          : "历史未完整";
+  const lastSeen = device.lastSeenAt ? relTime(device.lastSeenAt) : "刚刚";
+  const footerText =
+    device.status === "syncing" || device.historyCompleteness === "backfilling"
+      ? "正在同步历史"
+      : device.status === "online"
+        ? `最后在线：${lastSeen}`
+        : `最后在线：${lastSeen}`;
   return (
     <article className={`device-card device-${device.status}`}>
       <div className="device-card-head">
@@ -267,11 +266,16 @@ export function DeviceRow({ device }: { device: DeviceSummary }) {
       </div>
       <div className="device-card-foot">
         <span className={device.historyCompleteness === "error" ? "danger-copy" : ""}>
-          {online ? historyText : `最后在线：${relTime(device.lastSeenAt)}`}
+          {device.historyCompleteness === "error" ? "历史同步异常" : footerText}
         </span>
-        <button className="btn outline sm" onClick={() => navigate({ name: "device", deviceId: device.id })}>
-          查看项目
-        </button>
+        <span className="device-card-actions">
+          <button className="btn outline sm" onClick={() => navigate({ name: "device", deviceId: device.id })}>
+            查看项目
+          </button>
+          <button className="device-more" onClick={() => navigate({ name: "settings" })} aria-label={`${device.displayName}设备操作`}>
+            <IconMore size={18} />
+          </button>
+        </span>
       </div>
     </article>
   );
@@ -286,8 +290,17 @@ export function ProjectRow({ project, onClick }: { project: ProjectSummary; onCl
       </span>
       <span className="grow">
         <span className="title">{project.displayName}</span>
-        <span className="sub mono">
-          {unassigned ? "未归类 · 只读" : truncateMiddle(project.pathHint ?? project.repoName ?? "本地项目", 46)}
+        <span className="sub mono project-sub project-sub-desktop">
+          {unassigned ? "无法映射目录的历史会话 · 只读" : truncateMiddle(project.pathHint ?? project.repoName ?? "本地项目", 46)}
+        </span>
+        <span className="sub mono project-sub project-sub-mobile">
+          {unassigned
+            ? "历史会话待归类 · 只读"
+            : [
+                truncateMiddle(project.pathHint ?? project.repoName ?? "本地项目", 28),
+                project.branch ? `${project.branch}${project.isDirty ? "*" : ""}` : null,
+                `${project.threadCount} 会话`,
+              ].filter(Boolean).join(" · ")}
         </span>
       </span>
       {project.branch ? (
@@ -303,12 +316,40 @@ export function ProjectRow({ project, onClick }: { project: ProjectSummary; onCl
   );
 }
 
-function threadTone(thread: ThreadSummary): StatusTone {
+export function threadTone(thread: ThreadSummary): StatusTone {
   if (thread.status === "active") return "active";
   if (thread.status === "recovering") return "warning";
   if (["failed", "error", "rejected"].includes(thread.status)) return "danger";
   if (["completed", "idle"].includes(thread.status)) return "success";
   return thread.archived ? "offline" : "idle";
+}
+
+export function ThreadListItem({
+  thread,
+  pendingApproval = false,
+  selected = false,
+  onClick,
+}: {
+  thread: ThreadSummary;
+  pendingApproval?: boolean;
+  selected?: boolean;
+  onClick: () => void;
+}) {
+  const tone = pendingApproval ? "warning" : threadTone(thread);
+  const state = pendingApproval ? "等待审批" : statusLabel(thread.status);
+  return (
+    <button
+      className={`thread-list-item thread-${tone}${selected ? " selected" : ""}`}
+      onClick={onClick}
+      aria-current={selected ? "page" : undefined}
+    >
+      <StatusDot tone={tone} pulse={tone === "active"} />
+      <span className="thread-list-copy">
+        <span className="thread-list-title">{thread.title || "未命名会话"}</span>
+        <span className="thread-list-meta">{state} · {providerLabel(thread.provider)} · {relTime(thread.lastActivityAt ?? thread.createdAt)}</span>
+      </span>
+    </button>
+  );
 }
 
 export function ThreadRow({
@@ -327,7 +368,7 @@ export function ThreadRow({
   const tone = threadTone(thread);
   return (
     <button
-      className={`list-row thread-row${selected ? " selected" : ""}`}
+      className={`list-row thread-row thread-${tone}${selected ? " selected" : ""}`}
       onClick={onClick}
       aria-current={selected ? "page" : undefined}
     >
@@ -335,11 +376,11 @@ export function ThreadRow({
       <span className="grow">
         <span className="title">{thread.title || "未命名会话"}</span>
         <span className="thread-meta" aria-label={`${deviceName}，${projectName}`}>
-          <span><IconDevice size={11} />{deviceName}</span>
+          <span className="thread-device"><IconDevice size={11} />{deviceName}</span>
           <span aria-hidden="true">·</span>
-          <span><IconFolder size={11} />{projectName}</span>
+          <span className="thread-project"><IconFolder size={11} />{projectName || "未归属项目"}</span>
           <span aria-hidden="true">·</span>
-          <span className="num">{relTime(thread.lastActivityAt ?? thread.createdAt)}</span>
+          <span className="thread-time num">{relTime(thread.lastActivityAt ?? thread.createdAt)}</span>
         </span>
       </span>
       <ProviderBadge provider={thread.provider} />

@@ -3,14 +3,16 @@ import {
   createContext,
   useContext,
   useEffect,
+  useId,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import type { Tone } from "../format";
-import { IconX } from "./icons";
+import { IconAlert, IconCheck, IconChevronDown, IconTrash, IconX } from "./icons";
 
 export function Pill({
   tone,
@@ -211,7 +213,7 @@ export function Sheet({
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && !e.defaultPrevented) onClose();
     };
     document.addEventListener("keydown", onKey);
     document.body.style.overflow = "hidden";
@@ -301,6 +303,162 @@ export function Segmented<T extends string>({
   );
 }
 
+/* ---- custom select menu: consistent on desktop and touch devices ---- */
+export interface SelectMenuOption<T extends string = string> {
+  value: T;
+  label: string;
+  description?: string;
+  disabled?: boolean;
+}
+
+export function SelectMenu<T extends string>({
+  value,
+  onChange,
+  options,
+  label,
+  className,
+  disabled = false,
+}: {
+  value: T;
+  onChange: (value: T) => void;
+  options: SelectMenuOption<T>[];
+  label: string;
+  className?: string;
+  disabled?: boolean;
+}) {
+  const listId = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [dropUp, setDropUp] = useState(false);
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
+  const [activeIndex, setActiveIndex] = useState(selectedIndex);
+  const selected = options[selectedIndex];
+
+  useEffect(() => {
+    if (!open) return;
+    setActiveIndex(selectedIndex);
+    const closeOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, [open, selectedIndex]);
+
+  const show = () => {
+    if (disabled || options.length === 0) return;
+    const rect = rootRef.current?.getBoundingClientRect();
+    setDropUp(Boolean(rect && rect.bottom > window.innerHeight * 0.62));
+    setOpen(true);
+  };
+
+  const findEnabled = (start: number, direction: 1 | -1) => {
+    if (options.length === 0) return -1;
+    let index = start;
+    for (let count = 0; count < options.length; count += 1) {
+      index = (index + direction + options.length) % options.length;
+      if (!options[index]?.disabled) return index;
+    }
+    return -1;
+  };
+
+  const choose = (index: number) => {
+    const option = options[index];
+    if (!option || option.disabled) return;
+    onChange(option.value);
+    setOpen(false);
+    rootRef.current?.querySelector<HTMLButtonElement>(".select-menu-trigger")?.focus();
+  };
+
+  const keyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape" && open) {
+      event.preventDefault();
+      setOpen(false);
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!open) {
+        show();
+        return;
+      }
+      const next = findEnabled(activeIndex, event.key === "ArrowDown" ? 1 : -1);
+      if (next >= 0) setActiveIndex(next);
+      return;
+    }
+    if (event.key === "Home" && open) {
+      event.preventDefault();
+      const first = options.findIndex((option) => !option.disabled);
+      if (first >= 0) setActiveIndex(first);
+      return;
+    }
+    if (event.key === "End" && open) {
+      event.preventDefault();
+      let last = -1;
+      for (let index = options.length - 1; index >= 0; index -= 1) {
+        if (!options[index]?.disabled) {
+          last = index;
+          break;
+        }
+      }
+      if (last >= 0) setActiveIndex(last);
+      return;
+    }
+    if ((event.key === "Enter" || event.key === " ") && open) {
+      event.preventDefault();
+      choose(activeIndex);
+    }
+  };
+
+  return (
+    <div
+      ref={rootRef}
+      className={`select-menu${open ? " open" : ""}${dropUp ? " drop-up" : ""}${className ? ` ${className}` : ""}`}
+      onKeyDown={keyDown}
+    >
+      <button
+        type="button"
+        className="select-menu-trigger"
+        role="combobox"
+        aria-label={label}
+        aria-controls={listId}
+        aria-activedescendant={open ? `${listId}-option-${activeIndex}` : undefined}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled || options.length === 0}
+        onClick={() => (open ? setOpen(false) : show())}
+      >
+        <span className="select-menu-value">{selected?.label ?? label}</span>
+        <IconChevronDown className="select-menu-chevron" size={14} />
+      </button>
+      {open ? (
+        <div id={listId} className="select-menu-popover" role="listbox" aria-label={label}>
+          {options.map((option, index) => (
+            <button
+              type="button"
+              id={`${listId}-option-${index}`}
+              role="option"
+              aria-selected={option.value === value}
+              disabled={option.disabled}
+              className={`select-menu-option${index === activeIndex ? " active" : ""}${option.value === value ? " selected" : ""}`}
+              key={option.value}
+              onPointerEnter={() => setActiveIndex(index)}
+              onClick={() => choose(index)}
+            >
+              <span className="select-menu-option-copy">
+                <span>{option.label}</span>
+                {option.description ? <small>{option.description}</small> : null}
+              </span>
+              <span className="select-menu-check" aria-hidden="true">
+                {option.value === value ? <IconCheck size={16} /> : null}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /* ---- connection status pill ---- */
 export type ConnState = "live" | "busy" | "down";
 export function ConnPill({ state, label }: { state: ConnState; label: string }) {
@@ -319,6 +477,7 @@ export function useConfirmAction() {
     body?: string;
     confirmLabel: string;
     danger?: boolean;
+    tone?: "danger" | "warning";
     action: () => void;
   } | null>(null);
   const confirm = (cfg: {
@@ -326,26 +485,29 @@ export function useConfirmAction() {
     body?: string;
     confirmLabel: string;
     danger?: boolean;
+    tone?: "danger" | "warning";
     action: () => void;
   }) => setPending(cfg);
   const node = (
     <Sheet
       open={pending !== null}
       onClose={() => setPending(null)}
-      title={pending?.title}
+      className="confirm-sheet"
     >
-      <div style={{ padding: 20 }}>
+      <div className="confirm-dialog">
+        <span className={`confirm-icon ${pending?.tone ?? (pending?.danger ? "danger" : "warning")}`}>
+          {pending?.danger ? <IconTrash size={17} /> : <IconAlert size={17} />}
+        </span>
+        <strong className="confirm-title">{pending?.title}</strong>
         {pending?.body ? (
-          <p style={{ color: "var(--ink-2)", fontSize: 14, lineHeight: 1.65, marginBottom: 20 }}>
-            {pending.body}
-          </p>
+          <p className="confirm-body">{pending.body}</p>
         ) : null}
-        <div style={{ display: "flex", gap: 10 }}>
-          <button className="btn ghost block" onClick={() => setPending(null)}>
+        <div className="confirm-actions">
+          <button className="btn ghost" onClick={() => setPending(null)}>
             取消
           </button>
           <button
-            className={`btn block${pending?.danger ? " danger" : " primary"}`}
+            className={`btn${pending?.danger ? " danger" : " primary"}`}
             onClick={() => {
               pending?.action();
               setPending(null);

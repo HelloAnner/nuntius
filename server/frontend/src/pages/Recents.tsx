@@ -6,6 +6,7 @@ import {
   IconArchive,
   IconClock,
   IconPlus,
+  IconSearch,
   Spinner,
   SwipeActionRow,
   compareThreadCreation,
@@ -28,6 +29,7 @@ export function RecentsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [timeFilter, setTimeFilter] = useState("all");
   const [query, setQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
@@ -61,6 +63,7 @@ export function RecentsPage() {
         if (statusFilter === "running") return thread.status === "active";
         if (statusFilter === "approval") return pendingThreadIds.has(thread.id);
         if (statusFilter === "idle") return thread.status !== "active" && !pendingThreadIds.has(thread.id);
+        if (statusFilter === "archived") return thread.archived;
         return true;
       })
       .filter((thread) => {
@@ -78,10 +81,25 @@ export function RecentsPage() {
     <div className="page recents-page">
       <TopBar
         title="最近会话"
-        subtitle="全部设备的已同步会话，设备离线也可阅读历史"
+        subtitle={
+          <>
+            <span className="desktop-only">全部设备的已同步会话，设备离线也可阅读历史</span>
+            <span className="mobile-only">
+              {(devices.data ?? []).length} 台设备 · {(devices.data ?? []).filter((device) => device.status === "online").length} 台在线
+            </span>
+          </>
+        }
         trailing={
           <div className="page-actions">
             <div className="desktop-only"><SearchField value={query} onChange={setQuery} placeholder="搜索会话标题…" /></div>
+            <button
+              className="icon-btn mobile-only"
+              onClick={() => setSearchOpen((value) => !value)}
+              aria-label={searchOpen ? "收起搜索" : "搜索会话"}
+              aria-pressed={searchOpen}
+            >
+              <IconSearch size={18} />
+            </button>
             <button className="btn primary" onClick={() => setCreating(true)} aria-label="新建会话">
               <IconPlus size={16} />
               <span className="desktop-only">新建会话</span>
@@ -91,8 +109,8 @@ export function RecentsPage() {
       />
       <div className="page-scroll">
         <div className="page-col console-page-col">
-          <div className="mobile-only mobile-search"><SearchField value={query} onChange={setQuery} placeholder="搜索会话标题…" /></div>
-          <div className="session-filters" aria-label="会话筛选">
+          {searchOpen ? <div className="mobile-only mobile-search"><SearchField value={query} onChange={setQuery} placeholder="搜索会话标题…" /></div> : null}
+          <div className="session-filters desktop-session-filters" aria-label="会话筛选">
             <div className="scope-filters">
               <FilterSelect
                 label="设备"
@@ -127,12 +145,44 @@ export function RecentsPage() {
                 ["running", "运行中"],
                 ["approval", "等待审批"],
                 ["idle", "空闲"],
+                ["archived", "已归档"],
               ].map(([value, label]) => (
                 <button key={value} className={statusFilter === value ? "on" : ""} onClick={() => setStatusFilter(value)}>
                   {label}
                 </button>
               ))}
             </div>
+          </div>
+          <div className="mobile-only mobile-session-filters" aria-label="会话筛选">
+            <FilterSelect
+              label="设备"
+              value={deviceFilter}
+              onChange={(value) => { setDeviceFilter(value); setProjectFilter("all"); }}
+              options={[
+                { value: "all", label: "全部设备" },
+                ...(devices.data ?? []).map((device) => ({ value: device.id, label: device.displayName })),
+              ]}
+            />
+            <FilterSelect
+              label="项目"
+              value={projectFilter}
+              onChange={setProjectFilter}
+              options={[{ value: "all", label: "全部项目" }, ...projectOptions]}
+            />
+            <span className="accent-filter">
+              <FilterSelect
+                label="状态"
+                value={statusFilter}
+                onChange={setStatusFilter}
+                options={[
+                  { value: "all", label: "状态：全部" },
+                  { value: "running", label: "运行中" },
+                  { value: "approval", label: "等待审批" },
+                  { value: "idle", label: "空闲" },
+                  { value: "archived", label: "已归档" },
+                ]}
+              />
+            </span>
           </div>
 
           {threads.isLoading ? (
@@ -148,7 +198,10 @@ export function RecentsPage() {
             <div className="session-list">
               {groups.map((group) => (
                 <section className="session-group" key={group.key}>
-                  <div className="session-group-label">{group.label} · {group.threads.length}</div>
+                  <div className="session-group-label">
+                    <span>{group.label}</span>
+                    <span className="desktop-only"> · {group.threads.length}</span>
+                  </div>
                   {group.threads.map((thread) => (
                     <SwipeActionRow
                       key={thread.id}

@@ -5,7 +5,7 @@ import {
   Empty,
   IconDevice,
   IconFolder,
-  IconPlus,
+  IconFolderPlus,
   Sheet,
   Spinner,
   statusLabel,
@@ -18,6 +18,7 @@ import { DirectoryPicker } from "../sheets/DirectoryPicker";
 export function ProjectsPage() {
   const navigate = useNavigate();
   const [deviceFilter, setDeviceFilter] = useState("all");
+  const [sortOrder, setSortOrder] = useState<"recent" | "name">("recent");
   const [devicePickerOpen, setDevicePickerOpen] = useState(false);
   const [directoryDeviceId, setDirectoryDeviceId] = useState<string | null>(null);
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
@@ -34,11 +35,13 @@ export function ProjectsPage() {
         .map((device, index) => ({
           device,
           projects: [...(projectQueries[index]?.data ?? [])].sort(
-            (a, b) => Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
+            (a, b) => sortOrder === "name"
+              ? a.displayName.localeCompare(b.displayName, "zh-CN")
+              : Date.parse(b.lastActivityAt ?? "") - Date.parse(a.lastActivityAt ?? ""),
           ),
         }))
         .filter(({ device }) => deviceFilter === "all" || device.id === deviceFilter),
-    [deviceFilter, devices.data, projectQueries],
+    [deviceFilter, devices.data, projectQueries, sortOrder],
   );
   const projectCount = groups.reduce((total, group) => total + group.projects.length, 0);
   const loading = devices.isLoading || projectQueries.some((query) => query.isLoading);
@@ -57,9 +60,35 @@ export function ProjectsPage() {
     <div className="page projects-page">
       <TopBar
         title="项目"
-        subtitle={`${projectCount} 个项目 · 按设备分组，移除项目不会删除文件`}
+        subtitle={
+          <>
+            <span className="desktop-only">项目绑定设备本地目录，按设备分组 · 移除项目不会删除文件</span>
+            <span className="mobile-only">{projectCount} 个项目 · 按设备分组</span>
+          </>
+        }
         trailing={
           <div className="page-actions">
+            <div className="desktop-only">
+              <FilterSelect
+                label="按设备筛选项目"
+                value={deviceFilter}
+                onChange={setDeviceFilter}
+                options={[
+                  { value: "all", label: "全部设备" },
+                  ...(devices.data ?? []).map((device) => ({ value: device.id, label: device.displayName })),
+                ]}
+              />
+            </div>
+            <button className="btn primary" onClick={addProject} disabled={onlineDevices.length === 0} aria-label="新建项目">
+              <IconFolderPlus size={16} />
+              <span className="desktop-only">新建项目</span>
+            </button>
+          </div>
+        }
+      />
+      <div className="page-scroll">
+        <div className="page-col console-page-col">
+          <div className="mobile-only mobile-project-toolbar">
             <FilterSelect
               label="按设备筛选项目"
               value={deviceFilter}
@@ -69,15 +98,16 @@ export function ProjectsPage() {
                 ...(devices.data ?? []).map((device) => ({ value: device.id, label: device.displayName })),
               ]}
             />
-            <button className="btn primary" onClick={addProject} disabled={onlineDevices.length === 0} aria-label="新建项目">
-              <IconPlus size={16} />
-              <span className="desktop-only">新建项目</span>
-            </button>
+            <FilterSelect
+              label="项目排序"
+              value={sortOrder}
+              onChange={(value) => setSortOrder(value as "recent" | "name")}
+              options={[
+                { value: "recent", label: "按最近使用" },
+                { value: "name", label: "按名称" },
+              ]}
+            />
           </div>
-        }
-      />
-      <div className="page-scroll">
-        <div className="page-col console-page-col">
           {loading ? (
             <div className="content-state"><Spinner /></div>
           ) : projectCount === 0 ? (
@@ -87,7 +117,7 @@ export function ProjectsPage() {
               hint={onlineDevices.length ? "从一台在线设备选择本地目录开始" : "设备在线后即可添加项目"}
               action={
                 onlineDevices.length ? (
-                  <button className="btn primary" onClick={addProject}><IconPlus size={15} />新建项目</button>
+                  <button className="btn primary" onClick={addProject}><IconFolderPlus size={15} />新建项目</button>
                 ) : undefined
               }
             />
@@ -97,15 +127,21 @@ export function ProjectsPage() {
                 projects.length ? (
                   <section className="project-group" key={device.id}>
                     <header className="project-group-head">
-                      <IconDevice size={15} />
+                      <IconDevice className="desktop-only" size={15} />
+                      <span className="mobile-only project-mobile-dot">
+                        <StatusDot
+                          tone={device.status === "online" ? "success" : device.status === "syncing" ? "warning" : "offline"}
+                        />
+                      </span>
                       <strong>{device.displayName}</strong>
-                      <span className={`compact-status ${device.status}`}>
+                      <span className={`compact-status desktop-only ${device.status}`}>
                         <StatusDot
                           tone={device.status === "online" ? "success" : device.status === "syncing" ? "warning" : "offline"}
                         />
                         {statusLabel(device.status)}
                       </span>
-                      <span className="group-count num">{projects.length} 个项目</span>
+                      <span className={`mobile-only project-mobile-status ${device.status}`}>{statusLabel(device.status)}</span>
+                      <span className="group-count num desktop-only">{projects.length} 个项目</span>
                     </header>
                     <div className="list-group project-panel">
                       {projects.map((project) => (
