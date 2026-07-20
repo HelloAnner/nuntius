@@ -530,6 +530,196 @@ impl ClientStore {
             .await?;
         Ok(())
     }
+    /// Returns only rows whose durable runtime projection can block or
+    /// misroute the next user input. The provider is consulted before any
+    /// repair is applied; this query by itself never changes state.
+    pub async fn runtime_reconciliation_candidates(
+        &self,
+        device_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ThreadSummary>> {
+        let rows = sqlx::query(
+            "SELECT t.* FROM threads t WHERE lower(t.status) IN ('active','running','inprogress','recovering','stalled') OR EXISTS(SELECT 1 FROM turns r WHERE r.thread_id=t.id AND lower(r.status) IN ('active','running','inprogress','stalled')) OR EXISTS(SELECT 1 FROM items i JOIN turns r ON r.id=i.turn_id WHERE r.thread_id=t.id AND lower(i.status) IN ('active','running','inprogress','stalled')) OR EXISTS(SELECT 1 FROM pending_app_requests a WHERE a.thread_id=t.id AND a.status IN ('pending','responding')) ORDER BY julianday(COALESCE(t.last_activity_at,t.updated_at)),t.id LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| thread_summary(&row, device_id))
+            .collect())
+    }
+    /// Aligns a stale local projection with a positively identified provider
+    /// turn. As with terminal repair, a newer live event prevents the write.
+    pub async fn align_active_runtime(
+        &self,
+        thread_id: &str,
+        app_turn_id: Option<&str>,
+        observed_before: &str,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let thread = sqlx::query(
+            "SELECT status,julianday(updated_at)<=julianday(?) AS eligible FROM threads WHERE id=?",
+        )
+        .bind(observed_before)
+        .bind(thread_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(thread) = thread else {
+            tx.commit().await?;
+            return Ok(false);
+        };
+        if !thread.get::<bool, _>("eligible") {
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        let active_turns = sqlx::query("SELECT id,app_server_turn_id FROM turns WHERE thread_id=? AND lower(status) IN ('active','running','inprogress') ORDER BY ordinal DESC")
+            .bind(thread_id)
+            .fetch_all(&mut *tx)
+            .await?;
+        let matching_active = app_turn_id.map_or(active_turns.len() == 1, |app_turn_id| {
+            active_turns.len() == 1
+                && active_turns[0]
+                    .get::<Option<String>, _>("app_server_turn_id")
+                    .as_deref()
+                    == Some(app_turn_id)
+        });
+        if thread.get::<String, _>("status") == "active" && matching_active {
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        let existing = if let Some(app_turn_id) = app_turn_id {
+            sqlx::query_scalar::<_, String>(
+                "SELECT id FROM turns WHERE thread_id=? AND app_server_turn_id=?",
+            )
+            .bind(thread_id)
+            .bind(app_turn_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .or_else(|| {
+                active_turns.iter().find_map(|row| {
+                    row.get::<Option<String>, _>("app_server_turn_id")
+                        .is_none()
+                        .then(|| row.get::<String, _>("id"))
+                })
+            })
+        } else {
+            active_turns.first().map(|row| row.get::<String, _>("id"))
+        };
+        let turn_id = existing.unwrap_or_else(|| new_id("trn"));
+        let stamp = now();
+        // Close contradictory local projections before activating the one the
+        // provider just identified.
+        sqlx::query("UPDATE items SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE turn_id IN (SELECT id FROM turns WHERE thread_id=? AND id<>? AND lower(status) IN ('active','running','inprogress')) AND lower(status) IN ('active','running','inprogress')")
+            .bind(&stamp)
+            .bind(thread_id)
+            .bind(&turn_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE thread_id=? AND id<>? AND lower(status) IN ('active','running','inprogress')")
+            .bind(&stamp)
+            .bind(thread_id)
+            .bind(&turn_id)
+            .execute(&mut *tx)
+            .await?;
+        if sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&mut *tx)
+            .await?
+            == 0
+        {
+            let ordinal: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(ordinal),0)+1 FROM turns WHERE thread_id=?",
+            )
+            .bind(thread_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at) VALUES(?,?,?,?,'inProgress',?)")
+                .bind(&turn_id)
+                .bind(thread_id)
+                .bind(app_turn_id)
+                .bind(ordinal)
+                .bind(&stamp)
+                .execute(&mut *tx)
+                .await?;
+        } else {
+            sqlx::query("UPDATE turns SET app_server_turn_id=COALESCE(app_server_turn_id,?),status='inProgress',started_at=COALESCE(started_at,?),completed_at=NULL WHERE id=?")
+                .bind(app_turn_id)
+                .bind(&stamp)
+                .bind(&turn_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query(
+            "UPDATE threads SET status='active',last_activity_at=?,updated_at=? WHERE id=?",
+        )
+        .bind(&stamp)
+        .bind(&stamp)
+        .bind(thread_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+    /// Closes a runtime projection after the provider has been observed in a
+    /// terminal state. `observed_before` makes this a compare-and-set: a live
+    /// event committed while the provider was being checked wins the race and
+    /// the repair is skipped.
+    pub async fn close_terminal_runtime(
+        &self,
+        thread_id: &str,
+        observed_before: &str,
+        turn_status: &str,
+    ) -> Result<bool> {
+        if !matches!(
+            turn_status,
+            "completed" | "failed" | "interrupted" | "cancelled" | "canceled"
+        ) {
+            bail!("invalid reconciled turn status")
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let eligible: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM threads t WHERE t.id=? AND julianday(t.updated_at)<=julianday(?) AND (lower(t.status) IN ('active','running','inprogress','recovering','stalled') OR EXISTS(SELECT 1 FROM turns r WHERE r.thread_id=t.id AND lower(r.status) IN ('active','running','inprogress','stalled')) OR EXISTS(SELECT 1 FROM items i JOIN turns r ON r.id=i.turn_id WHERE r.thread_id=t.id AND lower(i.status) IN ('active','running','inprogress','stalled')) OR EXISTS(SELECT 1 FROM pending_app_requests a WHERE a.thread_id=t.id AND a.status IN ('pending','responding'))))",
+        )
+        .bind(thread_id)
+        .bind(observed_before)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !eligible {
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        let stamp = now();
+        sqlx::query("UPDATE turns SET status=?,completed_at=COALESCE(completed_at,?) WHERE thread_id=? AND lower(status) IN ('active','running','inprogress','stalled')")
+            .bind(turn_status)
+            .bind(&stamp)
+            .bind(thread_id)
+            .execute(&mut *tx)
+            .await?;
+        // A partially streamed item has no trustworthy terminal result once
+        // the provider turn is gone. `unknown` is terminal without pretending
+        // that a tool or file operation completed successfully.
+        sqlx::query("UPDATE items SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE turn_id IN (SELECT id FROM turns WHERE thread_id=?) AND lower(status) IN ('active','running','inprogress','stalled')")
+            .bind(&stamp)
+            .bind(thread_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE pending_app_requests SET status='unknown',decided_at=COALESCE(decided_at,?),error_message=COALESCE(error_message,'provider_turn_already_terminal') WHERE thread_id=? AND status IN ('pending','responding')")
+            .bind(&stamp)
+            .bind(thread_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE threads SET status='idle',updated_at=? WHERE id=?")
+            .bind(&stamp)
+            .bind(thread_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
     pub async fn mark_stalled_codex_threads(&self, cutoff: &str) -> Result<Vec<String>> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let thread_ids: Vec<String> = sqlx::query_scalar(
@@ -2319,6 +2509,133 @@ mod tests {
             .unwrap();
             assert!(completed_at.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn runtime_reconciliation_repairs_the_whole_stale_projection() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_audit", "Audit", &workspace, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_thread(
+                "thr_audit",
+                "prj_audit",
+                "app_audit",
+                "Stale runtime",
+                &json!({}),
+            )
+            .await
+            .unwrap();
+        let turn_id = store
+            .mark_app_turn_started("thr_audit", Some("app_turn_audit"))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO items(id,turn_id,ordinal,kind,status,occurred_at) VALUES('itm_audit',?,1,'command_execution','running',?)")
+            .bind(&turn_id)
+            .bind(now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .save_provider_request(
+                AgentProvider::Codex,
+                "apr_audit",
+                &json!("provider_request"),
+                "item/commandExecution/requestApproval",
+                &json!({}),
+                Some("prj_audit"),
+                Some("thr_audit"),
+            )
+            .await
+            .unwrap();
+
+        let candidates = store
+            .runtime_reconciliation_candidates("dev_test", 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["thr_audit"]
+        );
+        // A provider observation older than the local projection cannot close
+        // it, which protects a turn that started while the audit was running.
+        assert!(
+            !store
+                .close_terminal_runtime("thr_audit", "2000-01-01T00:00:00Z", "completed")
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .close_terminal_runtime("thr_audit", "9999-01-01T00:00:00Z", "completed")
+                .await
+                .unwrap()
+        );
+
+        assert_eq!(
+            store
+                .thread("thr_audit", "dev_test")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "idle"
+        );
+        let turn_status: String = sqlx::query_scalar("SELECT status FROM turns WHERE id=?")
+            .bind(&turn_id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(turn_status, "completed");
+        let item_status: String =
+            sqlx::query_scalar("SELECT status FROM items WHERE id='itm_audit'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(item_status, "unknown");
+        let approval = sqlx::query(
+            "SELECT status,error_message FROM pending_app_requests WHERE approval_id='apr_audit'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(approval.get::<String, _>("status"), "unknown");
+        assert_eq!(
+            approval
+                .get::<Option<String>, _>("error_message")
+                .as_deref(),
+            Some("provider_turn_already_terminal")
+        );
+        assert!(
+            store
+                .runtime_reconciliation_candidates("dev_test", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        assert!(
+            store
+                .align_active_runtime("thr_audit", Some("app_turn_next"), "9999-01-01T00:00:00Z")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .active_app_turn_id("thr_audit")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("app_turn_next")
+        );
     }
 
     #[tokio::test]

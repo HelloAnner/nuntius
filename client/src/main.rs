@@ -12,6 +12,7 @@ mod history_monitor;
 mod kimi;
 mod pairing;
 mod protocol;
+mod runtime_reconciler;
 mod service;
 mod store;
 mod tunnel;
@@ -357,6 +358,7 @@ async fn run() -> Result<()> {
         }
     });
     let history_monitor_task = tokio::spawn(history_monitor::run(executor.clone()));
+    let runtime_reconciler_task = tokio::spawn(runtime_reconciler::run(executor.clone()));
     let discovery = executor.clone();
     let discovery_task = tokio::spawn(async move {
         match discovery.discover_all().await {
@@ -429,6 +431,7 @@ async fn run() -> Result<()> {
                     &command_queue_task,
                     &maintenance_task,
                     &history_monitor_task,
+                    &runtime_reconciler_task,
                     tunnel_task.as_ref(),
                 ) {
                     tracing::error!(task=name, "critical client task exited unexpectedly");
@@ -488,6 +491,7 @@ async fn run() -> Result<()> {
     }
     discovery_task.abort();
     history_monitor_task.abort();
+    runtime_reconciler_task.abort();
     app_events_task.abort();
     kimi_event_stream_task.abort();
     kimi_events_task.abort();
@@ -511,6 +515,7 @@ fn finished_critical_task(
     command_queue: &tokio::task::JoinHandle<()>,
     maintenance: &tokio::task::JoinHandle<()>,
     history_monitor: &tokio::task::JoinHandle<()>,
+    runtime_reconciler: &tokio::task::JoinHandle<()>,
     tunnel: Option<&tokio::task::JoinHandle<()>>,
 ) -> Option<&'static str> {
     [
@@ -520,6 +525,7 @@ fn finished_critical_task(
         ("command_queue", command_queue),
         ("maintenance", maintenance),
         ("history_monitor", history_monitor),
+        ("runtime_reconciler", runtime_reconciler),
     ]
     .into_iter()
     .find_map(|(name, task)| task.is_finished().then_some(name))
