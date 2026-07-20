@@ -14,7 +14,6 @@ mod pairing;
 mod protocol;
 mod store;
 mod tunnel;
-mod update_relay;
 
 use agent::AgentRuntimes;
 use anyhow::{Context, Result, bail};
@@ -22,7 +21,7 @@ use clap::{Parser, Subcommand};
 use config::ClientConfig;
 use executor::CommandExecutor;
 use fs2::FileExt;
-use nuntius_updater::{BuildInfo, UpdateConfig, UpdateRole};
+use nuntius_updater::{BuildInfo, UpdateConfig};
 use std::{
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
@@ -351,12 +350,11 @@ async fn run() -> Result<()> {
             }
         }
     });
-    let update_trigger = nuntius_updater::UpdateTrigger::new();
-    let tunnel_update_trigger = update_trigger.clone();
+    let (desired_release_tx, desired_release_rx) = tokio::sync::watch::channel(None);
     let tunnel_task = cfg
         .device_id
         .as_ref()
-        .map(|_| tokio::spawn(tunnel::run_forever(executor.clone(), tunnel_update_trigger)));
+        .map(|_| tokio::spawn(tunnel::run_forever(executor.clone(), desired_release_tx)));
     let router = api::router(executor)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(CatchPanicLayer::new())
@@ -373,24 +371,16 @@ async fn run() -> Result<()> {
     });
     tracing::info!(bind=%cfg.local_bind,paired=cfg.device_id.is_some(),"Nuntius client running");
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(1);
-    let self_update_trigger = update_trigger.clone();
     let update_task = cfg.auto_update.then(|| {
-        let mut update = UpdateConfig::production(
-            UpdateRole::Client,
+        let update = UpdateConfig::client(
             "nuntius-client",
             "aarch64-apple-darwin",
             root.clone(),
             Duration::from_secs(cfg.update_interval_seconds),
+            cfg.server_url.clone(),
         );
-        update.required_server_info_url = url::Url::parse(&cfg.server_url)
-            .and_then(|base| base.join("/api/v1/info"))
-            .map(|url| url.to_string())
-            .ok();
-        nuntius_updater::spawn_update_loop_triggered(update, update_tx, Some(self_update_trigger))
+        nuntius_updater::spawn_client_update_worker(update, desired_release_rx, update_tx)
     });
-    let update_relay_task = cfg
-        .server_update_relay
-        .then(|| update_relay::spawn(cfg.clone(), update_trigger));
     let (graceful_tx, graceful_rx) = tokio::sync::oneshot::channel();
     let mut graceful_tx = Some(graceful_tx);
     let server = std::future::IntoFuture::into_future(
@@ -421,9 +411,6 @@ async fn run() -> Result<()> {
         }
     }
     if let Some(task) = update_task {
-        task.abort();
-    }
-    if let Some(task) = update_relay_task {
         task.abort();
     }
     health_marker_task.abort();

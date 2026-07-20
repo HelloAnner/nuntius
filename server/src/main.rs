@@ -6,15 +6,15 @@ mod config;
 mod error;
 mod event_hub;
 mod protocol;
+mod releases;
 mod store;
 mod tunnel;
-mod update_relay;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use config::{ServerConfig, initialize_data_dir};
 use event_hub::EventHub;
-use nuntius_updater::{BuildInfo, UpdateConfig, UpdateRole};
+use nuntius_updater::BuildInfo;
 use protocol::TransportSecurity;
 use std::{
     fs,
@@ -50,16 +50,6 @@ enum Command {
     Serve,
     Backup,
     BuildInfo,
-    ReceiveUpdate {
-        #[arg(long)]
-        commit_sha: String,
-        #[arg(long, default_value_t = 0)]
-        release_sequence: u64,
-        #[arg(long)]
-        archive_sha256: String,
-        #[arg(long)]
-        source_device_id: String,
-    },
 }
 
 #[derive(Clone)]
@@ -69,6 +59,7 @@ pub struct AppState {
     pub store: ServerStore,
     pub events: EventHub,
     pub tunnels: Arc<tunnel::TunnelRegistry>,
+    pub releases: releases::ReleaseStore,
 }
 
 impl AppState {
@@ -101,7 +92,6 @@ async fn main() -> Result<()> {
         }
         Command::Serve => {
             let data_dir = required_data_dir(cli.data_dir)?;
-            nuntius_updater::handle_startup(&data_dir)?;
             serve(data_dir).await
         }
         Command::Backup => backup(required_data_dir(cli.data_dir)?).await,
@@ -114,22 +104,6 @@ async fn main() -> Result<()> {
                 ))?
             );
             Ok(())
-        }
-        Command::ReceiveUpdate {
-            commit_sha,
-            release_sequence,
-            archive_sha256,
-            source_device_id,
-        } => {
-            let data_dir = required_data_dir(cli.data_dir)?;
-            update_relay::receive(
-                &data_dir,
-                commit_sha,
-                release_sequence,
-                archive_sha256,
-                source_device_id,
-            )
-            .await
         }
     }
 }
@@ -193,13 +167,14 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
     let store = ServerStore::open(&data_dir)
         .await
         .context("open server SQLite")?;
-    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(1);
+    let releases = releases::ReleaseStore::load(&data_dir, &config.public_base_url).await?;
     let state = AppState {
         config: Arc::new(config.clone()),
         data_dir: Arc::new(data_dir.clone()),
         store,
         events: EventHub::new(4096),
         tunnels: tunnel::TunnelRegistry::new(),
+        releases,
     };
     let maintenance_store = state.store.clone();
     let retention_hours = config.event_retention_hours;
@@ -213,33 +188,17 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
             }
         }
     });
-    let app = api::router(state)
+    let app = api::router(state.clone())
         .layer(CatchPanicLayer::new())
         .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    let health_data_dir = data_dir.clone();
-    let health_marker_task = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        if let Err(error) = nuntius_updater::mark_healthy(&health_data_dir) {
-            tracing::warn!(error=?error, "cannot mark self-update healthy");
-        }
-    });
     tracing::info!(bind=%config.bind,public_base_url=%config.public_base_url,secure=config.is_secure(),"nuntius server listening");
-    let update_task = (config.auto_update && config.direct_github_update).then(|| {
-        nuntius_updater::spawn_update_loop(
-            UpdateConfig::production(
-                UpdateRole::Server,
-                "nuntius-server",
-                "x86_64-unknown-linux-gnu",
-                data_dir.clone(),
-                Duration::from_secs(config.update_interval_seconds),
-            ),
-            update_tx.clone(),
-        )
-    });
-    let update_relay_task = config
-        .auto_update
-        .then(|| update_relay::spawn(data_dir.clone(), Duration::from_secs(5), update_tx));
+    let release_task = releases::spawn_watcher(
+        data_dir.clone(),
+        config.public_base_url.clone(),
+        state.releases.clone(),
+        state.tunnels.clone(),
+    );
     let (graceful_tx, graceful_rx) = tokio::sync::oneshot::channel();
     let mut graceful_tx = Some(graceful_tx);
     let server = std::future::IntoFuture::into_future(
@@ -250,7 +209,6 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
     tokio::pin!(server);
     let external_shutdown = shutdown_signal();
     tokio::pin!(external_shutdown);
-    let mut prepared_update = None;
     tokio::select! {
         result = &mut server => result?,
         _ = &mut external_shutdown => {
@@ -260,27 +218,9 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
                 Err(_) => tracing::warn!("forcing shutdown after live connections exceeded drain timeout"),
             }
         }
-        update = update_rx.recv(), if config.auto_update => {
-            prepared_update = update;
-            if let Some(tx) = graceful_tx.take() { let _ = tx.send(()); }
-            match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, &mut server).await {
-                Ok(result) => result?,
-                Err(_) => tracing::warn!("forcing update after live connections exceeded drain timeout"),
-            }
-        }
     }
-    if let Some(task) = update_task {
-        task.abort();
-    }
-    if let Some(task) = update_relay_task {
-        task.abort();
-    }
-    health_marker_task.abort();
+    release_task.abort();
     maintenance_task.abort();
-    if let Some(update) = prepared_update {
-        tracing::info!(target=%update.target_sha(), "activating self-update");
-        update.activate()?;
-    }
     Ok(())
 }
 

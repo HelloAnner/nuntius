@@ -244,6 +244,43 @@ jobs:
             echo "Source commit: \`$GITHUB_SHA\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  ops-macos-arm64:
+    name: Ops · macOS ARM64
+    needs: [release_sequence, test]
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Verify runner architecture
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Build ops controller
+        run: cargo build --locked --release --package nuntius-ops
+
+      - name: Package ops controller
+        run: |
+          mkdir -p package
+          cp target/release/nuntius-ops package/
+          cd package
+          shasum -a 256 nuntius-ops > SHA256SUMS
+          tar -czf ../nuntius-ops-macos-arm64.tar.gz nuntius-ops SHA256SUMS
+
+      - name: Upload ops artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: nuntius-ops-macos-arm64-${{ github.sha }}
+          path: nuntius-ops-macos-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
   publish-continuous:
     name: Publish · continuous self-update channel
     needs: [release_sequence, test, server-linux-x86_64, client-macos-arm64]
@@ -379,26 +416,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Continuous build · $GITHUB_SHA" \
             --notes "Rolling self-update channel for commit $GITHUB_SHA. The manifest points to immutable commit assets."
-
-      - name: Wake the deployment relay
-        if: steps.head.outputs.publish == 'true'
-        env:
-          UPDATE_NOTICE_URL: ${{ secrets.NUNTIUS_UPDATE_NOTICE_URL }}
-          UPDATE_NOTICE_TOKEN: ${{ secrets.NUNTIUS_UPDATE_NOTICE_TOKEN }}
-        run: |
-          if [ -z "$UPDATE_NOTICE_URL" ] || [ -z "$UPDATE_NOTICE_TOKEN" ]; then
-            echo "Update notice secrets are not configured; periodic polling remains active." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          body="$(jq -cn --arg commitSha "$GITHUB_SHA" --argjson releaseSequence "$NUNTIUS_BUILD_SEQUENCE" '{commitSha:$commitSha,releaseSequence:$releaseSequence}')"
-          if ! curl --fail-with-body --silent --show-error \
-            --retry 5 --retry-all-errors --retry-delay 2 \
-            -H "Authorization: Bearer $UPDATE_NOTICE_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data "$body" \
-            "$UPDATE_NOTICE_URL"; then
-            echo "Update notice delivery failed; periodic polling will reconcile the release." >> "$GITHUB_STEP_SUMMARY"
-          fi
 
       - name: Add continuous channel to summary
         if: steps.head.outputs.publish == 'true'

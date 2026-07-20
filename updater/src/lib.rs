@@ -9,15 +9,13 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, LazyLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use tokio::{
     process::Command,
-    sync::{Mutex, Notify, OwnedMutexGuard, mpsc},
+    sync::{Mutex, OwnedMutexGuard, mpsc, watch},
 };
 
-pub const DEFAULT_MANIFEST_URL: &str =
-    "https://github.com/HelloAnner/nuntius/releases/download/continuous/manifest.json";
 pub const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 static STAGE_UPDATE_LOCK: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
@@ -36,40 +34,29 @@ fn release_is_stale(installed_sequence: u64, available_sequence: u64) -> bool {
     installed_sequence > 0 && available_sequence <= installed_sequence
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpdateRole {
-    Server,
-    Client,
-}
-
 #[derive(Debug, Clone)]
 pub struct UpdateConfig {
-    pub role: UpdateRole,
     pub binary_name: String,
     pub expected_target: String,
     pub data_dir: PathBuf,
-    pub interval: Duration,
-    pub manifest_url: String,
-    pub required_server_info_url: Option<String>,
+    pub retry_interval: Duration,
+    pub trusted_server_url: String,
 }
 
 impl UpdateConfig {
-    pub fn production(
-        role: UpdateRole,
+    pub fn client(
         binary_name: impl Into<String>,
         expected_target: impl Into<String>,
         data_dir: PathBuf,
-        interval: Duration,
+        retry_interval: Duration,
+        trusted_server_url: impl Into<String>,
     ) -> Self {
         Self {
-            role,
             binary_name: binary_name.into(),
             expected_target: expected_target.into(),
             data_dir,
-            interval,
-            manifest_url: std::env::var("NUNTIUS_UPDATE_MANIFEST_URL")
-                .unwrap_or_else(|_| DEFAULT_MANIFEST_URL.into()),
-            required_server_info_url: None,
+            retry_interval,
+            trusted_server_url: trusted_server_url.into(),
         }
     }
 }
@@ -103,56 +90,16 @@ pub fn build_target() -> String {
         .unwrap_or_else(|| format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS))
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-struct UpdateManifest {
-    schema_version: u32,
-    commit_sha: String,
-    #[serde(default)]
-    release_sequence: u64,
-    server: ManifestAsset,
-    client: ManifestAsset,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ManifestAsset {
-    url: String,
-    sha256: String,
-    target: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ServerBuildInfo {
-    build_sha: String,
-    #[serde(default)]
-    release_sequence: u64,
-}
-
-#[derive(Debug)]
-pub struct RelayPackage {
+pub struct ClientRelease {
+    pub release_id: String,
     pub commit_sha: String,
     pub release_sequence: u64,
-    pub archive_sha256: String,
-    pub archive: Vec<u8>,
-}
-
-#[derive(Clone, Default)]
-pub struct UpdateTrigger(Arc<Notify>);
-
-impl UpdateTrigger {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn notify(&self) {
-        self.0.notify_waiters();
-    }
-
-    pub async fn wait(&self) {
-        self.0.notified().await;
-    }
+    pub target: String,
+    pub url: String,
+    pub sha256: String,
+    pub size: u64,
 }
 
 #[derive(Debug)]
@@ -183,17 +130,10 @@ struct UpdateMarker {
     previous_path: PathBuf,
 }
 
-pub fn spawn_update_loop(
+pub fn spawn_client_update_worker(
     config: UpdateConfig,
+    mut desired: watch::Receiver<Option<ClientRelease>>,
     ready: mpsc::Sender<PreparedUpdate>,
-) -> tokio::task::JoinHandle<()> {
-    spawn_update_loop_triggered(config, ready, None)
-}
-
-pub fn spawn_update_loop_triggered(
-    config: UpdateConfig,
-    ready: mpsc::Sender<PreparedUpdate>,
-    trigger: Option<UpdateTrigger>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let client = match http_client() {
@@ -204,18 +144,15 @@ pub fn spawn_update_loop_triggered(
             }
         };
 
-        let mut interval = tokio::time::interval(config.interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            if let Some(trigger) = &trigger {
-                tokio::select! {
-                    _ = interval.tick() => {}
-                    _ = trigger.wait() => {}
+            let release = desired.borrow().clone();
+            let Some(release) = release else {
+                if desired.changed().await.is_err() {
+                    return;
                 }
-            } else {
-                interval.tick().await;
-            }
-            match prepare_update(&client, &config).await {
+                continue;
+            };
+            match prepare_client_update(&client, &config, &release).await {
                 Ok(Some(update)) => {
                     tracing::info!(from=%update.from_sha, to=%update.to_sha, "self-update prepared");
                     if ready.send(update).await.is_err() {
@@ -223,90 +160,21 @@ pub fn spawn_update_loop_triggered(
                     }
                     return;
                 }
-                Ok(None) => {}
-                Err(error) => tracing::warn!(error=?error, "self-update check failed"),
+                Ok(None) => {
+                    if desired.changed().await.is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error=?error,release_id=%release.release_id,"client update failed; retrying");
+                    tokio::select! {
+                        _ = tokio::time::sleep(config.retry_interval) => {}
+                        changed = desired.changed() => if changed.is_err() { return; },
+                    }
+                }
             }
         }
     })
-}
-
-pub async fn fetch_server_relay_package(
-    manifest_url: &str,
-    server_info_url: &str,
-    expected_target: &str,
-) -> Result<Option<RelayPackage>> {
-    let client = http_client()?;
-    let manifest = fetch_manifest(&client, manifest_url).await?;
-    let server = client
-        .get(server_info_url)
-        .send()
-        .await
-        .context("query server build before relaying update")?
-        .error_for_status()
-        .context("server build query returned an error")?
-        .json::<ServerBuildInfo>()
-        .await
-        .context("decode server build information")?;
-    if server.build_sha == manifest.commit_sha {
-        return Ok(None);
-    }
-    if release_is_stale(server.release_sequence, manifest.release_sequence) {
-        tracing::warn!(
-            installed_sequence = server.release_sequence,
-            available_sequence = manifest.release_sequence,
-            available = %manifest.commit_sha,
-            "ignoring stale server update manifest"
-        );
-        return Ok(None);
-    }
-    if manifest.server.target != expected_target {
-        bail!(
-            "relay target mismatch: expected {}, got {}",
-            expected_target,
-            manifest.server.target
-        );
-    }
-    let archive = download_archive(&client, &manifest.server).await?;
-    Ok(Some(RelayPackage {
-        commit_sha: manifest.commit_sha,
-        release_sequence: manifest.release_sequence,
-        archive_sha256: manifest.server.sha256,
-        archive,
-    }))
-}
-
-pub async fn prepare_relayed_update(
-    config: &UpdateConfig,
-    commit_sha: &str,
-    release_sequence: u64,
-    archive_sha256: &str,
-    archive: &[u8],
-) -> Result<Option<PreparedUpdate>> {
-    if config.role != UpdateRole::Server {
-        bail!("relayed updates are only accepted for the server role");
-    }
-    validate_commit_sha(commit_sha)?;
-    validate_digest(archive_sha256)?;
-    if commit_sha == build_sha() {
-        return Ok(None);
-    }
-    // A client from before releaseSequence support omits this relay argument.
-    // Accept sequence zero for one rolling-compatibility window; the staged
-    // binary identity and checksum are still verified. New relays always send
-    // a sequence and therefore receive the monotonic downgrade guard.
-    if release_sequence > 0 && release_is_stale(build_sequence(), release_sequence) {
-        tracing::warn!(
-            installed_sequence = build_sequence(),
-            available_sequence = release_sequence,
-            available = %commit_sha,
-            "ignoring stale relayed update"
-        );
-        return Ok(None);
-    }
-    verify_archive(archive, archive_sha256)?;
-    Ok(Some(
-        stage_update(config, commit_sha, release_sequence, archive).await?,
-    ))
 }
 
 fn http_client() -> Result<reqwest::Client> {
@@ -318,92 +186,39 @@ fn http_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
-async fn fetch_manifest(client: &reqwest::Client, manifest_url: &str) -> Result<UpdateManifest> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let separator = if manifest_url.contains('?') { '&' } else { '?' };
-    let url = format!("{manifest_url}{separator}nonce={nonce}");
-    let manifest = client
-        .get(url)
-        .header(reqwest::header::CACHE_CONTROL, "no-cache")
-        .send()
-        .await
-        .context("download update manifest")?
-        .error_for_status()
-        .context("update manifest returned an error")?
-        .json::<UpdateManifest>()
-        .await
-        .context("decode update manifest")?;
-    validate_manifest(&manifest)?;
-    Ok(manifest)
-}
-
-async fn prepare_update(
+async fn prepare_client_update(
     client: &reqwest::Client,
     config: &UpdateConfig,
+    release: &ClientRelease,
 ) -> Result<Option<PreparedUpdate>> {
-    let manifest = fetch_manifest(client, &config.manifest_url).await?;
-
-    if manifest.commit_sha == build_sha() {
+    validate_client_release(config, release)?;
+    if release.commit_sha == build_sha() {
         return Ok(None);
     }
-
-    if release_is_stale(build_sequence(), manifest.release_sequence) {
+    if release_is_stale(build_sequence(), release.release_sequence) {
         tracing::warn!(
             installed_sequence = build_sequence(),
-            available_sequence = manifest.release_sequence,
-            available = %manifest.commit_sha,
-            "ignoring stale update manifest"
+            available_sequence = release.release_sequence,
+            available = %release.commit_sha,
+            "ignoring stale client release"
         );
         return Ok(None);
     }
-
-    if let Some(server_info_url) = &config.required_server_info_url {
-        let server = client
-            .get(server_info_url)
-            .send()
-            .await
-            .context("query server build before client update")?
-            .error_for_status()
-            .context("server build query returned an error")?
-            .json::<ServerBuildInfo>()
-            .await
-            .context("decode server build information")?;
-        if server.build_sha != manifest.commit_sha {
-            tracing::debug!(server=%server.build_sha, available=%manifest.commit_sha, "waiting for server to update first");
-            return Ok(None);
-        }
-    }
-
-    let asset = match config.role {
-        UpdateRole::Server => &manifest.server,
-        UpdateRole::Client => &manifest.client,
-    };
-    if asset.target != config.expected_target {
-        bail!(
-            "update target mismatch: expected {}, got {}",
-            config.expected_target,
-            asset.target
-        );
-    }
-
-    let archive = download_archive(client, asset).await?;
+    let archive = download_archive(client, release).await?;
     Ok(Some(
         stage_update(
             config,
-            &manifest.commit_sha,
-            manifest.release_sequence,
+            &release.commit_sha,
+            release.release_sequence,
             &archive,
         )
         .await?,
     ))
 }
 
-async fn download_archive(client: &reqwest::Client, asset: &ManifestAsset) -> Result<Vec<u8>> {
+async fn download_archive(client: &reqwest::Client, release: &ClientRelease) -> Result<Vec<u8>> {
     let response = client
-        .get(&asset.url)
+        .get(&release.url)
         .header(reqwest::header::CACHE_CONTROL, "no-cache")
         .send()
         .await
@@ -418,7 +233,10 @@ async fn download_archive(client: &reqwest::Client, asset: &ManifestAsset) -> Re
         .await
         .context("read update archive")?
         .to_vec();
-    verify_archive(&archive, &asset.sha256)?;
+    if archive.len() as u64 != release.size {
+        bail!("update archive size does not match release metadata");
+    }
+    verify_archive(&archive, &release.sha256)?;
     Ok(archive)
 }
 
@@ -475,22 +293,39 @@ async fn stage_update(
     })
 }
 
-fn validate_manifest(manifest: &UpdateManifest) -> Result<()> {
-    if manifest.schema_version != 1 {
+fn validate_client_release(config: &UpdateConfig, release: &ClientRelease) -> Result<()> {
+    validate_commit_sha(&release.commit_sha)?;
+    validate_digest(&release.sha256)?;
+    if release.release_id.is_empty()
+        || release.release_id.len() > 128
+        || !release
+            .release_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        || release.release_sequence == 0
+        || release.size == 0
+        || release.size > MAX_ARCHIVE_BYTES as u64
+    {
+        bail!("invalid client release metadata");
+    }
+    if release.target != config.expected_target {
         bail!(
-            "unsupported update manifest schema {}",
-            manifest.schema_version
+            "update target mismatch: expected {}, got {}",
+            config.expected_target,
+            release.target
         );
     }
-    validate_commit_sha(&manifest.commit_sha)?;
-    for asset in [&manifest.server, &manifest.client] {
-        validate_digest(&asset.sha256)?;
-        if !asset
-            .url
-            .starts_with("https://github.com/HelloAnner/nuntius/")
-        {
-            bail!("update asset URL is outside the trusted repository");
-        }
+    let base =
+        reqwest::Url::parse(&config.trusted_server_url).context("parse trusted server URL")?;
+    let url = reqwest::Url::parse(&release.url).context("parse client release URL")?;
+    if url.scheme() != base.scheme()
+        || url.host_str() != base.host_str()
+        || url.port_or_known_default() != base.port_or_known_default()
+        || !url.path().starts_with("/api/v1/client-releases/")
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("client release URL is outside the paired server origin");
     }
     Ok(())
 }
@@ -816,45 +651,44 @@ mod tests {
     }
 
     #[test]
-    fn rejects_manifest_outside_trusted_repository() {
-        let manifest = UpdateManifest {
-            schema_version: 1,
-            commit_sha: "a".repeat(40),
-            release_sequence: 1,
-            server: ManifestAsset {
-                url: "https://example.com/server.tar.gz".into(),
-                sha256: "b".repeat(64),
-                target: "x86_64-linux".into(),
-            },
-            client: ManifestAsset {
-                url: "https://github.com/HelloAnner/nuntius/releases/client.tar.gz".into(),
-                sha256: "c".repeat(64),
-                target: "aarch64-macos".into(),
-            },
-        };
-        assert!(validate_manifest(&manifest).is_err());
-    }
-
-    #[tokio::test]
-    async fn rejects_relay_archive_with_wrong_digest() {
-        let config = UpdateConfig::production(
-            UpdateRole::Server,
-            "nuntius-server",
-            "x86_64-unknown-linux-gnu",
+    fn rejects_client_release_outside_paired_server() {
+        let config = UpdateConfig::client(
+            "nuntius-client",
+            "aarch64-apple-darwin",
             PathBuf::from("/tmp/nuntius-updater-test"),
             Duration::from_secs(60),
+            "https://nuntius.example.com/",
         );
-        let result = prepare_relayed_update(
-            &config,
-            &"a".repeat(40),
-            // Sequence zero is the legacy-relay compatibility path and deliberately bypasses
-            // monotonic ordering, allowing this test to reach the digest validation even when
-            // CI embeds a large NUNTIUS_BUILD_SEQUENCE in the test binary.
-            0,
-            &"b".repeat(64),
-            b"not the expected archive",
-        )
-        .await;
-        assert!(result.is_err());
+        let release = ClientRelease {
+            release_id: "1-aaaaaaaaaaaa".into(),
+            commit_sha: "a".repeat(40),
+            release_sequence: 1,
+            target: "aarch64-apple-darwin".into(),
+            url: "https://evil.example.com/api/v1/client-releases/1/client.tar.gz".into(),
+            sha256: "b".repeat(64),
+            size: 1024,
+        };
+        assert!(validate_client_release(&config, &release).is_err());
+    }
+
+    #[test]
+    fn accepts_client_release_from_paired_server() {
+        let config = UpdateConfig::client(
+            "nuntius-client",
+            "aarch64-apple-darwin",
+            PathBuf::from("/tmp/nuntius-updater-test"),
+            Duration::from_secs(60),
+            "http://127.0.0.1:8080/",
+        );
+        let release = ClientRelease {
+            release_id: "1784512000000-aaaaaaaaaaaa".into(),
+            commit_sha: "a".repeat(40),
+            release_sequence: 1_784_512_000_000,
+            target: "aarch64-apple-darwin".into(),
+            url: "http://127.0.0.1:8080/api/v1/client-releases/1784512000000-aaaaaaaaaaaa/nuntius-client-macos-arm64.tar.gz".into(),
+            sha256: "b".repeat(64),
+            size: 1024,
+        };
+        assert!(validate_client_release(&config, &release).is_ok());
     }
 }

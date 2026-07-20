@@ -4,6 +4,7 @@ use crate::{
     error::{ApiError, json_message},
     event_hub::PublishedEvent,
     protocol::*,
+    releases,
     store::{SessionRecord, unix_to_rfc3339},
     tunnel,
 };
@@ -35,7 +36,10 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/api/v1/info", get(info))
-        .route("/api/v1/update-notices", post(update_notice))
+        .route(
+            "/api/v1/client-releases/{release_id}/{file_name}",
+            get(client_release_archive),
+        )
         .route("/api/v1/sync", get(sync_snapshot))
         .route("/api/v1/openapi.yaml", get(openapi))
         .route("/api/v1/auth/bootstrap", post(bootstrap))
@@ -181,60 +185,17 @@ async fn info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiErro
             "project-delete.v1".into(),
             "sync-snapshot.v1".into(),
             "approvals.v1".into(),
-            "server-update-relay.ssh.v1".into(),
+            CLIENT_UPDATE_CAPABILITY.into(),
             DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into(),
         ],
     }))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateNoticeRequest {
-    commit_sha: String,
-    release_sequence: u64,
-}
-
-async fn update_notice(
+async fn client_release_archive(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<UpdateNoticeRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let configured = tokio::fs::read_to_string(state.data_dir.join("secrets/update-notice-token"))
-        .await
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ApiError::Unavailable("update notice receiver is not configured".into())
-            } else {
-                ApiError::internal(error)
-            }
-        })?;
-    let supplied = auth::bearer_token(&headers).ok_or(ApiError::Forbidden)?;
-    if auth::hash_secret(configured.trim()) != auth::hash_secret(supplied) {
-        return Err(ApiError::Forbidden);
-    }
-    if request.release_sequence == 0
-        || request.commit_sha.len() != 40
-        || !request
-            .commit_sha
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(ApiError::BadRequest("invalid release notice".into()));
-    }
-    let delivered = state
-        .tunnels
-        .broadcast(TunnelFrame::ServerNotice {
-            code: "update_available".into(),
-            message: format!("{}:{}", request.commit_sha, request.release_sequence),
-        })
-        .await;
-    tracing::info!(
-        commit_sha = %request.commit_sha,
-        release_sequence = request.release_sequence,
-        delivered,
-        "release notice delivered to connected devices"
-    );
-    Ok(Json(json!({"accepted": true, "delivered": delivered})))
+    Path((release_id, file_name)): Path<(String, String)>,
+) -> Response {
+    releases::serve_client_archive(&state.data_dir, &release_id, &file_name).await
 }
 
 async fn openapi() -> Response {

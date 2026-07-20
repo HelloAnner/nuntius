@@ -33,7 +33,7 @@
 | 存储生命周期 | 完成 | WAL、FULL synchronous、外键、busy timeout、migration、单目录锁、一致性 backup、journal retention、checkpoint | 磁盘压力自动降级/分层清理、自动恢复损坏 DB |
 | 安全 | 完成（MVP） | 所有权约束、CSRF、短期 Token、密钥文件权限、目录边界、symlink/隐藏目录拒绝、输入/帧/正文上限、HTTP 显式开关 | HTTP 链路加密、E2EE、密钥托管；HTTP 不能替代 TLS |
 | 可观测性 | 基础完成 | tracing 文本/JSON 日志、healthz/readyz、Client info、设备健康/队列深度 | Prometheus/OpenTelemetry exporter、诊断包 |
-| 发布运维 | 基础完成 | release 二进制、嵌入 dist、数据锁、backup、配置校验 | 安装包签名、自动更新、服务管理器模板、滚动升级编排 |
+| 发布运维 | 自动化完成 | Rust Ops、干净 checkout、latest-wins 队列、双平台构建、SCP 原子部署、Server desired Client 推送、Client 自更新回滚 | 安装包非对称签名、灰度发布、HTTPS 强制 |
 | 测试质量 | 核心自动化完成 | protocol wire tag、SQLite migration、inbox/outbox/history、幂等/sequence/ACK 防回退、多 CSRF、历史 hash/归属、目录隐藏/symlink、审批 CAS | 24 小时 soak、跨 OS CI、浏览器 E2E、网络故障矩阵 |
 | 历史汇总 | 完成 | 启动发现 active/archived、未归类兜底、批次 hash/大小/条数、revision、防跨设备覆盖、连续 cursor 完整性、服务端离线读取 | 全文搜索、历史导出、内容 E2EE |
 | 目录浏览 | 完成 | 实时 query、5 分钟 DB-backed opaque ref、canonicalize、allowed roots、隐藏目录过滤、symlink 拒绝、分页、项目创建时复验 | HMAC action token、可配置 root registry、symlink 白名单 |

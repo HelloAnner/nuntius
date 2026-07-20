@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub const DEVICE_PROTOCOL_VERSION: u16 = 1;
 pub const DEVICE_SUBPROTOCOL: &str = "nuntius.device.v1";
 pub const DEVICE_DISPLAY_NAME_SYNC_CAPABILITY: &str = "device-display-name-sync.v1";
+pub const CLIENT_UPDATE_CAPABILITY: &str = "client-update.v1";
 
 pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::now_v7())
@@ -447,6 +448,18 @@ pub struct DeviceHealth {
     pub providers: Vec<AgentProviderStatus>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientRelease {
+    pub release_id: String,
+    pub commit_sha: String,
+    pub release_sequence: u64,
+    pub target: String,
+    pub url: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(
     tag = "type",
@@ -526,6 +539,9 @@ pub enum TunnelFrame {
     },
     DeviceConfig {
         display_name: String,
+    },
+    ClientUpdate {
+        release: ClientRelease,
     },
     ServerNotice {
         code: String,

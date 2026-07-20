@@ -4,10 +4,12 @@
 
 ## 1. 发布产物
 
-Agent：
+发布集合：
 
 ```text
-nuntius-<version>-<os>-<arch>.archive
+nuntius-server-linux-x86_64.tar.gz
+nuntius-client-macos-arm64.tar.gz
+nuntius-ops-macos-arm64.tar.gz
 checksums.txt
 signature
 release-manifest.json
@@ -32,25 +34,25 @@ Manifest 包含：
 - 发布前运行依赖漏洞和许可证检查。
 - 前端资源 hash 写入 manifest 并嵌入二进制。
 
-## 3. Agent 更新流程
+## 3. Ops 发布与 Client 更新流程
 
-1. 查询 signed manifest。
-2. 选择平台产物。
-3. 下载到专用临时目录。
-4. 校验大小、checksum、签名和版本策略。
-5. 检查 active Turn、inbox/outbox 和 schema migration。
-6. Agent 进入 draining。
-7. 安装新二进制，保留 previous。
-8. 启动新版本并执行 self-check。
-9. self-check 成功后删除旧版本或保留一个窗口。
-10. 失败则回滚并记录诊断。
+1. Ops 通过 GitHub remote ref 检测 `main`，在全新 checkout 中固定目标 commit。
+2. 前端生成后，并行构建 Linux AMD64 Server 与 macOS ARM Client；构建缓存位于 checkout 外。
+3. Ops 对包计算大小和 SHA-256，并生成严格单调的 `releaseSequence`。
+4. Ops 通过 SCP 上传不可变产物，在目标机执行 Server `build-info` 探针。
+5. Ops 备份旧 Server，原子替换并重启 systemd 服务。
+6. `/api/v1/info` 验证通过后，Server 持久加载 `desired-client.json`。
+7. Server 向在线 Client 广播目标版本，并在每次重连时补发。
+8. Client 下载自己的平台产物，校验来源、大小、checksum、目标架构和内嵌构建身份。
+9. Client 原子安装并保留 previous；启动 self-check 失败时回滚。
 
 滚动通道采用 latest-wins desired state，而不是逐 commit FIFO 部署：
 
-- CI 只允许 `main` 当前 HEAD 更新通道指针，过时构建直接跳过发布。
-- Server/Client 资产按 commit 和 CI 发布序号使用不可变文件名；manifest 最后发布。
+- Ops 使用容量为 1 的 latest-wins 队列；构建完成后再次检查 HEAD，过时构建不部署。
+- Server/Client 资产按 commit 和 Ops 发布序号使用不可变目录；desired client 文件最后发布。
 - `releaseSequence` 单调递增，已运行新版更新器的设备拒绝更小或相等序号的不同 commit。
-- Server 必须先达到目标 commit，Client 才能安装同一 commit；中继完成后主动触发 Client 检查，周期轮询作为兜底。
+- Server 必须先通过目标 commit 的健康验证，Client 下载入口才算发布成功。
+- Client 不承担构建、SSH 或 Server 部署职责，也不轮询 GitHub。
 
 下载文件不能直接执行；所有路径必须明确且不使用宽泛临时目录清理。
 
@@ -91,17 +93,14 @@ Trusted network/VPN/SSH tunnel :<configured-http-port>
 - HTTP 非 loopback 且未显式授权时启动失败；启用时日志、`/status` 和页面 capability 均显示 insecure。
 - PWA/Service Worker 等 secure-context 能力只在 HTTPS 或浏览器认可的 localhost 上启用。
 
-## 6. Server 优雅发布
+## 6. Server 发布
 
-1. 设置 draining flag。
-2. `/readyz` 返回非 ready。
-3. HTTP 命令入口停止接受新副作用请求。
-4. SSE 发送维护 notice。
-5. WS(S) 发送 draining control。
-6. 等待短期事务和 outbox flush。
-7. 关闭连接和 DB pool。
-8. 启动新实例。
-9. readiness 通过后接流量。
+1. Ops 将候选二进制上传到按 release ID 隔离的远端目录。
+2. 在目标 Server 主机运行 `build-info`，同时完成 glibc 兼容性探针。
+3. 备份当前二进制和 desired client 文件。
+4. 原子替换 Server，systemd 重启并等待 `/readyz`、`/api/v1/info`。
+5. 下载 Server 暴露的 Client 包并复核 SHA-256。
+6. 任一步失败时恢复上一二进制和 desired client 文件并重启。
 
 设备重连使用 jitter，Server 不要求保持旧连接状态。
 

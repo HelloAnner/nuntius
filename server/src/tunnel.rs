@@ -138,6 +138,35 @@ impl TunnelRegistry {
         delivered
     }
 
+    pub async fn broadcast_client_release(&self, release: ClientRelease) -> usize {
+        let frames: Vec<_> = self
+            .connections
+            .read()
+            .await
+            .values()
+            .map(|connection| {
+                let frame = if connection.capabilities.contains(CLIENT_UPDATE_CAPABILITY) {
+                    TunnelFrame::ClientUpdate {
+                        release: release.clone(),
+                    }
+                } else {
+                    TunnelFrame::ServerNotice {
+                        code: "update_available".into(),
+                        message: format!("{}:{}", release.commit_sha, release.release_sequence),
+                    }
+                };
+                (connection.sender.clone(), frame)
+            })
+            .collect();
+        let mut delivered = 0;
+        for (sender, frame) in frames {
+            if sender.try_send(frame).is_ok() {
+                delivered += 1;
+            }
+        }
+        delivered
+    }
+
     pub async fn sync_display_name(&self, device_id: &str, display_name: &str) -> Result<bool> {
         let (epoch, sender) = {
             let mut connections = self.connections.write().await;
@@ -306,6 +335,9 @@ async fn run_socket(
     if security != expected_security {
         return Err(anyhow!("transport security mismatch"));
     }
+    let supports_client_update = client_capabilities
+        .iter()
+        .any(|capability| capability == CLIENT_UPDATE_CAPABILITY);
 
     let (out_tx, mut out_rx) = mpsc::channel::<TunnelFrame>(256);
     let (supersede_tx, mut superseded) = oneshot::channel();
@@ -351,12 +383,25 @@ async fn run_socket(
                     "directory-browser.v1".into(),
                     "project-delete.v1".into(),
                     DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into(),
+                    CLIENT_UPDATE_CAPABILITY.into(),
                     "image-input.v1".into(),
                     "agent-provider.v1".into(),
                 ],
                 display_name: Some(display_name.clone()),
             })
             .await?;
+        if let Some(release) = state.releases.current().await {
+            out_tx
+                .send(if supports_client_update {
+                    TunnelFrame::ClientUpdate { release }
+                } else {
+                    TunnelFrame::ServerNotice {
+                        code: "update_available".into(),
+                        message: format!("{}:{}", release.commit_sha, release.release_sequence),
+                    }
+                })
+                .await?;
+        }
         let replay_after = if client_queue_epoch.as_deref() == Some(state.store.queue_epoch()) {
             last_sequence
         } else {
@@ -609,6 +654,7 @@ async fn handle_frame(
         | TunnelFrame::Query { .. }
         | TunnelFrame::HeartbeatAck { .. }
         | TunnelFrame::DeviceConfig { .. }
+        | TunnelFrame::ClientUpdate { .. }
         | TunnelFrame::ServerNotice { .. } => return Err(anyhow!("frame not allowed from device")),
     }
     Ok(())

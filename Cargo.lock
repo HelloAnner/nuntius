@@ -1487,6 +1487,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nuntius-ops"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "directories",
+ "fs2",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "nuntius-server"
 version = "0.1.0"
 dependencies = [

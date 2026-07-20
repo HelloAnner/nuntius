@@ -30,11 +30,6 @@ pub struct ClientConfig {
     pub log_format: String,
     pub auto_update: bool,
     pub update_interval_seconds: u64,
-    pub server_update_relay: bool,
-    pub server_update_ssh_command: Vec<String>,
-    pub server_update_ssh_timeout_seconds: u64,
-    pub server_update_remote_binary: Option<PathBuf>,
-    pub server_update_remote_data_dir: Option<PathBuf>,
 }
 
 impl Default for ClientConfig {
@@ -65,11 +60,6 @@ impl Default for ClientConfig {
             log_format: "pretty".into(),
             auto_update: true,
             update_interval_seconds: 60,
-            server_update_relay: false,
-            server_update_ssh_command: vec!["ssh".into()],
-            server_update_ssh_timeout_seconds: 900,
-            server_update_remote_binary: None,
-            server_update_remote_data_dir: None,
         }
     }
 }
@@ -158,42 +148,8 @@ impl ClientConfig {
         {
             bail!("kimi_command and kimi_args must not contain empty or NUL arguments")
         }
-        if (self.auto_update || self.server_update_relay) && self.update_interval_seconds < 60 {
-            bail!("update_interval_seconds must be at least 60")
-        }
-        if self.server_update_relay {
-            let device_id = self
-                .device_id
-                .as_deref()
-                .context("server_update_relay requires a paired device_id")?;
-            if device_id.len() > 128
-                || !device_id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-            {
-                bail!("device_id is not safe to pass to the configured SSH command")
-            }
-            if self.server_update_ssh_command.len() < 2
-                || self
-                    .server_update_ssh_command
-                    .iter()
-                    .any(|argument| argument.is_empty() || argument.contains('\0'))
-            {
-                bail!(
-                    "server_update_ssh_command must contain an SSH executable and destination arguments"
-                )
-            }
-            if !(60..=3600).contains(&self.server_update_ssh_timeout_seconds) {
-                bail!("server_update_ssh_timeout_seconds must be between 60 and 3600")
-            }
-            validate_remote_path(
-                self.server_update_remote_binary.as_deref(),
-                "server_update_remote_binary",
-            )?;
-            validate_remote_path(
-                self.server_update_remote_data_dir.as_deref(),
-                "server_update_remote_data_dir",
-            )?;
+        if self.auto_update && self.update_interval_seconds < 10 {
+            bail!("update_interval_seconds must be at least 10")
         }
         Ok(())
     }
@@ -212,26 +168,6 @@ fn normalized_display_name(value: &str) -> Result<&str> {
         bail!("display_name must contain 1 to 128 bytes")
     }
     Ok(value)
-}
-
-fn validate_remote_path(path: Option<&Path>, name: &str) -> Result<()> {
-    let path =
-        path.with_context(|| format!("{name} is required when server_update_relay is true"))?;
-    let value = path
-        .to_str()
-        .with_context(|| format!("{name} must be valid UTF-8"))?;
-    if !path.is_absolute()
-        || value.len() > 1024
-        || value.bytes().any(|byte| {
-            !(byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-'))
-        })
-        || path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        bail!("{name} must be a shell-safe absolute Unix path")
-    }
-    Ok(())
 }
 
 pub fn initialize(force: bool) -> Result<PathBuf> {
@@ -322,36 +258,6 @@ pub(crate) fn private_file(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn accepts_complete_server_update_relay_configuration() {
-        let config = ClientConfig {
-            device_id: Some("dev_test-client".into()),
-            server_update_relay: true,
-            server_update_ssh_command: vec!["ssh".into(), "moss-dev".into()],
-            server_update_remote_binary: Some(
-                "/var/docker/mysql/nuntius/bin/nuntius-server".into(),
-            ),
-            server_update_remote_data_dir: Some("/var/docker/mysql/nuntius/data".into()),
-            ..ClientConfig::default()
-        };
-
-        config.validate().unwrap();
-    }
-
-    #[test]
-    fn rejects_server_update_relay_shell_metacharacters_in_remote_paths() {
-        let config = ClientConfig {
-            device_id: Some("dev_test-client".into()),
-            server_update_relay: true,
-            server_update_ssh_command: vec!["ssh".into(), "moss-dev".into()],
-            server_update_remote_binary: Some("/srv/nuntius;reboot".into()),
-            server_update_remote_data_dir: Some("/srv/nuntius/data".into()),
-            ..ClientConfig::default()
-        };
-
-        assert!(config.validate().is_err());
-    }
 
     #[test]
     fn validates_device_display_name_for_server_sync() {

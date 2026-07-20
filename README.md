@@ -4,8 +4,9 @@ Nuntius 把多台工作电脑上的本地编码代理（Codex、Kimi）接入同
 
 - `client`：安装在工作电脑上的单二进制后台 Agent，同时提供只监听 loopback 的本地管理页。
 - `server`：部署在公网服务器上的单二进制控制服务，同时提供手机、平板访问的远程控制页。
+- `ops`：独立发布控制器，在指定构建机监听 GitHub、构建两端产物并通过 SSH/SCP 部署。
 
-Rust 后端源码只有 `client/` 和 `server/` 两个项目。两套前端入口分别位于
+Rust 后端源码位于 `client/`、`server/`、`updater/` 和 `ops/`。两套前端入口分别位于
 `client/frontend` 和 `server/frontend`，构建后的 `dist/` 由对应 Rust
 二进制嵌入。当前前端工作区仍存在根目录 `shared/` 依赖；它不参与本轮后端
 实现，本轮也没有修改前端。最终前端拆分应在独立前端任务中完成。
@@ -21,6 +22,9 @@ server/
 ├── api/openapi.yaml
 ├── migrations/
 └── frontend/
+ops/
+├── src/
+└── docker/
 docs/
 Cargo.toml
 ```
@@ -52,16 +56,18 @@ Client 本地管理页目前只保留独立占位目录，后续也只在
 
 ```text
 target/release/nuntius-client
+target/release/nuntius-ops
 target/release/nuntius-server
 ```
 
 ## 自动构建与下载
 
 每次代码推送到 GitHub 后，[Build binaries](https://github.com/HelloAnner/nuntius/actions/workflows/build-binaries.yml)
-会自动生成以下两个压缩包：
+会自动生成以下三个压缩包：
 
 - `nuntius-server-linux-x86_64.tar.gz`：Linux AMD64 Server
 - `nuntius-client-macos-arm64.tar.gz`：macOS Apple Silicon Client
+- `nuntius-ops-macos-arm64.tar.gz`：macOS Apple Silicon 发布控制器
 
 Server 在 CentOS 7 / glibc 2.17 基线上构建，Client 在 macOS ARM64 runner
 上构建。打开最新一次成功的运行即可在任务摘要中下载；按提交保存的 Actions
@@ -78,87 +84,44 @@ run_id="$(gh run list \
 gh run download "$run_id" --repo HelloAnner/nuntius
 ```
 
-推送 `v*` 版本 tag（或从 Actions 页面手动运行）后，云端流水线会执行全部测试和构建，
-并更新
-[continuous](https://github.com/HelloAnner/nuntius/releases/tag/continuous) 滚动通道中的
-Server、Client 和 `manifest.json`。每组二进制都使用 commit 与发布序号命名，
-`manifest.json` 只在两端产物上传完成后指向最新一组；过时流水线不能覆盖新发布。
-两个二进制内置自更新器，默认每 60 秒检查一次；Client 会等待 Server 运行同一
-commit 后再升级，Server 中继完成后也会主动唤醒 Client 更新检查。下载内容通过
-SHA-256 和内嵌构建身份校验，替换失败或新版本未能完成启动时回滚到 `.previous`。
+推送 `v*` 版本 tag（或从 Actions 页面手动运行）时，云端流水线仍会更新 GitHub
+`continuous` 滚动通道，作为旧 Client 的迁移兼容通道。正式自动部署由
+`nuntius-ops` 执行：它以 `git ls-remote` 监听 `main`，每次在全新 checkout 中生成
+前端，然后并行构建 macOS ARM Client 和 CentOS 7 / glibc 2.17 Linux AMD64 Server。
+队列最多保留一个待处理版本；构建期间出现多个提交时只部署最新提交。
 
-可在各自 `config.toml` 中控制：
+Ops 将不可变 Server/Client 包通过 SCP 上传。Server 二进制先在目标机运行
+`build-info`，确认可以执行和 commit/target/sequence 完全一致后再原子替换并由
+systemd 重启；`/api/v1/info` 和 Client 包下载校验失败时自动回滚。Server 启动后
+持久读取 `data/releases/desired-client.json`，向在线 Client 广播，并在每次设备重连
+时补发。因此离线 Client 不会错过版本。Client 只下载自己的包，通过 SHA-256 和
+内嵌构建身份校验后原子替换，启动失败回滚到 `.previous`。
+
+Client 可控制是否接受以及失败后的重试间隔：
 
 ```toml
 auto_update = true
-update_interval_seconds = 60 # Client 默认是 300
+update_interval_seconds = 60
 ```
 
-如果 Server 不能直接访问 GitHub，可以只把一个已配对的 Client 指定为 Server
-更新中继。该 Client 仍按 `update_interval_seconds` 检查滚动通道，在确认 Server
-版本落后后下载并校验 Linux 产物，再通过配置的 SSH 连接投递给 Server：
+## Ops
 
-```toml
-# 仅在负责中继的 Client 上开启；其他 Client 保持 false。
-server_update_relay = true
-server_update_ssh_command = ["ssh", "moss-dev"]
-server_update_ssh_timeout_seconds = 900
-server_update_remote_binary = "/var/docker/mysql/nuntius/bin/nuntius-server"
-server_update_remote_data_dir = "/var/docker/mysql/nuntius/data"
-```
-
-SSH 命令按参数数组直接执行，不经过本地 shell，因此也可以加入 `-p`、`-i`、
-`ProxyJump` 等 OpenSSH 参数。连接必须能免交互执行远端二进制；SSH 登录权限就是
-中继的授权边界。Client 会把归档写入远端 Server 数据目录的更新收件箱，运行中的
-Server 每 5 秒读取一次，并再次校验 SHA-256、目标架构和二进制内嵌的 commit 身份，
-随后自行平滑退出、替换和重启。这个流程不需要服务器上的更新脚本。第一次启用时
-需要人工部署一次包含 `receive-update` 子命令的新 Server，之后即可自动滚动。
-确认中继正常后，可在 Server 的 `config.toml` 中设置 `direct_github_update = false`，
-避免 Server 在无法访问 GitHub 的网络中继续发起无效下载；`auto_update` 仍需保持
-`true`，用于监听并激活 Client 投递的更新。
-
-如需发布完成后立即唤醒中继，在 Server 数据目录创建仅运行账号可读的
-`secrets/update-notice-token`，并在 GitHub Actions 配置同值的
-`NUNTIUS_UPDATE_NOTICE_TOKEN`，以及完整地址
-`NUNTIUS_UPDATE_NOTICE_URL=https://<server>/api/v1/update-notices`。通知只负责唤醒；
-Client 仍从固定 GitHub manifest 下载并执行 commit、发布序号、SHA-256 和目标架构
-校验。通知失败不会阻塞发布，周期轮询会继续收敛。
-
-### Mac mini 本地发布
-
-日常 `main` 推送不再触发 GitHub Actions。Mac mini 可以在隔离目录中获取最新
-`origin/main`，原生构建 macOS ARM64 Client，并在专用 Colima 环境中构建兼容
-CentOS 7 / glibc 2.17 的 Linux x86_64 Server：
+Ops 运行在常在线的 macOS ARM 构建机，需要 Bun、rustup、Docker、Git、SSH 和 SCP。
+初始化默认配置：
 
 ```bash
-# 只构建、测试和校验，不部署
-scripts/local-release.sh --no-deploy
-
-# 构建后部署；存在活跃 Turn 时默认安全延期
-scripts/local-release.sh
-
-# 仅在确认允许中断当前活跃 Turn 后使用
-scripts/local-release.sh --force-deploy
+nuntius-ops init
+$EDITOR ~/.nuntius-ops/config.toml
+nuntius-ops once --force
+nuntius-ops run
+nuntius-ops status
 ```
 
-产物和缓存位于 `~/Library/Application Support/Nuntius Local Release/`。构建脚本不会
-修改开发工作区：它维护独立的 bare mirror，并用 `git archive` 提取远端主分支。
-Server 包经 SHA-256 校验后通过 Client 已配置的 SSH 更新中继投递；Server 健康并
-报告相同 commit 后，Client 才在本机原子替换，健康检查失败会自动恢复上一二进制。
-整个本地部署过程不依赖 GitHub Actions、Artifacts 或 Releases。
-
-安装每五分钟检查一次 `origin/main` 的 LaunchAgent：
-
-```bash
-scripts/install-local-release-agent.sh
-
-# 如需停用自动检查（保留缓存和历史产物）
-scripts/uninstall-local-release-agent.sh
-```
-
-本地发布与 tag 发布都使用毫秒时间序号，确保两条发布路径之间仍保持严格的
-latest-wins 顺序。LaunchAgent 遇到正在进行的 Turn 时只记录并延期，下一个周期
-重新尝试，不会自动强制中断工作。
+默认配置监听 `HelloAnner/nuntius` 的 `main`，使用当前机器原生构建 Client，并在
+`linux/amd64` manylinux2014 Docker builder 中构建 Server；Cargo target 和 registry
+缓存位于 `~/.nuntius-ops/cache`，源码 checkout 每次都是全新的。SSH 必须可以免交互
+连接目标机。`releaseSequence` 由 Ops 以 epoch milliseconds 和持久状态共同生成，
+不会再依赖 GitHub run ID。
 
 远程控制页（`server/frontend`）面向手机、平板和桌面，相关设计系统、
 协议类型、SSE 归并器和消息组件全部收在该项目内部。Client 本地页将按

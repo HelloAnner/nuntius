@@ -7,7 +7,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     time::Duration,
 };
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest, http::header},
@@ -52,12 +52,12 @@ impl PendingWindow {
 
 pub async fn run_forever(
     executor: CommandExecutor,
-    update_trigger: nuntius_updater::UpdateTrigger,
+    desired_release: watch::Sender<Option<nuntius_updater::ClientRelease>>,
 ) {
     let mut backoff = 1_u64;
     loop {
         let attempt_started = tokio::time::Instant::now();
-        match run_connection(executor.clone(), &update_trigger).await {
+        match run_connection(executor.clone(), &desired_release).await {
             Ok(()) => tracing::warn!("device tunnel disconnected"),
             Err(error) => tracing::warn!(error=?error,"device tunnel connection failed"),
         };
@@ -72,7 +72,7 @@ pub async fn run_forever(
 
 async fn run_connection(
     executor: CommandExecutor,
-    update_trigger: &nuntius_updater::UpdateTrigger,
+    desired_release: &watch::Sender<Option<nuntius_updater::ClientRelease>>,
 ) -> Result<()> {
     let token = pairing::access_token(&executor.config).await?;
     let mut url = pairing::endpoint(&executor.config, "api/v1/device-tunnel")?;
@@ -137,6 +137,7 @@ async fn run_connection(
                 "directory-browser.v1".into(),
                 "project-delete.v1".into(),
                 DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into(),
+                CLIENT_UPDATE_CAPABILITY.into(),
                 "image-input.v1".into(),
                 "agent-provider.v1".into(),
             ],
@@ -189,7 +190,7 @@ async fn run_connection(
     loop {
         let watchdog_deadline = last_server_activity + Duration::from_secs(45);
         tokio::select! {
-            incoming=socket.next()=>match incoming{Some(Ok(Message::Text(text)))=>{last_server_activity=tokio::time::Instant::now();let frame: TunnelFrame=serde_json::from_str(&text)?;pending_window.acknowledge(&frame);handle_server_frame(&executor,&out_tx,frame,update_trigger).await?},Some(Ok(Message::Ping(payload)))=>{last_server_activity=tokio::time::Instant::now();socket.send(Message::Pong(payload)).await?;},Some(Ok(Message::Close(_)))|None=>break,Some(Err(error))=>return Err(error.into()),_=>{}},
+            incoming=socket.next()=>match incoming{Some(Ok(Message::Text(text)))=>{last_server_activity=tokio::time::Instant::now();let frame: TunnelFrame=serde_json::from_str(&text)?;pending_window.acknowledge(&frame);handle_server_frame(&executor,&out_tx,frame,desired_release).await?},Some(Ok(Message::Ping(payload)))=>{last_server_activity=tokio::time::Instant::now();socket.send(Message::Pong(payload)).await?;},Some(Ok(Message::Close(_)))|None=>break,Some(Err(error))=>return Err(error.into()),_=>{}},
             Some(frame)=out_rx.recv()=>send(&mut socket,&frame).await?,
             event=events.recv()=>match event{Ok(event)=>{if pending_window.track_event(&event.event_id){send(&mut socket,&TunnelFrame::Event{event}).await?}},Err(broadcast::error::RecvError::Lagged(_))=>send_pending(&executor,&mut socket,&mut pending_window).await?,Err(broadcast::error::RecvError::Closed)=>break},
             ack=command_acks.recv()=>match ack{
@@ -217,7 +218,7 @@ async fn handle_server_frame(
     executor: &CommandExecutor,
     out: &mpsc::Sender<TunnelFrame>,
     frame: TunnelFrame,
-    update_trigger: &nuntius_updater::UpdateTrigger,
+    desired_release: &watch::Sender<Option<nuntius_updater::ClientRelease>>,
 ) -> Result<()> {
     match frame {
         TunnelFrame::Command {
@@ -288,10 +289,21 @@ async fn handle_server_frame(
         TunnelFrame::DeviceConfig { display_name } => {
             executor.apply_device_display_name(&display_name).await?
         }
+        TunnelFrame::ClientUpdate { release } => {
+            tracing::info!(release_id=%release.release_id,commit_sha=%release.commit_sha,release_sequence=release.release_sequence,"desired client release received");
+            desired_release.send_replace(Some(nuntius_updater::ClientRelease {
+                release_id: release.release_id,
+                commit_sha: release.commit_sha,
+                release_sequence: release.release_sequence,
+                target: release.target,
+                url: release.url,
+                sha256: release.sha256,
+                size: release.size,
+            }));
+        }
         TunnelFrame::ServerNotice { code, message } => {
             if code == "update_available" {
-                tracing::info!(%message, "release notification received from server");
-                update_trigger.notify();
+                tracing::info!(%message, "legacy release notification received; waiting for structured client release");
             } else {
                 tracing::warn!(%code,%message,"server notice")
             }

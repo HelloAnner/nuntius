@@ -23,9 +23,6 @@ pub struct ServerConfig {
     pub pairing_code_ttl_minutes: i64,
     pub event_retention_hours: i64,
     pub log_format: String,
-    pub auto_update: bool,
-    pub direct_github_update: bool,
-    pub update_interval_seconds: u64,
 }
 
 impl Default for ServerConfig {
@@ -39,9 +36,6 @@ impl Default for ServerConfig {
             pairing_code_ttl_minutes: 10,
             event_retention_hours: 24,
             log_format: "pretty".into(),
-            auto_update: true,
-            direct_github_update: true,
-            update_interval_seconds: 60,
         }
     }
 }
@@ -81,9 +75,6 @@ impl ServerConfig {
         {
             bail!("token TTL values must be positive");
         }
-        if self.auto_update && self.update_interval_seconds < 60 {
-            bail!("update_interval_seconds must be at least 60");
-        }
         Ok(())
     }
 
@@ -96,7 +87,14 @@ pub fn initialize_data_dir(data_dir: &Path, force: bool) -> Result<InitResult> {
     fs::create_dir_all(data_dir)
         .with_context(|| format!("failed to create {}", data_dir.display()))?;
     set_private_dir_permissions(data_dir)?;
-    for child in ["logs", "run", "backups", "secrets", "attachments"] {
+    for child in [
+        "logs",
+        "run",
+        "backups",
+        "secrets",
+        "attachments",
+        crate::releases::RELEASES_DIR,
+    ] {
         let path = data_dir.join(child);
         fs::create_dir_all(&path)?;
         set_private_dir_permissions(&path)?;
