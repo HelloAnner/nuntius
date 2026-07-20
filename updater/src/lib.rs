@@ -17,6 +17,7 @@ use tokio::{
 };
 
 pub const MAX_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
+pub const MACOS_CLIENT_SIGNING_IDENTIFIER: &str = "com.helloanner.nuntius-client";
 const MAX_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 static STAGE_UPDATE_LOCK: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
 
@@ -290,6 +291,11 @@ async fn stage_update(
         .context("current executable has no parent directory")?;
     let staged_path = directory.join(format!(".{}.update-{}", config.binary_name, commit_sha));
     write_executable(&staged_path, &binary)?;
+    verify_macos_update_identity(&executable_path, &staged_path)
+        .await
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&staged_path);
+        })?;
     probe_binary(
         &staged_path,
         &config.binary_name,
@@ -350,6 +356,67 @@ fn validate_client_release(config: &UpdateConfig, release: &ClientRelease) -> Re
         bail!("client release URL is outside the paired server origin");
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn verify_macos_update_identity(installed: &Path, candidate: &Path) -> Result<()> {
+    let mut inspect = Command::new("/usr/bin/codesign");
+    inspect
+        .args(["--display", "--requirements", "-"])
+        .arg(installed)
+        .stdin(Stdio::null());
+    let output = inspect
+        .output()
+        .await
+        .with_context(|| format!("inspect installed Client signature {}", installed.display()))?;
+    if !output.status.success() {
+        bail!(
+            "cannot inspect installed Client signature: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let requirement = parse_designated_requirement(&output.stdout)?;
+    let expected_identifier = format!("identifier \"{MACOS_CLIENT_SIGNING_IDENTIFIER}\"");
+    if requirement.contains("cdhash") || !requirement.contains(&expected_identifier) {
+        bail!(
+            "installed Client does not have the stable Nuntius signing identity; reinstall the first OPS-signed release before enabling automatic updates"
+        );
+    }
+
+    let mut verify = Command::new("/usr/bin/codesign");
+    verify
+        .args(["--verify", "--strict", "--verbose=2"])
+        .arg(format!("-R={requirement}"))
+        .arg(candidate)
+        .stdin(Stdio::null());
+    let output = verify
+        .output()
+        .await
+        .with_context(|| format!("verify update Client signature {}", candidate.display()))?;
+    if !output.status.success() {
+        bail!(
+            "updated Client does not satisfy the installed signing identity: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn verify_macos_update_identity(_installed: &Path, _candidate: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn parse_designated_requirement(output: &[u8]) -> Result<String> {
+    let text = std::str::from_utf8(output).context("codesign requirement output is not UTF-8")?;
+    text.lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("# designated => ")
+                .map(str::to_owned)
+        })
+        .filter(|requirement| !requirement.is_empty())
+        .context("codesign did not report a designated requirement")
 }
 
 fn validate_commit_sha(value: &str) -> Result<()> {
@@ -712,6 +779,20 @@ mod tests {
         assert!(!release_is_stale(10, 11));
         assert!(release_is_stale(10, 10));
         assert!(release_is_stale(10, 9));
+    }
+
+    #[test]
+    fn extracts_designated_requirement_from_codesign_output() {
+        let output = b"Executable=/tmp/nuntius-client\n# designated => identifier \"com.helloanner.nuntius-client\" and anchor H\"abc\"\n";
+        assert_eq!(
+            parse_designated_requirement(output).unwrap(),
+            "identifier \"com.helloanner.nuntius-client\" and anchor H\"abc\""
+        );
+    }
+
+    #[test]
+    fn rejects_missing_designated_requirement() {
+        assert!(parse_designated_requirement(b"Executable=/tmp/nuntius-client\n").is_err());
     }
 
     #[test]

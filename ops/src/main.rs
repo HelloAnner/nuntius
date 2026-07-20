@@ -20,6 +20,8 @@ const SERVER_ARCHIVE: &str = "nuntius-server-linux-x86_64.tar.gz";
 const DESIRED_CLIENT_FILE: &str = "desired-client.json";
 const MACOS_TARGET: &str = "aarch64-apple-darwin";
 const LINUX_TARGET: &str = "x86_64-unknown-linux-gnu";
+const DEFAULT_MACOS_SIGNING_IDENTITY: &str = "Nuntius Local Release";
+const MACOS_CLIENT_SIGNING_IDENTIFIER: &str = "com.helloanner.nuntius-client";
 const SERVER_BUILDER_DOCKERFILE: &str = include_str!("../docker/server-builder.Dockerfile");
 
 #[derive(Parser)]
@@ -58,6 +60,7 @@ struct OpsConfig {
     retry_seconds: u64,
     rust_toolchain: String,
     linux_builder_image: String,
+    macos_signing_identity: String,
     state_dir: PathBuf,
     public_base_url: String,
     ssh_program: String,
@@ -80,6 +83,7 @@ impl Default for OpsConfig {
             retry_seconds: 60,
             rust_toolchain: "1.94.0".into(),
             linux_builder_image: "nuntius-server-builder:rust-1.94.0".into(),
+            macos_signing_identity: DEFAULT_MACOS_SIGNING_IDENTITY.into(),
             state_dir: default_root().unwrap_or_else(|_| PathBuf::from(".nuntius-ops")),
             public_base_url: "http://47.97.154.221:8765/".into(),
             ssh_program: "ssh".into(),
@@ -112,6 +116,7 @@ impl OpsConfig {
             || self.retry_seconds < 10
             || self.rust_toolchain.trim().is_empty()
             || self.linux_builder_image.trim().is_empty()
+            || !valid_signing_identity(&self.macos_signing_identity)
             || !self.state_dir.is_absolute()
             || self.ssh_program.trim().is_empty()
             || self.scp_program.trim().is_empty()
@@ -328,6 +333,8 @@ async fn reconcile_once(config: OpsConfig, force: bool) -> Result<()> {
 }
 
 async fn ensure_environment(config: &OpsConfig) -> Result<()> {
+    verify_macos_signing_identity(config).await?;
+
     let mut rustup = Command::new("rustup");
     rustup
         .args([
@@ -520,6 +527,11 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
     verify_client_binary(&client_binary, sha, sequence).await?;
     verify_server_binary(config, &server_binary, sha, sequence).await?;
 
+    update_state(config, |state| state.phase = "signing".into())?;
+    sign_client_binary(config, &client_binary).await?;
+    verify_client_signature(&client_binary).await?;
+    verify_client_binary(&client_binary, sha, sequence).await?;
+
     update_state(config, |state| state.phase = "package".into())?;
     let client_archive = package_dir.join(CLIENT_ARCHIVE);
     let server_archive = package_dir.join(SERVER_ARCHIVE);
@@ -559,6 +571,96 @@ async fn verify_client_binary(path: &Path, sha: &str, sequence: u64) -> Result<(
         sequence,
         MACOS_TARGET,
     )
+}
+
+async fn verify_macos_signing_identity(config: &OpsConfig) -> Result<()> {
+    let mut command = Command::new("/usr/bin/security");
+    command.args(["find-identity", "-v", "-p", "codesigning"]);
+    let output = checked(
+        command,
+        "inspect macOS code-signing identities",
+        Duration::from_secs(30),
+    )
+    .await?;
+    let identities = String::from_utf8(output.stdout)
+        .context("macOS code-signing identity list is not UTF-8")?;
+    if !signing_identity_is_available(&identities, &config.macos_signing_identity) {
+        bail!(
+            "macOS code-signing identity {:?} is unavailable; create or import it into the OPS login Keychain before running a release",
+            config.macos_signing_identity
+        );
+    }
+
+    let probe = config
+        .state_dir
+        .join(format!(".signing-probe-{}", std::process::id()));
+    fs::copy("/usr/bin/true", &probe).context("prepare macOS signing preflight")?;
+    let result = async {
+        sign_client_binary(config, &probe).await?;
+        verify_client_signature(&probe).await
+    }
+    .await;
+    let cleanup = fs::remove_file(&probe).context("remove macOS signing preflight binary");
+    result.context(
+        "macOS signing preflight failed; run `nuntius-ops once --force` interactively and allow codesign to use the private key",
+    )?;
+    cleanup?;
+    Ok(())
+}
+
+async fn sign_client_binary(config: &OpsConfig, path: &Path) -> Result<()> {
+    let mut command = Command::new("/usr/bin/codesign");
+    command
+        .args(["--force", "--sign"])
+        .arg(config.macos_signing_identity.trim())
+        .args([
+            "--identifier",
+            MACOS_CLIENT_SIGNING_IDENTIFIER,
+            "--options",
+            "runtime",
+            "--timestamp=none",
+        ])
+        .arg(path)
+        .stdin(Stdio::null());
+    checked(command, "sign macOS Client", Duration::from_secs(60)).await?;
+    Ok(())
+}
+
+async fn verify_client_signature(path: &Path) -> Result<()> {
+    let mut verify = Command::new("/usr/bin/codesign");
+    verify
+        .args(["--verify", "--strict", "--verbose=2"])
+        .arg(path)
+        .stdin(Stdio::null());
+    checked(
+        verify,
+        "verify macOS Client code signature",
+        Duration::from_secs(30),
+    )
+    .await?;
+
+    let mut inspect = Command::new("/usr/bin/codesign");
+    inspect
+        .args(["--display", "--requirements", "-"])
+        .arg(path)
+        .stdin(Stdio::null());
+    let output = checked(
+        inspect,
+        "inspect macOS Client designated requirement",
+        Duration::from_secs(30),
+    )
+    .await?;
+    let requirement = parse_designated_requirement(&output.stdout)?;
+    let expected_identifier = format!("identifier \"{MACOS_CLIENT_SIGNING_IDENTIFIER}\"");
+    if requirement.contains("cdhash") || !requirement.contains(&expected_identifier) {
+        bail!(
+            "macOS Client signature is not stable: expected identifier {}, got {}",
+            MACOS_CLIENT_SIGNING_IDENTIFIER,
+            requirement
+        );
+    }
+    tracing::info!(%requirement, "macOS Client signing identity verified");
+    Ok(())
 }
 
 async fn verify_server_binary(
@@ -1065,6 +1167,38 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(digest.finalize()))
 }
 
+fn valid_signing_identity(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value != "-"
+        && value.len() <= 256
+        && !value.chars().any(char::is_control)
+        && !value.contains('"')
+}
+
+fn signing_identity_is_available(output: &str, expected: &str) -> bool {
+    let expected = expected.trim();
+    if expected.len() == 40 && expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return output
+            .split_whitespace()
+            .any(|token| token.eq_ignore_ascii_case(expected));
+    }
+    let quoted = format!("\"{expected}\"");
+    output.lines().any(|line| line.contains(&quoted))
+}
+
+fn parse_designated_requirement(output: &[u8]) -> Result<String> {
+    let text = std::str::from_utf8(output).context("codesign requirement output is not UTF-8")?;
+    text.lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("# designated => ")
+                .map(str::to_owned)
+        })
+        .filter(|requirement| !requirement.is_empty())
+        .context("codesign did not report a designated requirement")
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("output path has no parent")?;
     fs::create_dir_all(parent)?;
@@ -1151,5 +1285,38 @@ mod tests {
         update_state(&config, |state| state.last_sequence = 2_000_000_000_000).unwrap();
         let sequence = allocate_sequence(&config, Some(2_000_000_000_100)).unwrap();
         assert_eq!(sequence, 2_000_000_000_101);
+    }
+
+    #[test]
+    fn code_signing_identity_must_not_be_ad_hoc() {
+        assert!(valid_signing_identity("Nuntius Local Release"));
+        assert!(valid_signing_identity(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(!valid_signing_identity("-"));
+        assert!(!valid_signing_identity(""));
+    }
+
+    #[test]
+    fn finds_named_or_fingerprinted_signing_identity() {
+        let identities = "  1) 0123456789ABCDEF0123456789ABCDEF01234567 \"Nuntius Local Release\"\n     1 valid identities found\n";
+        assert!(signing_identity_is_available(
+            identities,
+            "Nuntius Local Release"
+        ));
+        assert!(signing_identity_is_available(
+            identities,
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(!signing_identity_is_available(identities, "Other Identity"));
+    }
+
+    #[test]
+    fn parses_stable_designated_requirement() {
+        let output = b"Executable=/tmp/nuntius-client\n# designated => identifier \"com.helloanner.nuntius-client\" and anchor H\"abc\"\n";
+        assert_eq!(
+            parse_designated_requirement(output).unwrap(),
+            "identifier \"com.helloanner.nuntius-client\" and anchor H\"abc\""
+        );
     }
 }

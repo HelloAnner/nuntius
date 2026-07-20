@@ -6,4 +6,6 @@ node_modules/
 **/run/*.pid
 **/logs/*.log
 .DS_Store
-
+*.key
+*.p12
+*.pfx
