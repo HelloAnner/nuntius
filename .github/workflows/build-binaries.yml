@@ -337,16 +337,19 @@ jobs:
           retry_github() {
             local attempt=1
             until "$@"; do
-              if [ "$attempt" -eq 8 ]; then
+              if [ "$attempt" -eq 20 ]; then
                 return 1
               fi
-              echo "::warning::GitHub release operation failed (attempt $attempt/8); retrying in 10s"
+              echo "::warning::GitHub release operation failed (attempt $attempt/20); retrying in 15s"
               attempt=$((attempt + 1))
-              sleep 10
+              sleep 15
             done
           }
           retry_github gh release upload continuous \
             release/nuntius-server-linux-x86_64-*.tar.gz \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+          retry_github gh release upload continuous \
             release/nuntius-client-macos-arm64-*.tar.gz \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
