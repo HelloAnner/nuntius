@@ -39,13 +39,13 @@ export function fullTime(iso: string | null | undefined): string {
   return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}`;
 }
 
-/** Newest activity first, with a deterministic fallback for missing/equal timestamps. */
-export function compareThreadActivity(
-  left: { id: string; lastActivityAt?: string | null },
-  right: { id: string; lastActivityAt?: string | null },
+/** Newest-created thread first, with a deterministic fallback for missing/equal timestamps. */
+export function compareThreadCreation(
+  left: { id: string; createdAt?: string | null },
+  right: { id: string; createdAt?: string | null },
 ): number {
-  const leftAt = Date.parse(left.lastActivityAt ?? "");
-  const rightAt = Date.parse(right.lastActivityAt ?? "");
+  const leftAt = Date.parse(left.createdAt ?? "");
+  const rightAt = Date.parse(right.createdAt ?? "");
   const leftValid = Number.isFinite(leftAt);
   const rightValid = Number.isFinite(rightAt);
 

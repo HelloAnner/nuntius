@@ -387,9 +387,9 @@ impl ClientStore {
         offset: i64,
     ) -> Result<Vec<ThreadSummary>> {
         let rows = if let Some(project) = project_id {
-            sqlx::query("SELECT * FROM threads WHERE project_id=? AND archived=0 ORDER BY julianday(COALESCE(last_activity_at,created_at)) DESC,id DESC LIMIT ? OFFSET ?").bind(project).bind(limit).bind(offset).fetch_all(&self.pool).await?
+            sqlx::query("SELECT * FROM threads WHERE project_id=? AND archived=0 ORDER BY julianday(created_at) DESC,id DESC LIMIT ? OFFSET ?").bind(project).bind(limit).bind(offset).fetch_all(&self.pool).await?
         } else {
-            sqlx::query("SELECT * FROM threads WHERE archived=0 ORDER BY julianday(COALESCE(last_activity_at,created_at)) DESC,id DESC LIMIT ? OFFSET ?").bind(limit).bind(offset).fetch_all(&self.pool).await?
+            sqlx::query("SELECT * FROM threads WHERE archived=0 ORDER BY julianday(created_at) DESC,id DESC LIMIT ? OFFSET ?").bind(limit).bind(offset).fetch_all(&self.pool).await?
         };
         Ok(rows
             .into_iter()
@@ -903,20 +903,24 @@ impl ClientStore {
         }
         let id = new_id("thr");
         let title = imported_thread_title(thread);
-        let stamp = unix_value_to_rfc3339(thread.get("updatedAt")).unwrap_or_else(now);
+        let updated_at = unix_value_to_rfc3339(thread.get("updatedAt")).unwrap_or_else(now);
+        let created_at =
+            unix_value_to_rfc3339(thread.get("createdAt")).unwrap_or_else(|| updated_at.clone());
         let status = value_status(thread.get("status"), "idle");
         sqlx::query("INSERT INTO threads(id,project_id,provider,app_server_thread_id,title,status,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
-            .bind(&id).bind(project_id).bind(provider.as_str()).bind(app_id).bind(title).bind(status).bind(&stamp).bind(&stamp).bind(&stamp)
+            .bind(&id).bind(project_id).bind(provider.as_str()).bind(app_id).bind(title).bind(status).bind(&updated_at).bind(&created_at).bind(&updated_at)
             .execute(&self.pool).await?;
         Ok(id)
     }
     async fn update_imported_thread(&self, id: &str, thread: &Value) -> Result<()> {
         let title = imported_thread_title(thread);
         let stamp = unix_value_to_rfc3339(thread.get("updatedAt")).unwrap_or_else(now);
+        let created_at = unix_value_to_rfc3339(thread.get("createdAt"));
         let status = value_status(thread.get("status"), "idle");
-        sqlx::query("UPDATE threads SET title=?,status=?,last_activity_at=CASE WHEN last_activity_at IS NULL OR julianday(?)>julianday(last_activity_at) THEN ? ELSE last_activity_at END,updated_at=CASE WHEN julianday(?)>julianday(updated_at) THEN ? ELSE updated_at END WHERE id=?")
+        sqlx::query("UPDATE threads SET title=?,status=?,created_at=COALESCE(?,created_at),last_activity_at=CASE WHEN last_activity_at IS NULL OR julianday(?)>julianday(last_activity_at) THEN ? ELSE last_activity_at END,updated_at=CASE WHEN julianday(?)>julianday(updated_at) THEN ? ELSE updated_at END WHERE id=?")
         .bind(title)
         .bind(status)
+        .bind(created_at)
         .bind(&stamp)
         .bind(&stamp)
         .bind(&stamp)
@@ -1634,6 +1638,7 @@ fn thread_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ThreadSummary
         status: r.get("status"),
         archived: r.get("archived"),
         history_completeness: HistoryCompleteness::Complete,
+        created_at: Some(r.get("created_at")),
         last_synced_at: None,
         last_activity_at: Some(recent_activity_at),
     }
@@ -1799,7 +1804,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn threads_are_sorted_by_the_newest_update_or_conversation() {
+    async fn threads_are_sorted_by_creation_time() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -1821,19 +1826,19 @@ mod tests {
         }
 
         sqlx::query(
-            "UPDATE threads SET last_activity_at='2026-07-19T08:00:00Z',updated_at='2026-07-19T08:00:00Z' WHERE id='thr_created'",
+            "UPDATE threads SET created_at='2026-07-19T12:00:00Z',last_activity_at='2026-07-19T08:00:00Z',updated_at='2026-07-19T08:00:00Z' WHERE id='thr_created'",
         )
         .execute(&store.pool)
         .await
         .unwrap();
         sqlx::query(
-            "UPDATE threads SET last_activity_at='2026-07-19T08:00:00Z',updated_at='2026-07-19T10:00:00Z' WHERE id='thr_updated'",
+            "UPDATE threads SET created_at='2026-07-19T10:00:00Z',last_activity_at='2026-07-19T08:00:00Z',updated_at='2026-07-19T13:00:00Z' WHERE id='thr_updated'",
         )
         .execute(&store.pool)
         .await
         .unwrap();
         sqlx::query(
-            "UPDATE threads SET last_activity_at='2026-07-19T11:00:00Z',updated_at='2026-07-19T09:00:00Z' WHERE id='thr_conversation'",
+            "UPDATE threads SET created_at='2026-07-19T09:00:00Z',last_activity_at='2026-07-19T14:00:00Z',updated_at='2026-07-19T14:00:00Z' WHERE id='thr_conversation'",
         )
         .execute(&store.pool)
         .await
@@ -1845,14 +1850,14 @@ mod tests {
                 .iter()
                 .map(|thread| thread.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["thr_conversation", "thr_updated", "thr_created"]
+            vec!["thr_created", "thr_updated", "thr_conversation"]
         );
         assert_eq!(
-            threads[0].last_activity_at.as_deref(),
-            Some("2026-07-19T11:00:00Z")
+            threads[0].created_at.as_deref(),
+            Some("2026-07-19T12:00:00Z")
         );
         assert_eq!(
-            threads[1].last_activity_at.as_deref(),
+            threads[1].created_at.as_deref(),
             Some("2026-07-19T10:00:00Z")
         );
     }

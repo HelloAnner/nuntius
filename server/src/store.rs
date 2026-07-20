@@ -625,11 +625,11 @@ impl ServerStore {
         offset: i64,
     ) -> Result<Vec<ThreadSummary>> {
         let rows = match (device_id, project_id) {
-            (_, Some(project)) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND project_id=? AND archived=0 ORDER BY julianday(last_activity_at) DESC,id DESC LIMIT ? OFFSET ?")
+            (_, Some(project)) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND project_id=? AND archived=0 ORDER BY julianday(COALESCE(created_at,last_activity_at)) DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(user_id).bind(project).bind(limit).bind(offset).fetch_all(&self.pool).await?,
-            (Some(device), None) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND device_id=? AND archived=0 ORDER BY julianday(last_activity_at) DESC,id DESC LIMIT ? OFFSET ?")
+            (Some(device), None) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND device_id=? AND archived=0 ORDER BY julianday(COALESCE(created_at,last_activity_at)) DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(user_id).bind(device).bind(limit).bind(offset).fetch_all(&self.pool).await?,
-            (None, None) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND archived=0 ORDER BY julianday(last_activity_at) DESC,id DESC LIMIT ? OFFSET ?")
+            (None, None) => sqlx::query("SELECT * FROM threads WHERE user_id=? AND archived=0 ORDER BY julianday(COALESCE(created_at,last_activity_at)) DESC,id DESC LIMIT ? OFFSET ?")
                 .bind(user_id).bind(limit).bind(offset).fetch_all(&self.pool).await?,
         };
         Ok(rows.into_iter().map(thread_from_row).collect())
@@ -647,7 +647,7 @@ impl ServerStore {
         if project_exists.is_none() {
             bail!("created thread references an unavailable project")
         }
-        sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,status,archived,history_completeness,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,last_activity_at=COALESCE(excluded.last_activity_at,threads.last_activity_at) WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id")
+        sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,status,archived,history_completeness,created_at,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,created_at=COALESCE(excluded.created_at,threads.created_at),last_activity_at=COALESCE(excluded.last_activity_at,threads.last_activity_at) WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id")
             .bind(&thread.id)
             .bind(user_id)
             .bind(&thread.device_id)
@@ -658,6 +658,7 @@ impl ServerStore {
             .bind(&thread.status)
             .bind(thread.archived)
             .bind("backfilling")
+            .bind(&thread.created_at)
             .bind(&thread.last_synced_at)
             .bind(&thread.last_activity_at)
             .execute(&self.pool)
@@ -1328,9 +1329,9 @@ impl ServerStore {
                     &fallback_project
                 };
                 if !stale {
-                    sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,status,archived,history_completeness,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,'backfilling',?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,last_synced_at=excluded.last_synced_at,last_activity_at=excluded.last_activity_at,history_revision=excluded.history_revision WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id AND excluded.history_revision>=threads.history_revision")
+                    sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,status,archived,history_completeness,created_at,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,'backfilling',?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,created_at=COALESCE(excluded.created_at,threads.created_at),last_synced_at=excluded.last_synced_at,last_activity_at=excluded.last_activity_at,history_revision=excluded.history_revision WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id AND excluded.history_revision>=threads.history_revision")
                     .bind(&thread.id).bind(user_id).bind(&batch.device_id).bind(project_id).bind(thread.provider.as_str()).bind(&thread.app_server_thread_id).bind(&thread.title).bind(&thread.status).bind(thread.archived)
-                    .bind(&thread.last_synced_at).bind(&thread.last_activity_at).bind(batch.inventory_revision).execute(&mut *tx).await?;
+                    .bind(&thread.created_at).bind(&thread.last_synced_at).bind(&thread.last_activity_at).bind(batch.inventory_revision).execute(&mut *tx).await?;
                 }
             }
         }
@@ -1612,6 +1613,7 @@ fn thread_from_row(r: sqlx::sqlite::SqliteRow) -> ThreadSummary {
         status: r.get("status"),
         archived: r.get::<i64, _>("archived") != 0,
         history_completeness: parse_completeness(&r.get::<String, _>("history_completeness")),
+        created_at: r.get("created_at"),
         last_synced_at: r.get("last_synced_at"),
         last_activity_at: r.get("last_activity_at"),
     }
@@ -1869,6 +1871,7 @@ mod tests {
                     status: "idle".into(),
                     archived: false,
                     history_completeness: HistoryCompleteness::Complete,
+                    created_at: Some(now()),
                     last_synced_at: Some(now()),
                     last_activity_at: Some(now()),
                 },
@@ -2084,6 +2087,7 @@ mod tests {
                     status: "idle".into(),
                     archived: false,
                     history_completeness: HistoryCompleteness::Complete,
+                    created_at: Some(now()),
                     last_synced_at: Some(now()),
                     last_activity_at: Some(now()),
                 }),
@@ -2252,6 +2256,7 @@ mod tests {
                     status: "idle".into(),
                     archived: false,
                     history_completeness: HistoryCompleteness::Complete,
+                    created_at: Some(now()),
                     last_synced_at: Some(now()),
                     last_activity_at: Some(now()),
                 }),

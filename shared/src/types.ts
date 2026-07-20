@@ -123,6 +123,7 @@ export interface ThreadSummary {
   status: string;
   archived: boolean;
   historyCompleteness: HistoryCompleteness;
+  createdAt: string | null;
   lastSyncedAt: string | null;
   lastActivityAt: string | null;
 }

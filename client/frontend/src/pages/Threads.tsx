@@ -1,4 +1,4 @@
-/* All local threads, newest activity first. */
+/* All local threads, newest creation first. */
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -7,7 +7,7 @@ import {
   IconClock,
   Spinner,
   SwipeActionRow,
-  compareThreadActivity,
+  compareThreadCreation,
 } from "@nuntius/shared";
 import { api } from "../api";
 import { useArchiveThreadAction } from "../hooks";
@@ -20,7 +20,7 @@ export function ThreadsPage() {
 
   const projectName = (id: string) => projects.data?.find((p) => p.id === id)?.displayName ?? "";
   const list = useMemo(
-    () => [...(threads.data ?? [])].sort(compareThreadActivity),
+    () => [...(threads.data ?? [])].sort(compareThreadCreation),
     [threads.data],
   );
 

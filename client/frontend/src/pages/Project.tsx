@@ -11,7 +11,7 @@ import {
   Sheet,
   Spinner,
   SwipeActionRow,
-  compareThreadActivity,
+  compareThreadCreation,
   agentThreadOptions,
   defaultAgentSelection,
   newIdemKey,
@@ -64,7 +64,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
   const selectedProviderAvailable =
     selectedProviderStatus?.available ?? provider === "codex";
   const canCreate = Boolean(!unassigned && providerStatuses.some((status) => status.available));
-  const sorted = [...(threads.data ?? [])].sort(compareThreadActivity);
+  const sorted = [...(threads.data ?? [])].sort(compareThreadCreation);
 
   useEffect(() => {
     if (!creating) return;

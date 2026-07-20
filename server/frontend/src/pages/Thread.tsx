@@ -10,7 +10,7 @@ import {
   Spinner,
   SwipeActionRow,
   ThreadView,
-  compareThreadActivity,
+  compareThreadCreation,
   newIdemKey,
   providerLabel,
   statusLabel,
@@ -396,7 +396,7 @@ export function ThreadPage({
   ];
   const sortedThreads = [
     ...(fromRecents ? (allThreads.data ?? []) : (projectThreads.data ?? [])),
-  ].sort(compareThreadActivity);
+  ].sort(compareThreadCreation);
   const sidebarThreads =
     fromRecents && recentFilter !== "all"
       ? sortedThreads.filter((item) => item.deviceId === recentFilter)

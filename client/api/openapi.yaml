@@ -205,7 +205,7 @@ components:
         lastActivityAt: {type: [string, 'null'], format: date-time}
     Thread:
       type: object
-      required: [id, deviceId, projectId, provider, title, status, archived, historyCompleteness]
+      required: [id, deviceId, projectId, provider, title, status, archived, historyCompleteness, createdAt]
       properties:
         id: {type: string}
         deviceId: {type: string}
@@ -216,6 +216,7 @@ components:
         status: {type: string}
         archived: {type: boolean}
         historyCompleteness: {enum: [not_started, backfilling, complete, partial, error]}
+        createdAt: {type: [string, 'null'], format: date-time}
         lastSyncedAt: {type: [string, 'null'], format: date-time}
         lastActivityAt: {type: [string, 'null'], format: date-time}
     CreateProject:

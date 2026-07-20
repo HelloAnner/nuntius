@@ -5,7 +5,7 @@ import {
   IconArchive,
   SwipeActionRow,
   ThreadView,
-  compareThreadActivity,
+  compareThreadCreation,
   newIdemKey,
   providerLabel,
   useConfirmAction,
@@ -272,7 +272,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     );
   }
 
-  const sortedThreads = [...(projectThreads.data ?? [])].sort(compareThreadActivity);
+  const sortedThreads = [...(projectThreads.data ?? [])].sort(compareThreadCreation);
 
   return (
     <div className="page">

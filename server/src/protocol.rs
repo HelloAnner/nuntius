@@ -277,6 +277,8 @@ pub struct ThreadSummary {
     pub status: String,
     pub archived: bool,
     pub history_completeness: HistoryCompleteness,
+    #[serde(default)]
+    pub created_at: Option<String>,
     pub last_synced_at: Option<String>,
     pub last_activity_at: Option<String>,
 }
