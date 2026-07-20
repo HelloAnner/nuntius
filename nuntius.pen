@@ -4666,320 +4666,191 @@
               ]
             },
             {
-              "id": "aBqNn",
+              "id": "NdCjk",
               "type": "ref",
-              "ref": "gY0Zk",
-              "name": "BtnNewThread",
+              "ref": "q33vOU",
+              "name": "QuickNew",
+              "width": "fill_container"
+            },
+            {
+              "type": "frame",
+              "id": "eqrEx",
+              "name": "Sec 进行中",
               "width": "fill_container",
-              "justifyContent": "center",
+              "padding": [
+                10,
+                4,
+                2,
+                4
+              ],
+              "children": [
+                {
+                  "type": "text",
+                  "id": "eOhK2",
+                  "name": "Label",
+                  "fill": "$ink3",
+                  "content": "进行中",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 11,
+                  "fontWeight": "600"
+                }
+              ]
+            },
+            {
+              "id": "lIXt7",
+              "type": "ref",
+              "ref": "z4mFp",
+              "name": "Thread / 重构设备隧道重连逻辑",
+              "width": "fill_container",
+              "fill": "$surface2",
               "descendants": {
-                "Nqxso": {
-                  "icon": "plus"
+                "pCkpS": {
+                  "fill": "#2E5BFF1A"
                 },
-                "WOfeh": {
-                  "content": "新建会话"
+                "MUsuq": {
+                  "fill": "#2E5BFF40"
+                },
+                "Ar6tD": {
+                  "fill": "$primary"
+                },
+                "xsWUf": {
+                  "content": "重构设备隧道重连逻辑",
+                  "fontWeight": "600"
+                },
+                "uphos": {
+                  "content": "执行中 · Kimi · 2 分钟前",
+                  "fill": "$primary"
+                }
+              }
+            },
+            {
+              "id": "TtKMg",
+              "type": "ref",
+              "ref": "z4mFp",
+              "name": "Thread / 升级依赖并修复构建告警",
+              "width": "fill_container",
+              "fill": "#00000000",
+              "descendants": {
+                "pCkpS": {
+                  "fill": "#B96A001A"
+                },
+                "MUsuq": {
+                  "fill": "#B96A0040"
+                },
+                "Ar6tD": {
+                  "fill": "$warning"
+                },
+                "xsWUf": {
+                  "content": "升级依赖并修复构建告警",
+                  "fontWeight": "500"
+                },
+                "uphos": {
+                  "content": "待审批 · Codex · 5 分钟前",
+                  "fill": "$warning"
                 }
               }
             },
             {
               "type": "frame",
-              "id": "IYlyd",
-              "name": "Threads",
+              "id": "N7djvE",
+              "name": "Sec 最近",
               "width": "fill_container",
-              "layout": "vertical",
-              "gap": 2,
+              "padding": [
+                10,
+                4,
+                2,
+                4
+              ],
               "children": [
                 {
-                  "type": "frame",
-                  "id": "V0h6E",
-                  "name": "Thread / 重构设备隧道重连逻辑",
-                  "width": "fill_container",
-                  "fill": "$surface2",
-                  "cornerRadius": "$r-m",
-                  "gap": 10,
-                  "padding": [
-                    10,
-                    12
-                  ],
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "ellipse",
-                      "id": "r2tChm",
-                      "name": "Dot",
-                      "fill": "$primary",
-                      "width": 8,
-                      "height": 8
-                    },
-                    {
-                      "type": "frame",
-                      "id": "x4gIez",
-                      "name": "Col",
-                      "width": "fill_container",
-                      "layout": "vertical",
-                      "gap": 2,
-                      "children": [
-                        {
-                          "type": "text",
-                          "id": "q9dui",
-                          "name": "Title",
-                          "fill": "$ink",
-                          "textGrowth": "fixed-width",
-                          "width": "fill_container",
-                          "content": "重构设备隧道重连逻辑",
-                          "fontFamily": "$font-sans",
-                          "fontSize": 13.5,
-                          "fontWeight": "600"
-                        },
-                        {
-                          "type": "text",
-                          "id": "G4SEmq",
-                          "name": "Meta",
-                          "fill": "$primary",
-                          "textGrowth": "fixed-width",
-                          "width": "fill_container",
-                          "content": "2 分钟前 · 执行中",
-                          "fontFamily": "$font-sans",
-                          "fontSize": 11.5,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "Uximr",
-                  "name": "Thread / 升级依赖并修复构建告警",
-                  "width": "fill_container",
-                  "fill": "#00000000",
-                  "cornerRadius": "$r-m",
-                  "gap": 10,
-                  "padding": [
-                    10,
-                    12
-                  ],
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "ellipse",
-                      "id": "mHNOO",
-                      "name": "Dot",
-                      "fill": "$danger",
-                      "width": 8,
-                      "height": 8
-                    },
-                    {
-                      "type": "frame",
-                      "id": "rtU5q",
-                      "name": "Col",
-                      "width": "fill_container",
-                      "layout": "vertical",
-                      "gap": 2,
-                      "children": [
-                        {
-                          "type": "text",
-                          "id": "ItYVP",
-                          "name": "Title",
-                          "fill": "$ink",
-                          "textGrowth": "fixed-width",
-                          "width": "fill_container",
-                          "content": "升级依赖并修复构建告警",
-                          "fontFamily": "$font-sans",
-                          "fontSize": 13.5,
-                          "fontWeight": "500"
-                        },
-                        {
-                          "type": "text",
-                          "id": "hLNlJ",
-                          "name": "Meta",
-                          "fill": "$danger",
-                          "textGrowth": "fixed-width",
-                          "width": "fill_container",
-                          "content": "5 分钟前 · 待审批",
-                          "fontFamily": "$font-sans",
-                          "fontSize": 11.5,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "UpHlX",
-                  "name": "Thread / 修复 SQLite WAL checkpoint 告警",
-                  "width": "fill_container",
-                  "fill": "#00000000",
-                  "cornerRadius": "$r-m",
-                  "gap": 10,
-                  "padding": [
-                    10,
-                    12
-                  ],
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "ellipse",
-                      "id": "nbsHi",
-                      "name": "Dot",
-                      "fill": "$ink3",
-                      "width": 8,
-                      "height": 8
-                    },
-                    {
-                      "type": "frame",
-                      "id": "csy2Q",
-                      "name": "Col",
-                      "width": "fill_container",
-                      "layout": "vertical",
-                      "gap": 2,
-                      "children": [
-                        {
-                          "type": "text",
-                          "id": "o10SD5",
-                          "name": "Title",
-                          "fill": "$ink",
-                          "textGrowth": "fixed-width",
-                          "width": "fill_container",
-                          "content": "修复 SQLite WAL checkpoint 告警",
-                          "fontFamily": "$font-sans",
-                          "fontSize": 13.5,
-                          "fontWeight": "500"
-                        },
-                        {
-                          "type": "text",
-                          "id": "rKyiE",
-                          "name": "Meta",
-                          "fill": "$ink3",
-                          "textGrowth": "fixed-width",
-                          "width": "fill_container",
-                          "content": "1 小时前",
-                          "fontFamily": "$font-sans",
-                          "fontSize": 11.5,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "hRva5",
-                  "name": "Thread / 历史回填断点续传",
-                  "width": "fill_container",
-                  "fill": "#00000000",
-                  "cornerRadius": "$r-m",
-                  "gap": 10,
-                  "padding": [
-                    10,
-                    12
-                  ],
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "ellipse",
-                      "id": "mPp8L",
-                      "name": "Dot",
-                      "fill": "$ink3",
-                      "width": 8,
-                      "height": 8
-                    },
-                    {
-                      "type": "frame",
-                      "id": "nHA3u",
-                      "name": "Col",
-                      "width": "fill_container",
-                      "layout": "vertical",
-                      "gap": 2,
-                      "children": [
-                        {
-                          "type": "text",
-                          "id": "mGEfG",
-                          "name": "Title",
-                          "fill": "$ink",
-                          "textGrowth": "fixed-width",
-                          "width": "fill_container",
-                          "content": "历史回填断点续传",
-                          "fontFamily": "$font-sans",
-                          "fontSize": 13.5,
-                          "fontWeight": "500"
-                        },
-                        {
-                          "type": "text",
-                          "id": "CDvVL",
-                          "name": "Meta",
-                          "fill": "$ink3",
-                          "textGrowth": "fixed-width",
-                          "width": "fill_container",
-                          "content": "昨天",
-                          "fontFamily": "$font-sans",
-                          "fontSize": 11.5,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    }
-                  ]
-                },
-                {
-                  "type": "frame",
-                  "id": "CZv4a",
-                  "name": "Thread / SSE 事件去重与缺口重放",
-                  "width": "fill_container",
-                  "fill": "#00000000",
-                  "cornerRadius": "$r-m",
-                  "gap": 10,
-                  "padding": [
-                    10,
-                    12
-                  ],
-                  "alignItems": "center",
-                  "children": [
-                    {
-                      "type": "ellipse",
-                      "id": "Om6e2",
-                      "name": "Dot",
-                      "fill": "$ink3",
-                      "width": 8,
-                      "height": 8
-                    },
-                    {
-                      "type": "frame",
-                      "id": "vsqDA",
-                      "name": "Col",
-                      "width": "fill_container",
-                      "layout": "vertical",
-                      "gap": 2,
-                      "children": [
-                        {
-                          "type": "text",
-                          "id": "aDNpG",
-                          "name": "Title",
-                          "fill": "$ink",
-                          "textGrowth": "fixed-width",
-                          "width": "fill_container",
-                          "content": "SSE 事件去重与缺口重放",
-                          "fontFamily": "$font-sans",
-                          "fontSize": 13.5,
-                          "fontWeight": "500"
-                        },
-                        {
-                          "type": "text",
-                          "id": "HJ5mR",
-                          "name": "Meta",
-                          "fill": "$ink3",
-                          "textGrowth": "fixed-width",
-                          "width": "fill_container",
-                          "content": "3 天前",
-                          "fontFamily": "$font-sans",
-                          "fontSize": 11.5,
-                          "fontWeight": "normal"
-                        }
-                      ]
-                    }
-                  ]
+                  "type": "text",
+                  "id": "WKc04",
+                  "name": "Label",
+                  "fill": "$ink3",
+                  "content": "最近",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 11,
+                  "fontWeight": "600"
                 }
               ]
+            },
+            {
+              "id": "vAPPV",
+              "type": "ref",
+              "ref": "z4mFp",
+              "name": "Thread / 修复 SQLite WAL checkpoint 告警",
+              "width": "fill_container",
+              "fill": "#00000000",
+              "descendants": {
+                "pCkpS": {
+                  "enabled": false
+                },
+                "MUsuq": {
+                  "enabled": false
+                },
+                "Ar6tD": {
+                  "fill": "$success"
+                },
+                "xsWUf": {
+                  "content": "修复 SQLite WAL checkpoint 告警"
+                },
+                "uphos": {
+                  "content": "已完成 · Kimi · 1 小时前",
+                  "fill": "$ink3"
+                }
+              }
+            },
+            {
+              "id": "e6jQlS",
+              "type": "ref",
+              "ref": "z4mFp",
+              "name": "Thread / 历史回填断点续传",
+              "width": "fill_container",
+              "fill": "#00000000",
+              "descendants": {
+                "pCkpS": {
+                  "enabled": false
+                },
+                "MUsuq": {
+                  "enabled": false
+                },
+                "Ar6tD": {
+                  "fill": "$ink3"
+                },
+                "xsWUf": {
+                  "content": "历史回填断点续传"
+                },
+                "uphos": {
+                  "content": "空闲 · Kimi · 昨天",
+                  "fill": "$ink3"
+                }
+              }
+            },
+            {
+              "id": "A8zeu",
+              "type": "ref",
+              "ref": "z4mFp",
+              "name": "Thread / SSE 事件去重与缺口重放",
+              "width": "fill_container",
+              "fill": "#00000000",
+              "descendants": {
+                "pCkpS": {
+                  "enabled": false
+                },
+                "MUsuq": {
+                  "enabled": false
+                },
+                "Ar6tD": {
+                  "fill": "$danger"
+                },
+                "xsWUf": {
+                  "content": "SSE 事件去重与缺口重放"
+                },
+                "uphos": {
+                  "content": "异常 · Codex · 3 天前",
+                  "fill": "$danger"
+                }
+              }
             }
           ]
         },
@@ -7972,6 +7843,467 @@
                   "fontWeight": "normal"
                 }
               ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "z4mFp",
+      "x": 200,
+      "y": 760,
+      "name": "Comp / ThreadListItem",
+      "reusable": true,
+      "width": 268,
+      "cornerRadius": "$r-m",
+      "gap": 10,
+      "padding": [
+        10,
+        12
+      ],
+      "alignItems": "center",
+      "children": [
+        {
+          "type": "frame",
+          "id": "d2wmu",
+          "name": "DotCell",
+          "width": 16,
+          "height": 16,
+          "layout": "none",
+          "children": [
+            {
+              "type": "ellipse",
+              "id": "pCkpS",
+              "x": 0,
+              "y": 0,
+              "name": "Ring2",
+              "fill": "#2E5BFF1A",
+              "width": 16,
+              "height": 16
+            },
+            {
+              "type": "ellipse",
+              "id": "MUsuq",
+              "x": 2.75,
+              "y": 2.75,
+              "name": "Ring1",
+              "fill": "#2E5BFF40",
+              "width": 10.5,
+              "height": 10.5
+            },
+            {
+              "type": "ellipse",
+              "id": "Ar6tD",
+              "x": 4.75,
+              "y": 4.75,
+              "name": "Dot",
+              "fill": "$primary",
+              "width": 6.5,
+              "height": 6.5
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "YfvdZ",
+          "name": "Col",
+          "width": "fill_container",
+          "layout": "vertical",
+          "gap": 2,
+          "children": [
+            {
+              "type": "text",
+              "id": "xsWUf",
+              "name": "Title",
+              "fill": "$ink",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "重构设备隧道重连逻辑",
+              "fontFamily": "$font-sans",
+              "fontSize": 13.5,
+              "fontWeight": "500"
+            },
+            {
+              "type": "text",
+              "id": "uphos",
+              "name": "Meta",
+              "fill": "$primary",
+              "textGrowth": "fixed-width",
+              "width": "fill_container",
+              "content": "执行中 · Kimi · 2 分钟前",
+              "fontFamily": "$font-sans",
+              "fontSize": 11.5,
+              "fontWeight": "normal"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "q33vOU",
+      "x": 520,
+      "y": 760,
+      "name": "Comp / QuickNewThread",
+      "reusable": true,
+      "width": 268,
+      "fill": "$primary-soft",
+      "cornerRadius": "$r-m",
+      "gap": 8,
+      "padding": [
+        10,
+        12
+      ],
+      "alignItems": "center",
+      "children": [
+        {
+          "type": "icon",
+          "id": "w39GKK",
+          "name": "Icon",
+          "width": 15,
+          "height": 15,
+          "icon": "plus",
+          "library": "lucide",
+          "fill": "$primary"
+        },
+        {
+          "type": "text",
+          "id": "hjijB",
+          "name": "Label",
+          "fill": "$primary",
+          "textGrowth": "fixed-width",
+          "width": "fill_container",
+          "content": "新建会话",
+          "fontFamily": "$font-sans",
+          "fontSize": 13,
+          "fontWeight": "600"
+        },
+        {
+          "type": "text",
+          "id": "xZgH2",
+          "name": "Scope",
+          "fill": "$primary",
+          "content": "同设备 · 同项目",
+          "fontFamily": "$font-sans",
+          "fontSize": 10.5,
+          "fontWeight": "normal"
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "m1EM0x",
+      "x": 2040,
+      "y": 1832,
+      "name": "Mobile / 会话切换",
+      "clip": true,
+      "width": 390,
+      "height": 844,
+      "fill": "$bg",
+      "layout": "none",
+      "children": [
+        {
+          "type": "rectangle",
+          "id": "E0ws1O",
+          "x": 0,
+          "y": 0,
+          "name": "Dim",
+          "fill": "#10182859",
+          "width": 390,
+          "height": 844
+        },
+        {
+          "type": "frame",
+          "id": "Lp3Jy",
+          "x": 0,
+          "y": 325,
+          "name": "Sheet",
+          "width": 390,
+          "height": 519,
+          "fill": "$surface",
+          "cornerRadius": [
+            18,
+            18,
+            0,
+            0
+          ],
+          "stroke": "$border",
+          "strokeWidth": {
+            "top": 1
+          },
+          "layout": "vertical",
+          "gap": 4,
+          "padding": [
+            8,
+            14,
+            22,
+            14
+          ],
+          "children": [
+            {
+              "type": "frame",
+              "id": "wI9z5",
+              "name": "Handle",
+              "width": "fill_container",
+              "padding": [
+                2,
+                0,
+                8,
+                0
+              ],
+              "justifyContent": "center",
+              "children": [
+                {
+                  "type": "rectangle",
+                  "cornerRadius": "$r-pill",
+                  "id": "tKjqB",
+                  "name": "Bar",
+                  "fill": "$border-strong",
+                  "width": 36,
+                  "height": 4
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "HKSTH",
+              "name": "SheetHeader",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 2,
+              "padding": [
+                0,
+                4,
+                8,
+                4
+              ],
+              "children": [
+                {
+                  "type": "text",
+                  "id": "kS5Sm",
+                  "name": "Title",
+                  "fill": "$ink",
+                  "content": "切换会话",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 15,
+                  "fontWeight": "600"
+                },
+                {
+                  "type": "frame",
+                  "id": "wE25p",
+                  "name": "Sub",
+                  "gap": 5,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "ellipse",
+                      "id": "LzGK2",
+                      "name": "Dot",
+                      "fill": "$success",
+                      "width": 6,
+                      "height": 6
+                    },
+                    {
+                      "type": "text",
+                      "id": "OUSal",
+                      "name": "Txt",
+                      "fill": "$ink2",
+                      "content": "Mac Studio · nuntius · 在线",
+                      "fontFamily": "$font-sans",
+                      "fontSize": 11.5,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "DtAhk",
+              "type": "ref",
+              "ref": "q33vOU",
+              "name": "QuickNew",
+              "width": "fill_container"
+            },
+            {
+              "type": "frame",
+              "id": "G8b4N",
+              "name": "Sec 进行中",
+              "width": "fill_container",
+              "padding": [
+                10,
+                4,
+                2,
+                4
+              ],
+              "children": [
+                {
+                  "type": "text",
+                  "id": "NvT7z",
+                  "name": "Label",
+                  "fill": "$ink3",
+                  "content": "进行中",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 11,
+                  "fontWeight": "600"
+                }
+              ]
+            },
+            {
+              "id": "isJUB",
+              "type": "ref",
+              "ref": "z4mFp",
+              "name": "Thread / 重构设备隧道重连逻辑",
+              "width": "fill_container",
+              "fill": "$surface2",
+              "descendants": {
+                "pCkpS": {
+                  "fill": "#2E5BFF1A"
+                },
+                "MUsuq": {
+                  "fill": "#2E5BFF40"
+                },
+                "Ar6tD": {
+                  "fill": "$primary"
+                },
+                "xsWUf": {
+                  "content": "重构设备隧道重连逻辑",
+                  "fontWeight": "600"
+                },
+                "uphos": {
+                  "content": "执行中 · Kimi · 2 分钟前",
+                  "fill": "$primary"
+                }
+              }
+            },
+            {
+              "id": "LOxV9",
+              "type": "ref",
+              "ref": "z4mFp",
+              "name": "Thread / 升级依赖并修复构建告警",
+              "width": "fill_container",
+              "fill": "#00000000",
+              "descendants": {
+                "pCkpS": {
+                  "fill": "#B96A001A"
+                },
+                "MUsuq": {
+                  "fill": "#B96A0040"
+                },
+                "Ar6tD": {
+                  "fill": "$warning"
+                },
+                "xsWUf": {
+                  "content": "升级依赖并修复构建告警",
+                  "fontWeight": "500"
+                },
+                "uphos": {
+                  "content": "待审批 · Codex · 5 分钟前",
+                  "fill": "$warning"
+                }
+              }
+            },
+            {
+              "type": "frame",
+              "id": "wAuT1",
+              "name": "Sec 最近",
+              "width": "fill_container",
+              "padding": [
+                10,
+                4,
+                2,
+                4
+              ],
+              "children": [
+                {
+                  "type": "text",
+                  "id": "pHJ4M",
+                  "name": "Label",
+                  "fill": "$ink3",
+                  "content": "最近",
+                  "fontFamily": "$font-sans",
+                  "fontSize": 11,
+                  "fontWeight": "600"
+                }
+              ]
+            },
+            {
+              "id": "gV5SU",
+              "type": "ref",
+              "ref": "z4mFp",
+              "name": "Thread / 修复 SQLite WAL checkpoint 告警",
+              "width": "fill_container",
+              "fill": "#00000000",
+              "descendants": {
+                "pCkpS": {
+                  "enabled": false
+                },
+                "MUsuq": {
+                  "enabled": false
+                },
+                "Ar6tD": {
+                  "fill": "$success"
+                },
+                "xsWUf": {
+                  "content": "修复 SQLite WAL checkpoint 告警"
+                },
+                "uphos": {
+                  "content": "已完成 · Kimi · 1 小时前",
+                  "fill": "$ink3"
+                }
+              }
+            },
+            {
+              "id": "cqHjP",
+              "type": "ref",
+              "ref": "z4mFp",
+              "name": "Thread / 历史回填断点续传",
+              "width": "fill_container",
+              "fill": "#00000000",
+              "descendants": {
+                "pCkpS": {
+                  "enabled": false
+                },
+                "MUsuq": {
+                  "enabled": false
+                },
+                "Ar6tD": {
+                  "fill": "$ink3"
+                },
+                "xsWUf": {
+                  "content": "历史回填断点续传"
+                },
+                "uphos": {
+                  "content": "空闲 · Kimi · 昨天",
+                  "fill": "$ink3"
+                }
+              }
+            },
+            {
+              "id": "e4X2j",
+              "type": "ref",
+              "ref": "z4mFp",
+              "name": "Thread / SSE 事件去重与缺口重放",
+              "width": "fill_container",
+              "fill": "#00000000",
+              "descendants": {
+                "pCkpS": {
+                  "enabled": false
+                },
+                "MUsuq": {
+                  "enabled": false
+                },
+                "Ar6tD": {
+                  "fill": "$danger"
+                },
+                "xsWUf": {
+                  "content": "SSE 事件去重与缺口重放"
+                },
+                "uphos": {
+                  "content": "异常 · Codex · 3 天前",
+                  "fill": "$danger"
+                }
+              }
             }
           ]
         }
