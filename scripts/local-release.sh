@@ -264,10 +264,13 @@ else
       --arch aarch64 \
       --vm-type vz \
       --binfmt \
+      --dns 114.114.114.114 \
+      --dns 223.5.5.5 \
       --cpus 6 \
       --memory 8 \
       --disk 60 \
       --runtime docker \
+      --activate=false \
       --kubernetes=false
   fi
   docker --context "$DOCKER_CONTEXT" info >/dev/null
