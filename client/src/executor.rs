@@ -1583,11 +1583,7 @@ async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Resul
                 .get("reason")
                 .and_then(Value::as_str)
                 .unwrap_or("completed");
-            let status = match reason {
-                "cancelled" => "interrupted",
-                "failed" | "blocked" => "failed",
-                _ => "completed",
-            };
+            let status = kimi_turn_status(reason);
             executor
                 .store
                 .complete_app_turn(&thread_id, None, status)
@@ -1599,9 +1595,14 @@ async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Resul
             if payload.get("busy").and_then(Value::as_bool) == Some(true) {
                 executor.store.touch_thread(&thread_id, "active").await?;
             } else {
+                let status = payload
+                    .get("last_turn_reason")
+                    .and_then(Value::as_str)
+                    .map(kimi_turn_status)
+                    .unwrap_or("completed");
                 executor
                     .store
-                    .complete_app_turn(&thread_id, None, "completed")
+                    .complete_app_turn(&thread_id, None, status)
                     .await?;
             }
             executor.sync_thread(&thread_id).await?;
@@ -1627,6 +1628,14 @@ async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Resul
         executor.emit_thread_summary(&thread_id).await?;
     }
     Ok(())
+}
+
+fn kimi_turn_status(reason: &str) -> &'static str {
+    match reason {
+        "cancelled" => "interrupted",
+        "failed" | "blocked" => "failed",
+        _ => "completed",
+    }
 }
 
 fn kimi_event_id(payload: &Value, key: &str) -> Option<String> {

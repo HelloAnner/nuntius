@@ -423,12 +423,24 @@ export class ThreadLiveStore {
     }
     if (type.startsWith("agent.")) {
       const method = type.slice("agent.".length).toLowerCase();
-      const turn = this.ensureTurn(
-        threadId,
-        event.turnId ?? str(payload.turnId),
-        event.occurredAt,
-        event.seq,
-      );
+      const handled = method === "turn.started"
+        || method === "turn.ended"
+        || method === "event.session.work_changed"
+        || method === "error"
+        || method === "assistant.delta"
+        || method === "thinking.delta"
+        || method === "tool.call.started"
+        || method === "tool.progress"
+        || method === "tool.result";
+      if (!handled) return;
+      const turnHint = event.turnId ?? str(payload.turnId);
+      const terminalFollowUp = method === "error"
+        || (method === "event.session.work_changed" && payload.busy !== true);
+      const turn = terminalFollowUp
+        ? this.currentTurn(threadId, turnHint)
+          ?? this.latestTurn(threadId)
+          ?? this.ensureTurn(threadId, turnHint, event.occurredAt, event.seq)
+        : this.ensureTurn(threadId, turnHint, event.occurredAt, event.seq);
       if (method === "turn.started") {
         turn.status = "running";
         this.bump();
@@ -436,20 +448,46 @@ export class ThreadLiveStore {
       }
       if (method === "turn.ended") {
         const reason = str(payload.reason)?.toLowerCase();
+        const failed = reason === "failed" || reason === "blocked";
         this.finalizeTurn(
           turn,
           reason === "cancelled"
             ? "interrupted"
-            : reason === "failed" || reason === "blocked"
+            : failed
               ? "failed"
               : "completed",
         );
+        if (failed) {
+          turn.sendState = "failed";
+          turn.sendErrorCode = str(payload, "error", "code") ?? "provider_failed";
+          turn.sendErrorMessage = str(payload, "error", "message") ?? "模型执行失败";
+        }
         this.bump();
         return;
       }
       if (method === "event.session.work_changed") {
         if (payload.busy === true) turn.status = "running";
-        else this.finalizeTurn(turn, "completed");
+        else {
+          const reason = str(payload.last_turn_reason)?.toLowerCase();
+          this.finalizeTurn(
+            turn,
+            reason === "cancelled"
+              ? "interrupted"
+              : reason === "failed" || reason === "blocked"
+                ? "failed"
+                : turn.status === "failed" || turn.status === "interrupted"
+                  ? turn.status
+                  : "completed",
+          );
+        }
+        this.bump();
+        return;
+      }
+      if (method === "error") {
+        turn.status = "failed";
+        turn.sendState = "failed";
+        turn.sendErrorCode = str(payload.code) ?? "provider_failed";
+        turn.sendErrorMessage = str(payload.message) ?? "模型执行失败";
         this.bump();
         return;
       }
@@ -609,6 +647,11 @@ export class ThreadLiveStore {
       }
     }
     return null;
+  }
+
+  private latestTurn(threadId: string): LiveTurn | null {
+    const turns = [...this.get(threadId).turns].sort(compareLiveTurns);
+    return turns[turns.length - 1] ?? null;
   }
 
   private ensureTurn(

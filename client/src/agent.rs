@@ -2,7 +2,7 @@ use crate::{
     app_server::AppServerRuntime,
     config::ClientConfig,
     kimi::KimiRuntime,
-    protocol::{AgentProvider, AgentProviderStatus, ConversationAccessMode},
+    protocol::{AgentModelOption, AgentProvider, AgentProviderStatus, ConversationAccessMode},
 };
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
@@ -32,8 +32,8 @@ impl AgentRuntimes {
     }
 
     pub async fn statuses(&self) -> Vec<AgentProviderStatus> {
-        let codex_running = self.codex.is_running().await;
-        let codex_version = if codex_running {
+        let codex_was_running = self.codex.is_running().await;
+        let codex_version = if codex_was_running {
             None
         } else {
             tokio::time::timeout(
@@ -50,7 +50,22 @@ impl AgentRuntimes {
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
         };
-        let codex_available = codex_running || codex_version.is_some();
+        let codex_available = codex_was_running || codex_version.is_some();
+        let codex_models = if codex_was_running {
+            match self.codex_model_catalog().await {
+                Ok(models) if !models.is_empty() => models,
+                Ok(_) => fallback_codex_models(),
+                Err(error) => {
+                    tracing::warn!(error=?error, "Codex model catalog unavailable; using fallback");
+                    fallback_codex_models()
+                }
+            }
+        } else if codex_available {
+            fallback_codex_models()
+        } else {
+            Vec::new()
+        };
+        let codex_running = self.codex.is_running().await;
         let codex = AgentProviderStatus {
             provider: AgentProvider::Codex,
             label: "Codex".into(),
@@ -64,8 +79,30 @@ impl AgentRuntimes {
             }
             .into(),
             version: codex_version,
+            models: codex_models,
         };
         vec![codex, self.kimi.provider_status().await]
+    }
+
+    async fn codex_model_catalog(&self) -> Result<Vec<AgentModelOption>> {
+        let catalog = self
+            .codex
+            .call_with_timeout(
+                "model/list",
+                json!({"limit":100,"includeHidden":false}),
+                Duration::from_secs(10),
+            )
+            .await?;
+        let config = self
+            .codex
+            .call_with_timeout(
+                "config/read",
+                json!({"includeLayers":false}),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_or(Value::Null);
+        Ok(parse_codex_models(&catalog, &config))
     }
 
     pub async fn create_session(
@@ -604,6 +641,91 @@ fn rfc3339_unix(value: Option<&Value>) -> Option<i64> {
         .map(|value| value.unix_timestamp())
 }
 
+fn parse_codex_models(catalog: &Value, config: &Value) -> Vec<AgentModelOption> {
+    let items = catalog
+        .get("data")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let configured_model = config.pointer("/config/model").and_then(Value::as_str);
+    let configured_effort = config
+        .pointer("/config/model_reasoning_effort")
+        .and_then(Value::as_str);
+    let configured_model_is_listed = configured_model.is_some_and(|configured| {
+        items.iter().any(|item| {
+            item.get("model").and_then(Value::as_str) == Some(configured)
+                || item.get("id").and_then(Value::as_str) == Some(configured)
+        })
+    });
+
+    items
+        .iter()
+        .filter(|item| item.get("hidden").and_then(Value::as_bool) != Some(true))
+        .filter_map(|item| {
+            let id = item
+                .get("model")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("id").and_then(Value::as_str))?
+                .to_owned();
+            let is_default = if configured_model_is_listed {
+                configured_model == Some(id.as_str())
+            } else {
+                item.get("isDefault").and_then(Value::as_bool) == Some(true)
+            };
+            let default_reasoning_effort = if is_default {
+                configured_effort
+                    .or_else(|| item.get("defaultReasoningEffort").and_then(Value::as_str))
+                    .map(str::to_owned)
+            } else {
+                item.get("defaultReasoningEffort")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            };
+            let reasoning_efforts = item
+                .get("supportedReasoningEfforts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|effort| {
+                    effort
+                        .get("reasoningEffort")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect();
+            Some(AgentModelOption {
+                id,
+                label: item
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Codex")
+                    .to_owned(),
+                description: item
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                is_default,
+                default_reasoning_effort,
+                reasoning_efforts,
+            })
+        })
+        .collect()
+}
+
+fn fallback_codex_models() -> Vec<AgentModelOption> {
+    vec![AgentModelOption {
+        id: "gpt-5.6-sol".into(),
+        label: "GPT-5.6 Sol".into(),
+        description: Some("OpenAI 当前旗舰编码与复杂推理模型".into()),
+        is_default: true,
+        default_reasoning_effort: Some("xhigh".into()),
+        reasoning_efforts: ["low", "medium", "high", "xhigh", "max"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    }]
+}
+
 fn object(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
 }
@@ -627,4 +749,39 @@ fn app_thread_status(thread: &Value) -> &str {
                 .or_else(|| status.get("type").and_then(Value::as_str))
         })
         .unwrap_or("idle")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_catalog_prefers_effective_config() {
+        let catalog = json!({"data":[
+            {
+                "id":"gpt-5.6-sol",
+                "model":"gpt-5.6-sol",
+                "displayName":"GPT-5.6-Sol",
+                "description":"Frontier",
+                "hidden":false,
+                "isDefault":true,
+                "defaultReasoningEffort":"low",
+                "supportedReasoningEfforts":[
+                    {"reasoningEffort":"low"},
+                    {"reasoningEffort":"xhigh"}
+                ]
+            }
+        ]});
+        let models = parse_codex_models(
+            &catalog,
+            &json!({"config":{"model":"gpt-5.6-sol","model_reasoning_effort":"xhigh"}}),
+        );
+        assert_eq!(models.len(), 1);
+        assert!(models[0].is_default);
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("xhigh"));
+        assert_eq!(
+            models[0].reasoning_efforts,
+            vec!["low".to_owned(), "xhigh".to_owned()]
+        );
+    }
 }

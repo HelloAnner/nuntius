@@ -64,11 +64,16 @@ export const api = {
     req<{ projectId: string; threadCount: number }>("DELETE", `/projects/${projectId}`),
   projectThreads: (projectId: string) =>
     req<ThreadSummary[]>("GET", `/projects/${projectId}/threads`),
-  createThread: (projectId: string, title: string | null, provider: AgentProvider = "codex") =>
+  createThread: (
+    projectId: string,
+    title: string | null,
+    provider: AgentProvider = "codex",
+    options: Record<string, unknown> = {},
+  ) =>
     req<{ threadId: string; appServerThreadId: string }>(
       "POST",
       `/projects/${projectId}/threads`,
-      { title, firstMessage: null, provider, accessMode: "full", options: {} },
+      { title, firstMessage: null, provider, accessMode: "full", options },
     ),
   threads: () => req<ThreadSummary[]>("GET", "/threads"),
   history: (threadId: string) => req<HistoryRecord[]>("GET", `/threads/${threadId}/history`),

@@ -1,6 +1,8 @@
 use crate::{
     config::ClientConfig,
-    protocol::{AgentProvider, AgentProviderStatus, ConversationAccessMode, new_id},
+    protocol::{
+        AgentModelOption, AgentProvider, AgentProviderStatus, ConversationAccessMode, new_id,
+    },
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
@@ -75,6 +77,17 @@ impl KimiRuntime {
 
     pub async fn provider_status(&self) -> AgentProviderStatus {
         if let Ok(meta) = self.probe_meta().await {
+            let models = match tokio::time::timeout(Duration::from_secs(3), self.model_catalog())
+                .await
+            {
+                Ok(Ok(models)) if !models.is_empty() => models,
+                Ok(Ok(_)) => fallback_kimi_models(),
+                Ok(Err(error)) => {
+                    tracing::warn!(error=?error, "Kimi model catalog unavailable; using fallback");
+                    fallback_kimi_models()
+                }
+                Err(_) => fallback_kimi_models(),
+            };
             return AgentProviderStatus {
                 provider: AgentProvider::Kimi,
                 label: "Kimi".into(),
@@ -84,6 +97,7 @@ impl KimiRuntime {
                     .get("server_version")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                models,
             };
         }
         let version = tokio::time::timeout(
@@ -110,7 +124,15 @@ impl KimiRuntime {
             }
             .into(),
             version,
+            models: fallback_kimi_models(),
         }
+    }
+
+    async fn model_catalog(&self) -> Result<Vec<AgentModelOption>> {
+        let catalog = self
+            .request_without_start(Method::GET, "/models", None)
+            .await?;
+        Ok(parse_kimi_models(&catalog))
     }
 
     pub async fn ensure_ready(&self) -> Result<Value> {
@@ -175,7 +197,22 @@ impl KimiRuntime {
             "permission_mode".into(),
             json!(permission_mode(access_mode)),
         );
-        for key in ["model", "thinking", "plan_mode", "swarm_mode"] {
+        agent_config.insert(
+            "model".into(),
+            options
+                .get("model")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .unwrap_or_else(|| json!("kimi-code/k3")),
+        );
+        agent_config.insert(
+            "thinking".into(),
+            options
+                .get("thinking")
+                .and_then(kimi_thinking_value)
+                .unwrap_or_else(|| json!("max")),
+        );
+        for key in ["plan_mode", "swarm_mode"] {
             copy_option(options, &mut agent_config, key);
         }
         self.request(
@@ -330,7 +367,9 @@ impl KimiRuntime {
             json!(permission_mode(access_mode)),
         );
         copy_option(options, &mut body, "model");
-        copy_option(options, &mut body, "thinking");
+        if let Some(thinking) = options.get("thinking").and_then(kimi_thinking_value) {
+            body.insert("thinking".into(), thinking);
+        }
         copy_option(options, &mut body, "plan_mode");
         copy_option(options, &mut body, "swarm_mode");
         self.request(
@@ -595,6 +634,89 @@ fn kimi_home() -> Option<PathBuf> {
         .or_else(|| BaseDirs::new().map(|dirs| dirs.home_dir().join(".kimi-code")))
 }
 
+fn parse_kimi_models(catalog: &Value) -> Vec<AgentModelOption> {
+    catalog
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let id = item.get("model").and_then(Value::as_str)?.to_owned();
+            let is_k3 = id.ends_with("/k3");
+            let mut reasoning_efforts = item
+                .get("support_efforts")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if reasoning_efforts.is_empty() {
+                reasoning_efforts.push("on".into());
+            }
+            let default_reasoning_effort = if is_k3 {
+                Some("max".into())
+            } else {
+                Some("on".into())
+            };
+            Some(AgentModelOption {
+                id,
+                label: item
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Kimi")
+                    .to_owned(),
+                description: Some(if is_k3 {
+                    "Kimi 旗舰编程模型 · 最高 1M 上下文".into()
+                } else if item
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .is_some_and(|model| model.ends_with("-highspeed"))
+                {
+                    "K2.7 Code · 高速输出".into()
+                } else {
+                    "K2.7 Code · 稳定编程模型".into()
+                }),
+                is_default: is_k3,
+                default_reasoning_effort,
+                reasoning_efforts,
+            })
+        })
+        .collect()
+}
+
+fn fallback_kimi_models() -> Vec<AgentModelOption> {
+    vec![
+        AgentModelOption {
+            id: "kimi-code/k3".into(),
+            label: "K3".into(),
+            description: Some("Kimi 旗舰编程模型 · 最高 1M 上下文".into()),
+            is_default: true,
+            default_reasoning_effort: Some("max".into()),
+            reasoning_efforts: ["low", "high", "max"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        },
+        AgentModelOption {
+            id: "kimi-code/kimi-for-coding".into(),
+            label: "K2.7 Coding".into(),
+            description: Some("K2.7 Code · 稳定编程模型".into()),
+            is_default: false,
+            default_reasoning_effort: Some("on".into()),
+            reasoning_efforts: vec!["on".into()],
+        },
+        AgentModelOption {
+            id: "kimi-code/kimi-for-coding-highspeed".into(),
+            label: "K2.7 Coding Highspeed".into(),
+            description: Some("K2.7 Code · 高速输出".into()),
+            is_default: false,
+            default_reasoning_effort: Some("on".into()),
+            reasoning_efforts: vec!["on".into()],
+        },
+    ]
+}
+
 fn permission_mode(mode: ConversationAccessMode) -> &'static str {
     match mode {
         ConversationAccessMode::Full => "yolo",
@@ -606,6 +728,23 @@ fn copy_option(source: &Value, target: &mut serde_json::Map<String, Value>, key:
     if let Some(value) = source.get(key) {
         target.insert(key.into(), value.clone());
     }
+}
+
+fn kimi_thinking_value(value: &Value) -> Option<Value> {
+    if let Some(effort) = value.as_str().filter(|effort| !effort.is_empty()) {
+        return Some(json!(effort));
+    }
+    if value.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return Some(json!("none"));
+    }
+    value
+        .get("effort")
+        .and_then(Value::as_str)
+        .filter(|effort| !effort.is_empty())
+        .map(|effort| json!(effort))
+        .or_else(|| {
+            (value.get("enabled").and_then(Value::as_bool) == Some(true)).then(|| json!("on"))
+        })
 }
 
 async fn kimi_content(input: &[Value]) -> Result<Vec<Value>> {
@@ -644,4 +783,35 @@ async fn kimi_content(input: &[Value]) -> Result<Vec<Value>> {
         bail!("Kimi prompt content is empty")
     }
     Ok(content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kimi_catalog_defaults_to_k3_and_max_effort() {
+        let models = parse_kimi_models(&json!({"items":[{
+            "model":"kimi-code/k3",
+            "display_name":"K3",
+            "support_efforts":["low","high","max"],
+            "default_effort":"high"
+        }]}));
+        assert_eq!(models.len(), 1);
+        assert!(models[0].is_default);
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn kimi_thinking_options_are_encoded_as_web_api_strings() {
+        assert_eq!(kimi_thinking_value(&json!("max")), Some(json!("max")));
+        assert_eq!(
+            kimi_thinking_value(&json!({"enabled":true,"effort":"high"})),
+            Some(json!("high"))
+        );
+        assert_eq!(
+            kimi_thinking_value(&json!({"enabled":false})),
+            Some(json!("none"))
+        );
+    }
 }

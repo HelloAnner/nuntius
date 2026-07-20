@@ -19,7 +19,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [apiVersion, clientVersion, buildSha, deviceId, displayName, paired, localBind, appServerRunning, projects, pendingCommands, pendingEvents, activeTurns, capabilities]
+                required: [apiVersion, clientVersion, buildSha, deviceId, displayName, paired, localBind, appServerRunning, providers, projects, pendingCommands, pendingEvents, activeTurns, capabilities]
                 properties:
                   apiVersion: {type: string}
                   clientVersion: {type: string}
@@ -29,6 +29,29 @@ paths:
                   paired: {type: boolean}
                   localBind: {type: string}
                   appServerRunning: {type: boolean}
+                  providers:
+                    type: array
+                    items:
+                      type: object
+                      required: [provider, label, available, status, models]
+                      properties:
+                        provider: {enum: [codex, kimi]}
+                        label: {type: string}
+                        available: {type: boolean}
+                        status: {type: string}
+                        version: {type: [string, 'null']}
+                        models:
+                          type: array
+                          items:
+                            type: object
+                            required: [id, label, isDefault, reasoningEfforts]
+                            properties:
+                              id: {type: string}
+                              label: {type: string}
+                              description: {type: [string, 'null']}
+                              isDefault: {type: boolean}
+                              defaultReasoningEffort: {type: [string, 'null']}
+                              reasoningEfforts: {type: array, items: {type: string}}
                   projects: {type: integer}
                   pendingCommands: {type: integer}
                   pendingEvents: {type: integer}

@@ -4,12 +4,22 @@
 export type TransportSecurity = "secure" | "insecure" | "local";
 export type AgentProvider = "codex" | "kimi";
 
+export interface AgentModelOption {
+  id: string;
+  label: string;
+  description: string | null;
+  isDefault: boolean;
+  defaultReasoningEffort: string | null;
+  reasoningEfforts: string[];
+}
+
 export interface AgentProviderStatus {
   provider: AgentProvider;
   label: string;
   available: boolean;
   status: string;
   version: string | null;
+  models: AgentModelOption[];
 }
 
 export interface ServerInfo {

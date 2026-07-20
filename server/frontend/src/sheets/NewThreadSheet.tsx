@@ -2,10 +2,14 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ModelPicker,
   ProviderPicker,
   Sheet,
+  agentThreadOptions,
+  defaultAgentSelection,
   newIdemKey,
   useToast,
+  type AgentSelection,
   type AgentProvider,
   type ThreadSummary,
 } from "@nuntius/shared";
@@ -77,14 +81,38 @@ export function NewThreadSheet({
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const [firstMessage, setFirstMessage] = useState("");
   const [provider, setProvider] = useState<AgentProvider>("codex");
+  const [selection, setSelection] = useState<AgentSelection>(() =>
+    defaultAgentSelection("codex"),
+  );
   const [busy, setBusy] = useState(false);
   const providerStatuses = devices.data?.find((device) => device.id === deviceId)?.providers ?? [];
+  const selectedProviderStatus = providerStatuses.find(
+    (status) => status.provider === provider,
+  );
   const providerAvailable =
-    providerStatuses.find((status) => status.provider === provider)?.available ?? provider === "codex";
+    selectedProviderStatus?.available ?? provider === "codex";
 
   useEffect(() => {
-    if (open) setProvider("codex");
+    if (!open) return;
+    setProvider("codex");
+    setSelection(
+      defaultAgentSelection(
+        "codex",
+        providerStatuses.find((status) => status.provider === "codex"),
+      ),
+    );
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const models = selectedProviderStatus?.models ?? [];
+    if (
+      !selection.model ||
+      (models.length > 0 && !models.some((model) => model.id === selection.model))
+    ) {
+      setSelection(defaultAgentSelection(provider, selectedProviderStatus));
+    }
+  }, [open, provider, selectedProviderStatus, selection.model]);
 
   const create = async () => {
     const text = firstMessage.trim();
@@ -99,6 +127,7 @@ export function NewThreadSheet({
         null,
         provider,
         accessMode,
+        agentThreadOptions(provider, selection),
         idemKey,
       );
       trackCommand(qc, receipt.commandId, undefined, "thread.create");
@@ -161,8 +190,24 @@ export function NewThreadSheet({
       <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
         <ProviderPicker
           value={provider}
-          onChange={setProvider}
+          onChange={(nextProvider) => {
+            setProvider(nextProvider);
+            setSelection(
+              defaultAgentSelection(
+                nextProvider,
+                providerStatuses.find((status) => status.provider === nextProvider),
+              ),
+            );
+          }}
           statuses={providerStatuses}
+          disabled={busy}
+        />
+        <ModelPicker
+          provider={provider}
+          status={selectedProviderStatus}
+          model={selection.model}
+          reasoningEffort={selection.reasoningEffort}
+          onChange={(model, reasoningEffort) => setSelection({ model, reasoningEffort })}
           disabled={busy}
         />
         <div className="field">

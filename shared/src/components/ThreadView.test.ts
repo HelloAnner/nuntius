@@ -309,6 +309,49 @@ describe("ThreadLiveStore chronology", () => {
     expect(store.get("thr-test").turns[0].items[0].text).toBe("完成");
   });
 
+  test("keeps a provider failure after the session becomes idle", () => {
+    const store = new ThreadLiveStore();
+    store.apply(event({ turnId: "turn-kimi" }));
+    store.apply(event({
+      eventId: "evt-kimi-ended",
+      seq: 2,
+      turnId: "turn-kimi",
+      eventType: "agent.turn.ended",
+      payload: {
+        reason: "failed",
+        error: { code: "model.not_configured", message: "Model not set" },
+      },
+    }));
+    store.apply(event({
+      eventId: "evt-kimi-idle",
+      seq: 3,
+      turnId: null,
+      eventType: "agent.event.session.work_changed",
+      payload: { busy: false, last_turn_reason: "failed" },
+    }));
+    store.apply(event({
+      eventId: "evt-kimi-error",
+      seq: 4,
+      turnId: null,
+      eventType: "agent.error",
+      payload: { code: "model.not_configured", message: "Model not set" },
+    }));
+    store.apply(event({
+      eventId: "evt-kimi-prompt-completed",
+      seq: 5,
+      turnId: null,
+      eventType: "agent.prompt.completed",
+      payload: { reason: "failed" },
+    }));
+
+    const turn = store.get("thr-test").byId["turn-kimi"];
+    expect(turn.status).toBe("failed");
+    expect(turn.sendState).toBe("failed");
+    expect(turn.sendErrorCode).toBe("model.not_configured");
+    expect(turn.sendErrorMessage).toBe("Model not set");
+    expect(store.get("thr-test").turns).toHaveLength(1);
+  });
+
   test("orders live items by event time even when they arrive out of order", () => {
     const store = new ThreadLiveStore();
     store.apply(event());

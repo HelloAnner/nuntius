@@ -428,13 +428,25 @@ components:
           type: array
           items:
             type: object
-            required: [provider, label, available, status]
+            required: [provider, label, available, status, models]
             properties:
               provider: {enum: [codex, kimi]}
               label: {type: string}
               available: {type: boolean}
               status: {type: string}
               version: {type: [string, 'null']}
+              models:
+                type: array
+                items:
+                  type: object
+                  required: [id, label, isDefault, reasoningEfforts]
+                  properties:
+                    id: {type: string}
+                    label: {type: string}
+                    description: {type: [string, 'null']}
+                    isDefault: {type: boolean}
+                    defaultReasoningEffort: {type: [string, 'null']}
+                    reasoningEfforts: {type: array, items: {type: string}}
     Project:
       type: object
       required: [id, deviceId, kind, displayName, status, threadCount]

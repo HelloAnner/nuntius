@@ -155,11 +155,11 @@ export const api = {
 
   projectThreads: (deviceId: string, projectId: string) =>
     req<ThreadSummary[]>("GET", `/devices/${deviceId}/projects/${projectId}/threads`),
-  createThread: (deviceId: string, projectId: string, title: string | null, firstMessage: string | null, provider: AgentProvider, accessMode: ConversationAccessMode, idemKey: string) =>
+  createThread: (deviceId: string, projectId: string, title: string | null, firstMessage: string | null, provider: AgentProvider, accessMode: ConversationAccessMode, options: Record<string, unknown>, idemKey: string) =>
     req<CommandReceipt>(
       "POST",
       `/devices/${deviceId}/projects/${projectId}/threads`,
-      { title, firstMessage, provider, accessMode, options: {} },
+      { title, firstMessage, provider, accessMode, options },
       { idemKey },
     ),
 

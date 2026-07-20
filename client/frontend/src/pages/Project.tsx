@@ -6,15 +6,19 @@ import {
   IconArchive,
   IconChat,
   IconPlus,
+  ModelPicker,
   ProviderPicker,
   Sheet,
   Spinner,
   SwipeActionRow,
   compareThreadActivity,
+  agentThreadOptions,
+  defaultAgentSelection,
   newIdemKey,
   useConfirmAction,
   useToast,
   type AgentProvider,
+  type AgentSelection,
 } from "@nuntius/shared";
 import { api } from "../api";
 import { useArchiveThreadAction, useNavigate } from "../hooks";
@@ -31,6 +35,9 @@ export function ProjectPage({ projectId }: { projectId: string }) {
   const [creating, setCreating] = useState(false);
   const [firstMessage, setFirstMessage] = useState("");
   const [provider, setProvider] = useState<AgentProvider>("codex");
+  const [selection, setSelection] = useState<AgentSelection>(() =>
+    defaultAgentSelection("codex"),
+  );
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -44,10 +51,6 @@ export function ProjectPage({ projectId }: { projectId: string }) {
   const project = projects.data?.find((p) => p.id === projectId);
 
   useEffect(() => {
-    if (creating) setProvider("codex");
-  }, [creating]);
-
-  useEffect(() => {
     if (!deleting && (projects.isError || (projects.isSuccess && !project))) {
       navigate({ name: "overview" }, { replace: true });
     }
@@ -55,10 +58,35 @@ export function ProjectPage({ projectId }: { projectId: string }) {
 
   const unassigned = project?.kind === "system_unassigned";
   const providerStatuses = info.data?.providers ?? [];
+  const selectedProviderStatus = providerStatuses.find(
+    (status) => status.provider === provider,
+  );
   const selectedProviderAvailable =
-    providerStatuses.find((status) => status.provider === provider)?.available ?? provider === "codex";
+    selectedProviderStatus?.available ?? provider === "codex";
   const canCreate = Boolean(!unassigned && providerStatuses.some((status) => status.available));
   const sorted = [...(threads.data ?? [])].sort(compareThreadActivity);
+
+  useEffect(() => {
+    if (!creating) return;
+    setProvider("codex");
+    setSelection(
+      defaultAgentSelection(
+        "codex",
+        providerStatuses.find((status) => status.provider === "codex"),
+      ),
+    );
+  }, [creating]);
+
+  useEffect(() => {
+    if (!creating) return;
+    const models = selectedProviderStatus?.models ?? [];
+    if (
+      !selection.model ||
+      (models.length > 0 && !models.some((model) => model.id === selection.model))
+    ) {
+      setSelection(defaultAgentSelection(provider, selectedProviderStatus));
+    }
+  }, [creating, provider, selectedProviderStatus, selection.model]);
 
   const create = async () => {
     const text = firstMessage.trim();
@@ -69,6 +97,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
         projectId,
         text ? Array.from(text).slice(0, 48).join("") : null,
         provider,
+        agentThreadOptions(provider, selection),
       );
       setCreating(false);
       setFirstMessage("");
@@ -207,8 +236,24 @@ export function ProjectPage({ projectId }: { projectId: string }) {
         <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
           <ProviderPicker
             value={provider}
-            onChange={setProvider}
+            onChange={(nextProvider) => {
+              setProvider(nextProvider);
+              setSelection(
+                defaultAgentSelection(
+                  nextProvider,
+                  providerStatuses.find((status) => status.provider === nextProvider),
+                ),
+              );
+            }}
             statuses={providerStatuses}
+            disabled={busy}
+          />
+          <ModelPicker
+            provider={provider}
+            status={selectedProviderStatus}
+            model={selection.model}
+            reasoningEffort={selection.reasoningEffort}
+            onChange={(model, reasoningEffort) => setSelection({ model, reasoningEffort })}
             disabled={busy}
           />
           <div className="field">

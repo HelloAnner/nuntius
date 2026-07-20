@@ -192,12 +192,26 @@ impl ConversationAccessMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentModelOption {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub is_default: bool,
+    pub default_reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub reasoning_efforts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentProviderStatus {
     pub provider: AgentProvider,
     pub label: String,
     pub available: bool,
     pub status: String,
     pub version: Option<String>,
+    #[serde(default)]
+    pub models: Vec<AgentModelOption>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
