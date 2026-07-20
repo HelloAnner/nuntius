@@ -18,7 +18,7 @@
 | 系统基础 | 完成 | 两个单二进制、两个 SQLite、配置/数据目录约束、健康检查、请求体上限、优雅退出 | 微服务、多活 |
 | 身份访问 | 完成 | bootstrap、Argon2 密码、Cookie Session、CSRF、多标签页 CSRF Token、一次性配对码、Ed25519 challenge、短期设备 Token | OIDC、MFA、找回密码、登录限流内核（应由入口代理补充） |
 | 设备管理 | 完成 | 列表/详情/改名/撤销、撤销立即关闭隧道、在线 Presence、心跳健康摘要、刷新与历史同步命令 | 设备分组、能力插件市场 |
-| Agent/CLI | 完成 | init/pair/run/start/stop/status/backup/paths、单实例锁、后台启动、日志、重连、SQLite 恢复 | systemd/launchd/Windows Service 安装器、`doctor` 诊断包 |
+| Agent/CLI | 完成 | init/pair/run/start/stop/status/backup/paths、单实例锁、macOS LaunchAgent 自动启动/异常重启、日志、重连、SQLite 恢复 | Linux systemd/Windows Service 安装器、独立救援进程、`doctor` 诊断包 |
 | App Server | 完成 | stdio JSONL、initialize、请求/响应/通知、审批反向请求、进程重启、超时 `unknown`、输出与日志脱敏上限 | 多 App Server 实例池、版本自动安装 |
 | 项目 | 完成 | allowed roots、目录引用创建项目、canonical path 唯一、项目摘要同步、`system_unassigned` 历史归属 | 项目暂停/恢复/移除、Git 状态扫描 |
 | Thread | 完成 | 本地/远程创建、列表、全局索引、归档/取消归档、历史发现、离线读取、limit/offset 分页遍历全部历史 | 搜索、标签、稳定 signed-cursor 分页 |
@@ -33,7 +33,7 @@
 | 存储生命周期 | 完成 | WAL、FULL synchronous、外键、busy timeout、migration、单目录锁、一致性 backup、journal retention、checkpoint | 磁盘压力自动降级/分层清理、自动恢复损坏 DB |
 | 安全 | 完成（MVP） | 所有权约束、CSRF、短期 Token、密钥文件权限、目录边界、symlink/隐藏目录拒绝、输入/帧/正文上限、HTTP 显式开关 | HTTP 链路加密、E2EE、密钥托管；HTTP 不能替代 TLS |
 | 可观测性 | 基础完成 | tracing 文本/JSON 日志、healthz/readyz、Client info、设备健康/队列深度 | Prometheus/OpenTelemetry exporter、诊断包 |
-| 发布运维 | 自动化完成 | Rust Ops、干净 checkout、latest-wins 队列、双平台构建、SCP 原子部署、Server desired Client 推送、Client 自更新回滚 | 安装包非对称签名、灰度发布、HTTPS 强制 |
+| 发布运维 | 自动化完成 | Rust Ops、干净 checkout、latest-wins 队列、双平台构建、SCP 原子部署、Server desired Client 推送、Client 60 秒启动观察/失败版本隔离/自更新回滚 | 安装包非对称签名、A/B Guardian、灰度发布、HTTPS 强制 |
 | 测试质量 | 核心自动化完成 | protocol wire tag、SQLite migration、inbox/outbox/history、幂等/sequence/ACK 防回退、多 CSRF、历史 hash/归属、目录隐藏/symlink、审批 CAS | 24 小时 soak、跨 OS CI、浏览器 E2E、网络故障矩阵 |
 | 历史汇总 | 完成 | 启动发现 active/archived、未归类兜底、批次 hash/大小/条数、revision、防跨设备覆盖、连续 cursor 完整性、服务端离线读取 | 全文搜索、历史导出、内容 E2EE |
 | 目录浏览 | 完成 | 实时 query、5 分钟 DB-backed opaque ref、canonicalize、allowed roots、隐藏目录过滤、symlink 拒绝、分页、项目创建时复验 | HMAC action token、可配置 root registry、symlink 白名单 |

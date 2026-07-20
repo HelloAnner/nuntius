@@ -111,6 +111,7 @@ pub struct PreparedUpdate {
     marker_path: PathBuf,
     from_sha: String,
     to_sha: String,
+    release_sequence: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,8 +127,18 @@ struct UpdateMarker {
     phase: MarkerPhase,
     from_sha: String,
     to_sha: String,
+    #[serde(default)]
+    release_sequence: u64,
     executable_path: PathBuf,
     previous_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RejectedRelease {
+    commit_sha: String,
+    #[serde(default)]
+    release_sequence: u64,
 }
 
 pub fn spawn_client_update_worker(
@@ -193,6 +204,16 @@ async fn prepare_client_update(
 ) -> Result<Option<PreparedUpdate>> {
     validate_client_release(config, release)?;
     if release.commit_sha == build_sha() {
+        return Ok(None);
+    }
+    if rejected_release(&config.data_dir)?
+        .is_some_and(|rejected| rejected.commit_sha == release.commit_sha)
+    {
+        tracing::warn!(
+            release_id = %release.release_id,
+            commit_sha = %release.commit_sha,
+            "ignoring client release that previously failed its startup probation"
+        );
         return Ok(None);
     }
     if release_is_stale(build_sequence(), release.release_sequence) {
@@ -290,6 +311,7 @@ async fn stage_update(
         marker_path: marker_path(&config.data_dir),
         from_sha: build_sha().into(),
         to_sha: commit_sha.to_owned(),
+        release_sequence,
     })
 }
 
@@ -441,6 +463,7 @@ impl PreparedUpdate {
             phase: MarkerPhase::Installed,
             from_sha: self.from_sha.clone(),
             to_sha: self.to_sha.clone(),
+            release_sequence: self.release_sequence,
             executable_path: self.executable_path.clone(),
             previous_path: self.previous_path.clone(),
         };
@@ -451,6 +474,9 @@ impl PreparedUpdate {
         let error = std::process::Command::new(&self.executable_path)
             .args(args)
             .exec();
+        if let Err(rejection_error) = record_rejected_release(&marker, &self.marker_path) {
+            tracing::warn!(error=?rejection_error, build=%marker.to_sha, "cannot quarantine failed client release");
+        }
         let rollback = restore_previous(&marker, &self.marker_path);
         if let Err(rollback_error) = rollback {
             return Err(anyhow::anyhow!(error)).context(format!(
@@ -510,10 +536,17 @@ pub fn mark_healthy(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn startup_update_pending(data_dir: &Path) -> Result<bool> {
+    Ok(read_marker(&marker_path(data_dir))?.is_some())
+}
+
 #[cfg(unix)]
 fn rollback_and_restart(marker: &UpdateMarker, marker_path: &Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
+    if let Err(error) = record_rejected_release(marker, marker_path) {
+        tracing::warn!(error=?error, build=%marker.to_sha, "cannot quarantine failed client release");
+    }
     restore_previous(marker, marker_path)?;
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let error = std::process::Command::new(&marker.executable_path)
@@ -569,6 +602,54 @@ fn marker_path(data_dir: &Path) -> PathBuf {
     data_dir.join("run/self-update.json")
 }
 
+fn rejected_release_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("run/rejected-client-release.json")
+}
+
+fn record_rejected_release(marker: &UpdateMarker, marker_path: &Path) -> Result<()> {
+    let data_dir = marker_path
+        .parent()
+        .and_then(Path::parent)
+        .context("self-update marker is outside the client data directory")?;
+    write_rejected_release(
+        &rejected_release_path(data_dir),
+        &RejectedRelease {
+            commit_sha: marker.to_sha.clone(),
+            release_sequence: marker.release_sequence,
+        },
+    )
+}
+
+fn write_rejected_release(path: &Path, rejected: &RejectedRelease) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec(rejected)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    set_private(&temporary)?;
+    replace_file(&temporary, path)?;
+    Ok(())
+}
+
+fn rejected_release(data_dir: &Path) -> Result<Option<RejectedRelease>> {
+    let path = rejected_release_path(data_dir);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(Some(
+        serde_json::from_slice(&bytes).context("decode rejected client release")?,
+    ))
+}
+
 fn write_marker(path: &Path, marker: &UpdateMarker) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -622,6 +703,7 @@ fn set_private(_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use flate2::{Compression, write::GzEncoder};
+    use tempfile::tempdir;
 
     #[test]
     fn release_sequence_never_moves_backwards_after_migration() {
@@ -630,6 +712,40 @@ mod tests {
         assert!(!release_is_stale(10, 11));
         assert!(release_is_stale(10, 10));
         assert!(release_is_stale(10, 9));
+    }
+
+    #[test]
+    fn rejected_release_is_persisted_for_future_update_checks() {
+        let root = tempdir().unwrap();
+        let marker_path = marker_path(root.path());
+        let marker = UpdateMarker {
+            phase: MarkerPhase::Booting,
+            from_sha: "a".repeat(40),
+            to_sha: "b".repeat(40),
+            release_sequence: 42,
+            executable_path: root.path().join("nuntius-client"),
+            previous_path: root.path().join("nuntius-client.previous"),
+        };
+
+        record_rejected_release(&marker, &marker_path).unwrap();
+
+        let rejected = rejected_release(root.path()).unwrap().unwrap();
+        assert_eq!(rejected.commit_sha, "b".repeat(40));
+        assert_eq!(rejected.release_sequence, 42);
+    }
+
+    #[test]
+    fn old_update_markers_default_the_release_sequence() {
+        let marker: UpdateMarker = serde_json::from_value(serde_json::json!({
+            "phase": "booting",
+            "fromSha": "a",
+            "toSha": "b",
+            "executablePath": "/tmp/nuntius-client",
+            "previousPath": "/tmp/nuntius-client.previous"
+        }))
+        .unwrap();
+
+        assert_eq!(marker.release_sequence, 0);
     }
 
     #[test]

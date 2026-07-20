@@ -179,6 +179,17 @@ nuntius-client start
 nuntius-client status
 ```
 
+macOS 上的 `start` 会安装并加载当前用户的 LaunchAgent，登录后自动启动，并在 Client
+异常退出时按 5 秒限速重新拉起；`stop` 会卸载并移除 LaunchAgent，因此显式停服后不会
+在下次登录时意外启动。升级自旧版后台进程时，首次需执行一次
+`nuntius-client stop && nuntius-client start`，后续自更新会继续处于 launchd 守护之下。
+`nuntius-client run` 仍保留为不安装系统服务的前台调试方式。
+
+自更新候选版本需连续运行 60 秒且关键后台任务保持存活后才会标记健康；存在运行中或
+恢复中的会话、正在处理的命令或待审批请求时延迟激活。候选版本在观察期失败后会回滚
+到 `.previous`，并把失败 commit 写入 `~/.nuntius/run/rejected-client-release.json`，
+相同版本不会被 Server 的 desired release 反复触发。
+
 停服后可运行 `nuntius-client backup`，数据库和设备端图片缓存会一起写入 `~/.nuntius/backups/`。
 
 前台调试使用 `nuntius-client run`；后台日志位于 `~/.nuntius/logs/nuntius-client.log`，本地页面默认访问 `http://127.0.0.1:7331/`。Client 通过 provider 层管理 `codex app-server`，并通过带 bearer token 的 loopback REST/WebSocket 连接 `kimi web`；两者都不会直接暴露到公网。

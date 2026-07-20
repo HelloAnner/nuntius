@@ -12,6 +12,7 @@ mod history_monitor;
 mod kimi;
 mod pairing;
 mod protocol;
+mod service;
 mod store;
 mod tunnel;
 
@@ -22,10 +23,11 @@ use config::ClientConfig;
 use executor::CommandExecutor;
 use fs2::FileExt;
 use nuntius_updater::{BuildInfo, UpdateConfig};
+#[cfg(not(target_os = "macos"))]
+use std::process::{Command as ProcessCommand, Stdio};
 use std::{
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
-    process::{Command as ProcessCommand, Stdio},
     sync::Arc,
     time::Duration,
 };
@@ -36,6 +38,16 @@ use tracing_subscriber::EnvFilter;
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const RUNTIME_HEALTH_INTERVAL: Duration = Duration::from_secs(5);
+const UPDATE_STARTUP_PROBATION: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy)]
+enum RunStopReason {
+    Server,
+    External,
+    Update,
+    CriticalTask(&'static str),
+}
 
 #[derive(Parser)]
 #[command(
@@ -82,6 +94,12 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Run update recovery before clap parses the daemon command. A candidate
+    // that accidentally breaks the `run` subcommand must still advance the
+    // boot marker so launchd's next attempt can restore the previous binary.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("run")) {
+        nuntius_updater::handle_startup(&config::data_dir()?)?;
+    }
     let cli = Cli::parse();
     match cli.command {
         Command::Init { force } => {
@@ -112,10 +130,7 @@ async fn main() -> Result<()> {
             allow_insecure_http,
             display_name,
         } => setup_device(server_url, allow_insecure_http, display_name).await,
-        Command::Run => {
-            nuntius_updater::handle_startup(&config::data_dir()?)?;
-            run().await
-        }
+        Command::Run => run().await,
         Command::Start => start(),
         Command::Stop => stop(),
         Command::Status => status(),
@@ -288,6 +303,7 @@ async fn run() -> Result<()> {
     init_tracing(&cfg);
     let _pid = PidGuard::acquire()?;
     let root = config::data_dir()?;
+    let mut update_probation_pending = nuntius_updater::startup_update_pending(&root)?;
     let store = ClientStore::open(&root).await?;
     let recovery_candidates = store.recover_process_state().await?;
     let (events, _) = tokio::sync::broadcast::channel(4096);
@@ -355,6 +371,7 @@ async fn run() -> Result<()> {
         .device_id
         .as_ref()
         .map(|_| tokio::spawn(tunnel::run_forever(executor.clone(), desired_release_tx)));
+    let runtime_store = executor.store.clone();
     let router = api::router(executor)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(CatchPanicLayer::new())
@@ -362,13 +379,7 @@ async fn run() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(cfg.local_bind)
         .await
         .with_context(|| format!("cannot bind local console {}", cfg.local_bind))?;
-    let health_data_dir = root.clone();
-    let health_marker_task = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        if let Err(error) = nuntius_updater::mark_healthy(&health_data_dir) {
-            tracing::warn!(error=?error, "cannot mark self-update healthy");
-        }
-    });
+    let probation_started = tokio::time::Instant::now();
     tracing::info!(bind=%cfg.local_bind,paired=cfg.device_id.is_some(),"Nuntius client running");
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(1);
     let update_task = cfg.auto_update.then(|| {
@@ -392,28 +403,83 @@ async fn run() -> Result<()> {
     let external_shutdown = shutdown_signal();
     tokio::pin!(external_shutdown);
     let mut prepared_update = None;
-    tokio::select! {
-        result = &mut server => result?,
-        _ = &mut external_shutdown => {
-            if let Some(tx) = graceful_tx.take() { let _ = tx.send(()); }
-            match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, &mut server).await {
-                Ok(result) => result?,
-                Err(_) => tracing::warn!("forcing shutdown after live connections exceeded drain timeout"),
+    let mut update_rx_open = update_task.is_some();
+    let mut runtime_health = tokio::time::interval(RUNTIME_HEALTH_INTERVAL);
+    runtime_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut update_defer_logged = false;
+    let stop_reason = loop {
+        tokio::select! {
+            result = &mut server => {
+                result?;
+                break RunStopReason::Server;
+            }
+            _ = &mut external_shutdown => break RunStopReason::External,
+            update = update_rx.recv(), if update_rx_open => {
+                update_rx_open = false;
+                prepared_update = update;
+                if let Some(update) = prepared_update.as_ref() {
+                    tracing::info!(target=%update.target_sha(), "client update staged; waiting for an idle and healthy activation window");
+                }
+            }
+            _ = runtime_health.tick() => {
+                if let Some(name) = finished_critical_task(
+                    &app_events_task,
+                    &kimi_event_stream_task,
+                    &kimi_events_task,
+                    &command_queue_task,
+                    &maintenance_task,
+                    &history_monitor_task,
+                    tunnel_task.as_ref(),
+                ) {
+                    tracing::error!(task=name, "critical client task exited unexpectedly");
+                    break RunStopReason::CriticalTask(name);
+                }
+                if update_probation_pending
+                    && probation_started.elapsed() >= UPDATE_STARTUP_PROBATION
+                {
+                    match nuntius_updater::mark_healthy(&root) {
+                        Ok(()) => update_probation_pending = false,
+                        Err(error) => {
+                            tracing::error!(error=?error, "cannot commit client update health marker");
+                            break RunStopReason::CriticalTask("self_update_health_marker");
+                        }
+                    }
+                }
+                if prepared_update.is_some() && !update_probation_pending {
+                    match update_activation_blocker(&runtime_store).await {
+                        Ok(None) => break RunStopReason::Update,
+                        Ok(Some(blocker)) if !update_defer_logged => {
+                            tracing::info!(%blocker, "deferring staged client update");
+                            update_defer_logged = true;
+                        }
+                        Ok(Some(_)) => {}
+                        Err(error) if !update_defer_logged => {
+                            tracing::warn!(error=?error, "cannot confirm an idle update window; deferring staged client update");
+                            update_defer_logged = true;
+                        }
+                        Err(_) => {}
+                    }
+                }
             }
         }
-        update = update_rx.recv(), if update_task.is_some() => {
-            prepared_update = update;
-            if let Some(tx) = graceful_tx.take() { let _ = tx.send(()); }
-            match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, &mut server).await {
-                Ok(result) => result?,
-                Err(_) => tracing::warn!("forcing update after live connections exceeded drain timeout"),
+    };
+    if !matches!(stop_reason, RunStopReason::Server) {
+        if let Some(tx) = graceful_tx.take() {
+            let _ = tx.send(());
+        }
+        match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, &mut server).await {
+            Ok(result) => result?,
+            Err(_) if matches!(stop_reason, RunStopReason::Update) => {
+                tracing::warn!("forcing update after live connections exceeded drain timeout")
+            }
+            Err(_) => {
+                tracing::warn!("forcing shutdown after live connections exceeded drain timeout")
             }
         }
     }
     if let Some(task) = update_task {
         task.abort();
     }
-    health_marker_task.abort();
     if let Some(task) = tunnel_task {
         task.abort()
     }
@@ -428,6 +494,9 @@ async fn run() -> Result<()> {
     command_queue_task.abort();
     maintenance_task.abort();
     agents.shutdown().await?;
+    if let RunStopReason::CriticalTask(name) = stop_reason {
+        bail!("critical client task exited unexpectedly: {name}")
+    }
     if let Some(update) = prepared_update {
         tracing::info!(target=%update.target_sha(), "activating self-update");
         update.activate()?;
@@ -435,39 +504,104 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+fn finished_critical_task(
+    app_events: &tokio::task::JoinHandle<()>,
+    kimi_event_stream: &tokio::task::JoinHandle<()>,
+    kimi_events: &tokio::task::JoinHandle<()>,
+    command_queue: &tokio::task::JoinHandle<()>,
+    maintenance: &tokio::task::JoinHandle<()>,
+    history_monitor: &tokio::task::JoinHandle<()>,
+    tunnel: Option<&tokio::task::JoinHandle<()>>,
+) -> Option<&'static str> {
+    [
+        ("app_events", app_events),
+        ("kimi_event_stream", kimi_event_stream),
+        ("kimi_events", kimi_events),
+        ("command_queue", command_queue),
+        ("maintenance", maintenance),
+        ("history_monitor", history_monitor),
+    ]
+    .into_iter()
+    .find_map(|(name, task)| task.is_finished().then_some(name))
+    .or_else(|| {
+        tunnel
+            .is_some_and(|task| task.is_finished())
+            .then_some("device_tunnel")
+    })
+}
+
+async fn update_activation_blocker(store: &ClientStore) -> Result<Option<String>> {
+    let (_, inbox, _, active) = store.counts().await?;
+    let approvals = store.pending_approval_count().await?;
+    Ok(update_activation_blocker_for_counts(
+        inbox, active, approvals,
+    ))
+}
+
+fn update_activation_blocker_for_counts(inbox: i64, active: i64, approvals: i64) -> Option<String> {
+    if active > 0 {
+        return Some(format!("{active} active or recovering thread(s)"));
+    }
+    if inbox > 0 {
+        return Some(format!("{inbox} accepted or applying command(s)"));
+    }
+    if approvals > 0 {
+        return Some(format!("{approvals} pending approval(s)"));
+    }
+    None
+}
+
 fn start() -> Result<()> {
     if let Some(pid) = running_pid()? {
         bail!("nuntius-client is already running with pid {pid}")
     }
-    let executable = std::env::current_exe()?;
-    let log_path = config::log_path()?;
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let stderr = stdout.try_clone()?;
-    let mut command = ProcessCommand::new(executable);
-    command
-        .arg("run")
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        return service::start();
     }
-    #[cfg(windows)]
+    #[cfg(not(target_os = "macos"))]
     {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x00000008 | 0x00000200);
+        let executable = std::env::current_exe()?;
+        let log_path = config::log_path()?;
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+        let stderr = stdout.try_clone()?;
+        let mut command = ProcessCommand::new(executable);
+        command
+            .arg("run")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x00000008 | 0x00000200);
+        }
+        let child = command.spawn()?;
+        println!("started nuntius-client with pid {}", child.id());
+        println!("log: {}", log_path.display());
+        Ok(())
     }
-    let child = command.spawn()?;
-    println!("started nuntius-client with pid {}", child.id());
-    println!("log: {}", log_path.display());
-    Ok(())
 }
 fn stop() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let managed_pid = running_pid()?;
+        if service::stop()? {
+            if let Some(pid) = managed_pid {
+                wait_until_stopped(pid)?;
+            }
+            println!("stopped nuntius-client launchd service");
+            return Ok(());
+        }
+    }
     let Some(pid) = running_pid()? else {
         println!("nuntius-client is not running");
         return Ok(());
@@ -489,11 +623,16 @@ fn stop() -> Result<()> {
         }
     }
     println!("sent shutdown signal to pid {pid}");
+    wait_until_stopped(pid)?;
+    println!("stopped nuntius-client pid {pid}");
+    Ok(())
+}
+
+fn wait_until_stopped(pid: u32) -> Result<()> {
     let deadline = std::time::Instant::now() + STOP_WAIT_TIMEOUT;
     loop {
         if !process_alive(pid) || !data_lock_is_held()? {
             let _ = running_pid()?;
-            println!("stopped nuntius-client pid {pid}");
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
@@ -504,8 +643,22 @@ fn stop() -> Result<()> {
 }
 fn status() -> Result<()> {
     match running_pid()? {
-        Some(pid) => println!("running (pid {pid})"),
-        None => println!("stopped"),
+        Some(pid) => {
+            #[cfg(target_os = "macos")]
+            if service::is_loaded()? {
+                println!("running (pid {pid}, supervised by launchd)");
+                return Ok(());
+            }
+            println!("running (pid {pid})");
+        }
+        None => {
+            #[cfg(target_os = "macos")]
+            if service::is_loaded()? {
+                println!("recovering (supervised by launchd)");
+                return Ok(());
+            }
+            println!("stopped");
+        }
     };
     Ok(())
 }
@@ -686,5 +839,22 @@ mod setup_tests {
         let result = configure_setup(&mut config, "http://47.97.154.221:8765/", false, None);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_activation_waits_for_active_work() {
+        assert_eq!(update_activation_blocker_for_counts(0, 0, 0), None);
+        assert_eq!(
+            update_activation_blocker_for_counts(0, 2, 0).as_deref(),
+            Some("2 active or recovering thread(s)")
+        );
+        assert_eq!(
+            update_activation_blocker_for_counts(1, 0, 0).as_deref(),
+            Some("1 accepted or applying command(s)")
+        );
+        assert_eq!(
+            update_activation_blocker_for_counts(0, 0, 3).as_deref(),
+            Some("3 pending approval(s)")
+        );
     }
 }
