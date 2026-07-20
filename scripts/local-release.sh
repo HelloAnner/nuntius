@@ -273,6 +273,18 @@ else
       --activate=false \
       --kubernetes=false
   fi
+  # Some macOS proxy/DNS combinations leave systemd-resolved's runtime stub absent
+  # after the VM boots. Repair only this dedicated builder profile before Docker
+  # resolves registries or package hosts.
+  colima --profile "$BUILDER_PROFILE" ssh -- \
+    sudo mkdir -p /run/systemd/resolve
+  printf '%s\n' \
+    'nameserver 114.114.114.114' \
+    'nameserver 223.5.5.5' \
+    'options timeout:2 attempts:3' \
+    | colima --profile "$BUILDER_PROFILE" ssh -- \
+      sudo tee /run/systemd/resolve/stub-resolv.conf >/dev/null
+  colima --profile "$BUILDER_PROFILE" ssh -- getent hosts quay.io >/dev/null
   docker --context "$DOCKER_CONTEXT" info >/dev/null
 
   mkdir -p "$STATE_DIR/cache/cargo-linux" "$STATE_DIR/cache/target-linux"
