@@ -69,28 +69,56 @@ export function NewThreadSheet({
   onClose,
   onCreated,
 }: {
-  deviceId: string;
-  projectId: string;
+  deviceId?: string;
+  projectId?: string;
   open: boolean;
   onClose: () => void;
-  onCreated: (threadId: string) => void;
+  onCreated: (threadId: string, deviceId: string, projectId: string) => void;
 }) {
   const toast = useToast();
   const qc = useQueryClient();
   const accessMode = useAccessMode((state) => state.mode);
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
+  const [scopeDeviceId, setScopeDeviceId] = useState(deviceId ?? "");
+  const [scopeProjectId, setScopeProjectId] = useState(projectId ?? "");
+  const effectiveDeviceId = deviceId ?? scopeDeviceId;
+  const effectiveProjectId = projectId ?? scopeProjectId;
+  const fixedScope = Boolean(deviceId && projectId);
+  const projects = useQuery({
+    queryKey: ["projects", effectiveDeviceId],
+    queryFn: () => api.projects(effectiveDeviceId),
+    enabled: open && Boolean(effectiveDeviceId),
+  });
   const [firstMessage, setFirstMessage] = useState("");
   const [provider, setProvider] = useState<AgentProvider>("codex");
   const [selection, setSelection] = useState<AgentSelection>(() =>
     defaultAgentSelection("codex"),
   );
   const [busy, setBusy] = useState(false);
-  const providerStatuses = devices.data?.find((device) => device.id === deviceId)?.providers ?? [];
+  const providerStatuses = devices.data?.find((device) => device.id === effectiveDeviceId)?.providers ?? [];
   const selectedProviderStatus = providerStatuses.find(
     (status) => status.provider === provider,
   );
   const providerAvailable =
     selectedProviderStatus?.available ?? provider === "codex";
+
+  useEffect(() => {
+    if (!open) return;
+    if (deviceId) setScopeDeviceId(deviceId);
+    else {
+      const current = devices.data?.find((device) => device.id === scopeDeviceId && device.status === "online");
+      if (!current) setScopeDeviceId(devices.data?.find((device) => device.status === "online")?.id ?? "");
+    }
+  }, [deviceId, devices.data, open, scopeDeviceId]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (projectId) setScopeProjectId(projectId);
+    else {
+      const available = (projects.data ?? []).filter((project) => project.kind === "workspace");
+      if (!available.some((project) => project.id === scopeProjectId)) setScopeProjectId(available[0]?.id ?? "");
+    }
+  }, [open, projectId, projects.data, scopeProjectId]);
 
   useEffect(() => {
     if (!open) return;
@@ -101,7 +129,7 @@ export function NewThreadSheet({
         providerStatuses.find((status) => status.provider === "codex"),
       ),
     );
-  }, [open]);
+  }, [effectiveDeviceId, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -116,13 +144,13 @@ export function NewThreadSheet({
 
   const create = async () => {
     const text = firstMessage.trim();
-    if (busy) return;
+    if (busy || !effectiveDeviceId || !effectiveProjectId) return;
     setBusy(true);
     const idemKey = newIdemKey();
     try {
       const receipt = await api.createThread(
-        deviceId,
-        projectId,
+        effectiveDeviceId,
+        effectiveProjectId,
         text ? Array.from(text).slice(0, 48).join("") : null,
         null,
         provider,
@@ -137,14 +165,14 @@ export function NewThreadSheet({
           created.thread!,
           ...(items ?? []).filter((item) => item.id !== created.threadId),
         ];
-        qc.setQueryData<ThreadSummary[]>(["projectThreads", deviceId, projectId], upsert);
+        qc.setQueryData<ThreadSummary[]>(["projectThreads", effectiveDeviceId, effectiveProjectId], upsert);
         qc.setQueryData<ThreadSummary[]>(["allThreads"], upsert);
       }
       setFirstMessage("");
       onClose();
-      void qc.invalidateQueries({ queryKey: ["projectThreads", deviceId, projectId] });
+      void qc.invalidateQueries({ queryKey: ["projectThreads", effectiveDeviceId, effectiveProjectId] });
       void qc.invalidateQueries({ queryKey: ["allThreads"] });
-      onCreated(created.threadId);
+      onCreated(created.threadId, effectiveDeviceId, effectiveProjectId);
       if (text) {
         const firstTurnKey = newIdemKey();
         liveStore.addOptimistic(created.threadId, firstTurnKey, text, [], firstTurnKey);
@@ -187,7 +215,40 @@ export function NewThreadSheet({
 
   return (
     <Sheet open={open} onClose={onClose} title="新建会话">
-      <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="new-thread-form">
+        {!fixedScope ? (
+          <div className="new-thread-scope">
+            <div className="field">
+              <label htmlFor="new-thread-device">设备</label>
+              <select
+                id="new-thread-device"
+                value={effectiveDeviceId}
+                onChange={(event) => {
+                  setScopeDeviceId(event.target.value);
+                  setScopeProjectId("");
+                }}
+                disabled={busy}
+              >
+                {(devices.data ?? []).filter((device) => device.status === "online").map((device) => (
+                  <option key={device.id} value={device.id}>{device.displayName}</option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="new-thread-project">项目</label>
+              <select
+                id="new-thread-project"
+                value={effectiveProjectId}
+                onChange={(event) => setScopeProjectId(event.target.value)}
+                disabled={busy || !effectiveDeviceId}
+              >
+                {(projects.data ?? []).filter((project) => project.kind === "workspace").map((project) => (
+                  <option key={project.id} value={project.id}>{project.displayName}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        ) : null}
         <ProviderPicker
           value={provider}
           onChange={(nextProvider) => {
@@ -211,19 +272,21 @@ export function NewThreadSheet({
           disabled={busy}
         />
         <div className="field">
-          <label htmlFor={`first-msg-${projectId}`}>第一条消息（可选）</label>
+          <label htmlFor={`first-msg-${effectiveProjectId || "new"}`}>第一条消息（可选）</label>
           <textarea
-            id={`first-msg-${projectId}`}
+            id={`first-msg-${effectiveProjectId || "new"}`}
             rows={4}
-            style={{ resize: "vertical", minHeight: 96 }}
             placeholder={`描述一下想让 ${provider === "kimi" ? "Kimi" : "Codex"} 做什么…`}
             value={firstMessage}
             onChange={(event) => setFirstMessage(event.target.value)}
           />
         </div>
-        <button className="btn primary block" onClick={create} disabled={busy || !providerAvailable}>
+        <div className="new-thread-actions">
+          <button className="btn outline" onClick={onClose} disabled={busy}>取消</button>
+          <button className="btn primary" onClick={create} disabled={busy || !providerAvailable || !effectiveDeviceId || !effectiveProjectId}>
           {busy ? "正在创建…" : "开始对话"}
-        </button>
+          </button>
+        </div>
       </div>
     </Sheet>
   );

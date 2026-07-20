@@ -11,6 +11,7 @@ import { AuthPage } from "./pages/Auth";
 import { DevicesPage } from "./pages/Devices";
 import { DevicePage } from "./pages/Device";
 import { ProjectPage } from "./pages/Project";
+import { ProjectsPage } from "./pages/Projects";
 import { ThreadPage } from "./pages/Thread";
 import { RecentsPage } from "./pages/Recents";
 import { ApprovalsPage } from "./pages/Approvals";
@@ -20,6 +21,7 @@ function Boot() {
   const qc = useQueryClient();
   const { session, setSession } = useSession();
   const theme = useThemeStore((s) => s.theme);
+  const route = useRoute((state) => state.route);
   useTheme(theme);
 
   setCsrfProvider(() => useSession.getState().session?.csrfToken ?? null);
@@ -46,7 +48,7 @@ function Boot() {
 
   if (info.isLoading || sessionQuery.isLoading) {
     return (
-      <div style={{ minHeight: "100dvh", display: "grid", placeItems: "center" }}>
+      <div className="boot-screen">
         <Spinner />
       </div>
     );
@@ -60,18 +62,18 @@ function Boot() {
   }
   if (!session) {
     return (
-      <div style={{ minHeight: "100dvh", display: "grid", placeItems: "center" }}>
+      <div className="boot-screen">
         <Spinner />
       </div>
     );
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell server-console">
       <NavRail />
       <div className="app-main">
         <RouterView />
-        <TabBar />
+        {route.name === "thread" || route.name === "recentThread" ? null : <TabBar />}
       </div>
     </div>
   );
@@ -84,6 +86,8 @@ function RouterView() {
       return <DevicesPage />;
     case "recents":
       return <RecentsPage />;
+    case "projects":
+      return <ProjectsPage />;
     case "recentThread":
       return <RecentThreadRoute threadId={route.threadId} />;
     case "approvals":
@@ -124,7 +128,7 @@ function RecentThreadRoute({ threadId }: { threadId: string }) {
 
   if (!thread) {
     return (
-      <div className="page" style={{ display: "grid", placeItems: "center" }}>
+      <div className="page boot-screen">
         <Spinner />
       </div>
     );

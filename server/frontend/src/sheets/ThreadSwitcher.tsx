@@ -69,7 +69,7 @@ export function ThreadSwitcher({
         />
       </div>
       {groups.length === 0 ? (
-        <div style={{ padding: 36, textAlign: "center", color: "var(--ink-3)", fontSize: 14 }}>
+        <div className="switcher-empty">
           没有匹配的会话
         </div>
       ) : (

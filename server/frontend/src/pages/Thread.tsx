@@ -68,7 +68,7 @@ export function ThreadPage({
   const accessMode = useAccessMode((state) => state.mode);
   const navigate = useNavigate();
   const { archive: archiveThread, busyIds } = useArchiveThreadAction();
-  const wide = useMedia("(min-width: 768px)");
+  const wide = useMedia("(min-width: 900px)");
   const fromRecents = navigationContext === "recents";
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -402,7 +402,7 @@ export function ThreadPage({
 
   if (!wide) {
     return (
-      <div className="page">
+      <div className="page thread-page">
         {topbar}
         {threadView}
         <ThreadSwitcher
@@ -432,7 +432,7 @@ export function ThreadPage({
     devices.data?.find((item) => item.id === id)?.displayName ?? "设备";
 
   return (
-    <div className="page">
+    <div className="page thread-page">
       <div className="detail-grid">
         <aside className="detail-side">
           <TopBar
@@ -463,7 +463,7 @@ export function ThreadPage({
                   headline={fromRecents ? "没有符合条件的会话" : "还没有会话"}
                 />
               ) : (
-                <div className="list-group" style={{ border: "none", background: "transparent" }}>
+                <div className="list-group detail-thread-list">
                   {sidebarThreads.map((item) => (
                     <SwipeActionRow
                       key={item.id}

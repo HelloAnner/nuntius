@@ -67,10 +67,10 @@ export function ApprovalsPage() {
   };
 
   return (
-    <div className="page">
-      <TopBar title="审批" trailing={<ConnIndicator />} />
+    <div className="page approvals-page">
+      <TopBar title="审批" subtitle="集中处理所有设备和会话发起的权限请求" trailing={<ConnIndicator />} />
       <div className="page-scroll">
-        <div className="page-col" style={{ maxWidth: 640 }}>
+        <div className="page-col console-page-col narrow-page-col">
           {pending.length === 0 && decided.length === 0 ? (
             <Empty
               icon={<IconShield size={24} />}
@@ -84,7 +84,7 @@ export function ApprovalsPage() {
                   {pending.map((a) => {
                     const enriched = enrich(a);
                     return (
-                      <div key={a.id} style={{ marginBottom: 14 }}>
+                      <div key={a.id} className="approval-inbox-item">
                         <ApprovalCard
                           approval={enriched}
                           onDecide={(d) => void decide(a, d)}
@@ -92,8 +92,7 @@ export function ApprovalsPage() {
                         />
                         {a.threadId ? (
                           <button
-                            className="btn quiet sm"
-                            style={{ marginTop: 6 }}
+                            className="btn quiet sm approval-thread-link"
                             onClick={() => {
                               const t = threads.data?.find((x) => x.id === a.threadId);
                               if (t) {
@@ -121,9 +120,9 @@ export function ApprovalsPage() {
                     {decided.map((a) => {
                       const e = enrich(a);
                       return (
-                        <div key={a.id} className="list-row" style={{ minHeight: 52 }}>
+                        <div key={a.id} className="list-row decided-approval-row">
                           <div className="grow">
-                            <div className="title" style={{ fontSize: 14 }}>
+                            <div className="title">
                               {e.threadTitle ?? "审批"} · {labelOf(e)}
                             </div>
                             <div className="sub">

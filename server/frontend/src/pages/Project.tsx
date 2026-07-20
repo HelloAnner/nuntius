@@ -94,7 +94,7 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
   };
 
   return (
-    <div className="page">
+    <div className="page project-detail-page">
       <TopBar
         title={project?.displayName ?? "项目"}
         subtitle={device
@@ -112,12 +112,12 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
         }
       />
       <div className="page-scroll">
-        <div className="page-col">
+        <div className="page-col console-page-col detail-page-col">
           {unassigned ? (
             <div className="notice-banner info compact">未归类 · 仅可查看历史</div>
           ) : null}
           {threads.isLoading ? (
-            <div style={{ display: "grid", placeItems: "center", padding: 48 }}>
+            <div className="content-state compact">
               <Spinner />
             </div>
           ) : sorted.length === 0 ? (

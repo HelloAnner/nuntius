@@ -60,6 +60,7 @@ export const useAccessMode = create<AccessModeState>((set) => ({
 export type Route =
   | { name: "devices" }
   | { name: "recents" }
+  | { name: "projects" }
   | { name: "approvals" }
   | { name: "settings" }
   | { name: "device"; deviceId: string }
@@ -73,6 +74,8 @@ export function routeToPath(r: Route): string {
       return "/";
     case "recents":
       return "/recents";
+    case "projects":
+      return "/projects";
     case "approvals":
       return "/approvals";
     case "settings":
@@ -92,6 +95,7 @@ export function pathToRoute(path: string): Route {
   const seg = path.split("/").filter(Boolean);
   if (seg.length === 0) return { name: "devices" };
   if (seg.length === 1 && seg[0] === "recents") return { name: "recents" };
+  if (seg.length === 1 && seg[0] === "projects") return { name: "projects" };
   if (seg.length === 1 && seg[0] === "approvals") return { name: "approvals" };
   if (seg.length === 1 && seg[0] === "settings") return { name: "settings" };
   if (seg.length === 2 && seg[0] === "d") {

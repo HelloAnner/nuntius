@@ -82,14 +82,14 @@ export function SettingsPage() {
     });
 
   return (
-    <div className="page">
-      <TopBar title="设置" trailing={<ConnIndicator />} />
+    <div className="page settings-page">
+      <TopBar title="设置" subtitle="账号、设备配对、代理权限与外观" trailing={<ConnIndicator />} />
       <div className="page-scroll">
-        <div className="page-col" style={{ maxWidth: 640 }}>
+        <div className="page-col console-page-col narrow-page-col">
           <div className="card settings-user">
             <Avatar text={initials(session?.loginName ?? "?")} tint={1} />
-            <div className="grow" style={{ flex: 1, minWidth: 0 }}>
-              <div className="title" style={{ fontSize: 16, fontWeight: 600 }}>
+            <div className="grow settings-user-copy">
+              <div className="title settings-user-name">
                 {session?.loginName}
               </div>
               <div className="sub num">会话有效期至 {fullTime(session?.expiresAt)}</div>
@@ -119,23 +119,23 @@ export function SettingsPage() {
           </div>
 
           <div className="section-label micro">设备配对</div>
-          <div className="card" style={{ padding: 16 }}>
+          <div className="card settings-panel">
             {pairing ? (
               <>
-                <div style={{ fontSize: 13, color: "var(--ink-2)" }}>
+                <div className="pairing-intro">
                   在要接入的电脑上运行，并按提示输入配对码：
                 </div>
                 <div className="pairing-code">{pairing.code}</div>
-                <div style={{ fontSize: 12.5, color: "var(--ink-3)", textAlign: "center" }}>
+                <div className="pairing-expiry">
                   <span className="mono">nuntius-client pair</span> · 配对码 {relTime(pairing.expiresAt)}过期
                 </div>
               </>
             ) : (
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div className="pairing-empty">
                 <span className="row-glyph">
                   <IconKey size={17} />
                 </span>
-                <div style={{ flex: 1 }} />
+                <div className="grow" />
                 <button className="btn primary sm" onClick={newPairingCode} disabled={busyPairing}>
                   {busyPairing ? <Spinner sm /> : null}
                   生成配对码
@@ -157,7 +157,7 @@ export function SettingsPage() {
                     online={d.status === "online" ? true : d.status === "offline" ? false : undefined}
                   />
                   <div className="grow">
-                    <div className="title" style={{ fontSize: 14.5 }}>{d.displayName}</div>
+                    <div className="title paired-device-name">{d.displayName}</div>
                     <div className="sub">
                       <span>{osLabel(d.osFamily, d.architecture)}</span>
                       {d.status === "online" || transient ? null : (
@@ -188,7 +188,7 @@ export function SettingsPage() {
           </div>
 
           <div className="section-label micro">外观</div>
-          <div className="card" style={{ padding: 16 }}>
+          <div className="card settings-panel">
             <Segmented
               options={
                 [

@@ -39,7 +39,7 @@ export function DevicePage({ deviceId }: { deviceId: string }) {
   const online = device?.status === "online";
 
   return (
-    <div className="page">
+    <div className="page device-detail-page">
       <TopBar
         title={device ? <>{device.displayName}<IconEdit size={13} /></> : "设备"}
         subtitle={device
@@ -52,7 +52,7 @@ export function DevicePage({ deviceId }: { deviceId: string }) {
         trailing={<ConnIndicator />}
       />
       <div className="page-scroll">
-        <div className="page-col">
+        <div className="page-col console-page-col detail-page-col">
           {device ? (
             <>
               {device.historyCompleteness === "backfilling" ? (
@@ -73,7 +73,7 @@ export function DevicePage({ deviceId }: { deviceId: string }) {
               </div>
 
               {projects.isLoading ? (
-                <div style={{ display: "grid", placeItems: "center", padding: 40 }}>
+                <div className="content-state compact">
                   <Spinner />
                 </div>
               ) : (projects.data ?? []).length === 0 ? (
@@ -102,7 +102,7 @@ export function DevicePage({ deviceId }: { deviceId: string }) {
               )}
             </>
           ) : (
-            <div style={{ display: "grid", placeItems: "center", padding: 60 }}>
+            <div className="content-state">
               <Spinner />
             </div>
           )}

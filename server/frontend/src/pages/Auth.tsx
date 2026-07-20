@@ -12,7 +12,7 @@ export function AuthPage({ initialized }: { initialized: boolean }) {
       <div className="auth-card">
         <div>
           <div className="auth-logo display">N</div>
-          <div className="auth-title display" style={{ marginTop: 18 }}>
+          <div className="auth-title display">
             Nuntius
           </div>
         </div>
@@ -54,7 +54,7 @@ function LoginForm() {
   };
 
   return (
-    <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+    <form onSubmit={submit} className="auth-form">
       <div className="field">
         <label htmlFor="login-name">用户名</label>
         <input
@@ -113,8 +113,8 @@ function BootstrapForm() {
   };
 
   return (
-    <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div className="notice-banner info" style={{ margin: 0 }}>
+    <form onSubmit={submit} className="auth-form">
+      <div className="notice-banner info auth-notice">
         在服务器数据目录中找到 <span className="mono">secrets/bootstrap-token</span> 文件，将其内容粘贴到下方。
       </div>
       <div className="field">
