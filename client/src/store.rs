@@ -7,7 +7,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -106,6 +106,15 @@ impl ClientStore {
     pub async fn recover_process_state(&self) -> Result<Vec<String>> {
         let stamp = now();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // `notLoaded` describes whether one App Server process has a thread in
+        // memory. Older clients persisted it as execution state, leaving idle
+        // terminal/IDE sessions permanently mislabeled in the browser.
+        sqlx::query(
+            "UPDATE threads SET status='idle',updated_at=? WHERE lower(status)='notloaded'",
+        )
+        .bind(&stamp)
+        .execute(&mut *tx)
+        .await?;
         // Preserve every conversation that may still be executing. `unknown`
         // with an in-progress turn covers clients upgraded from the previous
         // restart behavior, which changed only the thread status.
@@ -521,6 +530,33 @@ impl ClientStore {
             .await?;
         Ok(())
     }
+    pub async fn mark_stalled_codex_threads(&self, cutoff: &str) -> Result<Vec<String>> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let thread_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM threads WHERE provider='codex' AND status='active' AND last_activity_at IS NOT NULL AND julianday(last_activity_at)<=julianday(?) ORDER BY id",
+        )
+        .bind(cutoff)
+        .fetch_all(&mut *tx)
+        .await?;
+        if thread_ids.is_empty() {
+            tx.commit().await?;
+            return Ok(thread_ids);
+        }
+        let stamp = now();
+        for thread_id in &thread_ids {
+            sqlx::query("UPDATE turns SET status='stalled' WHERE thread_id=? AND status IN ('active','running','inProgress')")
+                .bind(thread_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("UPDATE threads SET status='stalled',updated_at=? WHERE id=?")
+                .bind(&stamp)
+                .bind(thread_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(thread_ids)
+    }
     pub async fn local_thread_id(&self, app_thread_id: &str) -> Result<Option<String>> {
         self.local_provider_thread_id(AgentProvider::Codex, app_thread_id)
             .await
@@ -906,7 +942,7 @@ impl ClientStore {
         let updated_at = unix_value_to_rfc3339(thread.get("updatedAt")).unwrap_or_else(now);
         let created_at =
             unix_value_to_rfc3339(thread.get("createdAt")).unwrap_or_else(|| updated_at.clone());
-        let status = value_status(thread.get("status"), "idle");
+        let status = imported_execution_status(thread);
         sqlx::query("INSERT INTO threads(id,project_id,provider,app_server_thread_id,title,status,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
             .bind(&id).bind(project_id).bind(provider.as_str()).bind(app_id).bind(title).bind(status).bind(&updated_at).bind(&created_at).bind(&updated_at)
             .execute(&self.pool).await?;
@@ -916,9 +952,17 @@ impl ClientStore {
         let title = imported_thread_title(thread);
         let stamp = unix_value_to_rfc3339(thread.get("updatedAt")).unwrap_or_else(now);
         let created_at = unix_value_to_rfc3339(thread.get("createdAt"));
-        let status = value_status(thread.get("status"), "idle");
-        sqlx::query("UPDATE threads SET title=?,status=?,created_at=COALESCE(?,created_at),last_activity_at=CASE WHEN last_activity_at IS NULL OR julianday(?)>julianday(last_activity_at) THEN ? ELSE last_activity_at END,updated_at=CASE WHEN julianday(?)>julianday(updated_at) THEN ? ELSE updated_at END WHERE id=?")
+        let raw_status = value_status(thread.get("status"), "idle");
+        let residency_only = is_not_loaded_status(&raw_status);
+        let status = if residency_only {
+            "idle"
+        } else {
+            raw_status.as_str()
+        };
+        sqlx::query("UPDATE threads SET title=?,status=CASE WHEN status='stalled' AND ?='active' THEN status WHEN ? AND status IN ('active','recovering','stalled') THEN status ELSE ? END,created_at=COALESCE(?,created_at),last_activity_at=CASE WHEN last_activity_at IS NULL OR julianday(?)>julianday(last_activity_at) THEN ? ELSE last_activity_at END,updated_at=CASE WHEN julianday(?)>julianday(updated_at) THEN ? ELSE updated_at END WHERE id=?")
         .bind(title)
+        .bind(&raw_status)
+        .bind(residency_only)
         .bind(status)
         .bind(created_at)
         .bind(&stamp)
@@ -931,13 +975,22 @@ impl ClientStore {
         Ok(())
     }
     pub async fn import_app_history(&self, thread_id: &str, thread: &Value) -> Result<()> {
-        for (turn_index, turn) in thread
+        let provider_status = value_status(thread.get("status"), "idle");
+        let residency_only = is_not_loaded_status(&provider_status);
+        let local_status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM threads WHERE id=?")
+                .bind(thread_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        let preserve_runtime = residency_only
+            || (provider_status == "active" && local_status.as_deref() == Some("stalled"));
+        let turns = thread
             .get("turns")
             .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut ordered_app_turn_ids = Vec::with_capacity(turns.len());
+        for turn in turns {
             // Commit per turn: a whole-thread transaction can hold the WAL write lock
             // for seconds on large histories and starve interactive writes.
             let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -945,23 +998,50 @@ impl ClientStore {
                 .get("id")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("App Server turn has no id"))?;
-            let turn_id = if let Some(id) = sqlx::query_scalar::<_, String>(
-                "SELECT id FROM turns WHERE thread_id=? AND app_server_turn_id=?",
-            )
-            .bind(thread_id)
-            .bind(app_turn)
-            .fetch_optional(&mut *tx)
-            .await?
-            {
-                id
-            } else {
-                new_id("trn")
-            };
+            ordered_app_turn_ids.push(app_turn.to_owned());
+            let existing =
+                sqlx::query("SELECT id FROM turns WHERE thread_id=? AND app_server_turn_id=?")
+                    .bind(thread_id)
+                    .bind(app_turn)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            let turn_id = existing
+                .as_ref()
+                .map(|row| row.get::<String, _>("id"))
+                .unwrap_or_else(|| new_id("trn"));
             let status = value_status(turn.get("status"), "completed");
             let started = unix_value_to_rfc3339(turn.get("startedAt"));
             let completed = unix_value_to_rfc3339(turn.get("completedAt"));
-            sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at,completed_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ordinal=excluded.ordinal,status=excluded.status,started_at=COALESCE(excluded.started_at,turns.started_at),completed_at=COALESCE(excluded.completed_at,turns.completed_at)")
-                .bind(&turn_id).bind(thread_id).bind(app_turn).bind(turn_index as i64+1).bind(status).bind(&started).bind(&completed).execute(&mut *tx).await?;
+            if existing.is_some() {
+                // `notLoaded` is App Server residency, not an execution verdict.
+                // Keep a newer rollout/live projection until its terminal event arrives.
+                sqlx::query("UPDATE turns SET status=CASE WHEN ? AND status IN ('active','running','inProgress','stalled') THEN status ELSE ? END,started_at=COALESCE(?,started_at),completed_at=CASE WHEN ? AND status IN ('active','running','inProgress','stalled') THEN completed_at ELSE COALESCE(?,completed_at) END WHERE id=?")
+                    .bind(preserve_runtime)
+                    .bind(&status)
+                    .bind(&started)
+                    .bind(preserve_runtime)
+                    .bind(&completed)
+                    .bind(&turn_id)
+                    .execute(&mut *tx)
+                    .await?;
+            } else {
+                let ordinal: i64 = sqlx::query_scalar(
+                    "SELECT COALESCE(MAX(ordinal),0)+1 FROM turns WHERE thread_id=?",
+                )
+                .bind(thread_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at,completed_at) VALUES(?,?,?,?,?,?,?)")
+                    .bind(&turn_id)
+                    .bind(thread_id)
+                    .bind(app_turn)
+                    .bind(ordinal)
+                    .bind(&status)
+                    .bind(&started)
+                    .bind(&completed)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             let mut claimed_item_ids = HashSet::new();
             for item in turn
                 .get("items")
@@ -1043,11 +1123,20 @@ impl ClientStore {
             }
             tx.commit().await?;
         }
+        self.normalize_turn_ordinals(thread_id, &ordered_app_turn_ids)
+            .await?;
         // `thread/read` is the upstream snapshot. Persist its thread status and
         // collapse contradictory historical turn flags before exposing the
         // snapshot to either frontend.
+        if preserve_runtime {
+            // `notLoaded` is process residency, while an old process-local
+            // `active` snapshot cannot revive a turn already classified as
+            // stalled. Fresh rollout lifecycle signals are authoritative for
+            // both cases and are applied by history_monitor.
+            return Ok(());
+        }
         let stamp = now();
-        let thread_status = value_status(thread.get("status"), "idle");
+        let thread_status = provider_status;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if thread_status == "active" {
             let current: Option<String> = sqlx::query_scalar(
@@ -1077,6 +1166,68 @@ impl ClientStore {
             .bind(thread_id)
             .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    async fn normalize_turn_ordinals(
+        &self,
+        thread_id: &str,
+        ordered_app_turn_ids: &[String],
+    ) -> Result<()> {
+        if ordered_app_turn_ids.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let rows = sqlx::query(
+            "SELECT id,app_server_turn_id,ordinal FROM turns WHERE thread_id=? ORDER BY ordinal,id",
+        )
+        .bind(thread_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut by_app_id = rows
+            .iter()
+            .filter_map(|row| {
+                row.get::<Option<String>, _>("app_server_turn_id")
+                    .map(|app_id| (app_id, row.get::<String, _>("id")))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut ordered_ids = ordered_app_turn_ids
+            .iter()
+            .filter_map(|app_id| by_app_id.remove(app_id))
+            .collect::<Vec<_>>();
+        let claimed = ordered_ids.iter().cloned().collect::<HashSet<_>>();
+        ordered_ids.extend(
+            rows.iter()
+                .map(|row| row.get::<String, _>("id"))
+                .filter(|id| !claimed.contains(id)),
+        );
+        let already_normalized = rows.len() == ordered_ids.len()
+            && rows
+                .iter()
+                .zip(&ordered_ids)
+                .enumerate()
+                .all(|(index, (row, id))| {
+                    row.get::<String, _>("id") == *id
+                        && row.get::<i64, _>("ordinal") == index as i64 + 1
+                });
+        if already_normalized {
+            tx.commit().await?;
+            return Ok(());
+        }
+        // Move all ordinals into a disjoint temporary range before assigning the
+        // canonical snapshot order, so SQLite's immediate UNIQUE constraint can
+        // never reject a valid reordering.
+        sqlx::query("UPDATE turns SET ordinal=-ordinal WHERE thread_id=?")
+            .bind(thread_id)
+            .execute(&mut *tx)
+            .await?;
+        for (index, id) in ordered_ids.iter().enumerate() {
+            sqlx::query("UPDATE turns SET ordinal=? WHERE id=?")
+                .bind(index as i64 + 1)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -1689,6 +1840,19 @@ fn value_status(value: Option<&Value>, fallback: &str) -> String {
         .to_string()
 }
 
+fn is_not_loaded_status(status: &str) -> bool {
+    status.eq_ignore_ascii_case("notloaded")
+}
+
+fn imported_execution_status(thread: &Value) -> String {
+    let status = value_status(thread.get("status"), "idle");
+    if is_not_loaded_status(&status) {
+        "idle".into()
+    } else {
+        status
+    }
+}
+
 fn unix_value_to_rfc3339(value: Option<&Value>) -> Option<String> {
     let value = value?;
     if let Some(text) = value.as_str() {
@@ -2129,6 +2293,176 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(active, 1);
+    }
+
+    #[tokio::test]
+    async fn not_loaded_snapshot_preserves_runtime_and_reorders_partial_turn_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_partial", "Partial", &workspace, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_thread(
+                "thr_partial",
+                "prj_partial",
+                "app_partial",
+                "Partial",
+                &json!({}),
+            )
+            .await
+            .unwrap();
+        // A rollout notification can create the currently active turn before
+        // App Server later reveals the older history that precedes it.
+        store
+            .mark_app_turn_started("thr_partial", Some("app_turn_later"))
+            .await
+            .unwrap();
+
+        store
+            .import_app_history(
+                "thr_partial",
+                &json!({
+                    "status":"notLoaded",
+                    "turns":[
+                        {"id":"app_turn_earlier","status":"completed","items":[]},
+                        {"id":"app_turn_later","status":"interrupted","items":[]}
+                    ]
+                }),
+            )
+            .await
+            .unwrap();
+
+        let rows = sqlx::query(
+            "SELECT app_server_turn_id,ordinal,status FROM turns WHERE thread_id='thr_partial' ORDER BY ordinal",
+        )
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].get::<String, _>("app_server_turn_id"),
+            "app_turn_earlier"
+        );
+        assert_eq!(rows[0].get::<i64, _>("ordinal"), 1);
+        assert_eq!(
+            rows[1].get::<String, _>("app_server_turn_id"),
+            "app_turn_later"
+        );
+        assert_eq!(rows[1].get::<i64, _>("ordinal"), 2);
+        assert_eq!(rows[1].get::<String, _>("status"), "inProgress");
+        assert_eq!(
+            store
+                .thread("thr_partial", "dev_test")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "active"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_codex_runtime_can_resume_from_the_same_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_stalled", "Stalled", &workspace, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_thread(
+                "thr_stalled",
+                "prj_stalled",
+                "app_stalled",
+                "Stalled",
+                &json!({}),
+            )
+            .await
+            .unwrap();
+        store
+            .mark_app_turn_started("thr_stalled", Some("app_turn_stalled"))
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE threads SET last_activity_at='2026-01-01T00:00:00Z' WHERE id='thr_stalled'",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            store
+                .mark_stalled_codex_threads("2026-01-02T00:00:00Z")
+                .await
+                .unwrap(),
+            vec!["thr_stalled"]
+        );
+        assert_eq!(
+            store
+                .thread("thr_stalled", "dev_test")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "stalled"
+        );
+
+        // A process-local App Server snapshot can stay `active` forever for a
+        // wedged task. Only a fresh rollout/live lifecycle event may revive it.
+        store
+            .import_provider_thread(
+                AgentProvider::Codex,
+                "prj_stalled",
+                &json!({"id":"app_stalled","name":"Stalled","status":"active"}),
+            )
+            .await
+            .unwrap();
+        store
+            .import_app_history(
+                "thr_stalled",
+                &json!({
+                    "status":"active",
+                    "turns":[{"id":"app_turn_stalled","status":"inProgress","items":[]}]
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .thread("thr_stalled", "dev_test")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "stalled"
+        );
+
+        store
+            .mark_app_turn_started("thr_stalled", Some("app_turn_stalled"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .thread("thr_stalled", "dev_test")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "active"
+        );
+        let turn_status: String = sqlx::query_scalar(
+            "SELECT status FROM turns WHERE thread_id='thr_stalled' AND app_server_turn_id='app_turn_stalled'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(turn_status, "inProgress");
     }
 
     #[tokio::test]

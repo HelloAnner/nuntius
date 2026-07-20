@@ -17,7 +17,7 @@ import {
   type LiveTurn,
   type ThreadLive,
 } from "../stream";
-import { clockTime, statusLabel } from "../format";
+import { clockTime, isRunningStatus, statusLabel } from "../format";
 import { AgentMessage, ApprovalCard, UserBubble, type ApprovalView } from "./items";
 import { Composer } from "./Composer";
 import { IconArrowDown } from "./icons";
@@ -357,7 +357,7 @@ export function ThreadView({
   const unmatchedLiveTurns = freshLiveTurnsForHistory(durableHistory, live.turns);
   const latestActiveHistory = [...durableHistory]
     .reverse()
-    .find((group) => ["active", "running", "inProgress"].includes(group.turn.status));
+    .find((group) => isRunningStatus(group.turn.status));
   // App Server item events do not always carry the local turn id. An unbound
   // live turn without its own prompt is an overlay for the durable active turn,
   // not a new conversation turn with another divider.
@@ -686,7 +686,7 @@ export function ThreadView({
         draftKey={draftKey}
         canSend={canSend}
         lockedReason={lockedReason}
-        running={running}
+        running={running || runtimeStatus === "stalled"}
         runtimeStatus={runtimeStatus}
         runtimeConnected={runtimeConnected}
         busy={busy}
@@ -708,7 +708,7 @@ function TurnMeta({
   startedAt: string | null;
   ordinal?: number;
 }) {
-  const active = status === "active" || status === "running";
+  const active = isRunningStatus(status);
   const quiet = status === "completed" || status === "idle";
   const time = clockTime(startedAt);
   const spoken = [ordinal ? `第 ${ordinal} 轮` : null, statusLabel(status), time].filter(Boolean).join("，");

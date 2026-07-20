@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compareThreadCreation, truncateEnd } from "./format";
+import { compareThreadCreation, isRunningStatus, statusLabel, truncateEnd } from "./format";
 
 describe("compareThreadCreation", () => {
   test("orders threads by creation time, newest first", () => {
@@ -37,5 +37,14 @@ describe("truncateEnd", () => {
 
   test("counts unicode characters instead of UTF-16 code units", () => {
     expect(truncateEnd("检查🧪测试流程", 5)).toBe("检查🧪测…");
+  });
+});
+
+describe("runtime status", () => {
+  test("normalizes provider-native running states", () => {
+    expect(["active", "running", "inProgress"].every(isRunningStatus)).toBe(true);
+    expect(isRunningStatus("notLoaded")).toBe(false);
+    expect(statusLabel("inProgress")).toBe("运行中");
+    expect(statusLabel("stalled")).toBe("长时间无活动");
   });
 });

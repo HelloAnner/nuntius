@@ -62,7 +62,9 @@ const STATUS_LABELS: Record<string, string> = {
   pairing: "配对中",
   revoked: "已撤销",
   active: "进行中",
+  inProgress: "运行中",
   recovering: "恢复中",
+  stalled: "长时间无活动",
   idle: "空闲",
   running: "运行中",
   interrupted: "已中断",
@@ -95,6 +97,10 @@ const STATUS_LABELS: Record<string, string> = {
 export function statusLabel(status: string | null | undefined): string {
   if (!status) return "—";
   return STATUS_LABELS[status] ?? status;
+}
+
+export function isRunningStatus(status: string | null | undefined): boolean {
+  return status === "active" || status === "running" || status === "inProgress";
 }
 
 export type Tone = "ok" | "warn" | "danger" | "info" | "muted";

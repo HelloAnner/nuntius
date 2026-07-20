@@ -133,6 +133,49 @@ svg {
     opacity: 0.35;
   }
 }
+@keyframes live-hop {
+  0%,
+  100% {
+    transform: translateY(1px) scale(0.92);
+  }
+  28% {
+    transform: translateY(-3px) scale(1.08);
+  }
+  46% {
+    transform: translateY(0) scale(0.98);
+  }
+  61% {
+    transform: translateY(-1.25px) scale(1.02);
+  }
+  74% {
+    transform: translateY(0) scale(1);
+  }
+}
+@keyframes live-ring {
+  0% {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+  18% {
+    opacity: 0.38;
+  }
+  78%,
+  100% {
+    opacity: 0;
+    transform: scale(2.45);
+  }
+}
+@keyframes live-halo {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 10%, transparent);
+  }
+  34% {
+    box-shadow:
+      0 0 0 4px color-mix(in srgb, currentColor 12%, transparent),
+      0 4px 12px color-mix(in srgb, currentColor 24%, transparent);
+  }
+}
 @keyframes sheet-up {
   from {
     transform: translateY(100%);

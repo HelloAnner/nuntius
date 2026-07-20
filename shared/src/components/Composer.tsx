@@ -1,6 +1,7 @@
 /* Message composer: autosizing textarea, send / steer / interrupt. */
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import type { AttachmentView } from "../types";
+import { isRunningStatus } from "../format";
 import { IconArrowUp, IconImage, IconStop, IconX } from "./icons";
 import { Spinner } from "./ui";
 
@@ -250,12 +251,15 @@ function RuntimeStatus({ status, connected }: { status: string | null; connected
   } else if (!status) {
     tone = "syncing";
     label = "正在确认状态";
-  } else if (status === "active") {
+  } else if (isRunningStatus(status)) {
     tone = "running";
     label = "正在运行";
   } else if (status === "recovering") {
     tone = "syncing";
     label = "正在恢复运行连接";
+  } else if (status === "stalled") {
+    tone = "warning";
+    label = "长时间无活动，可尝试中断或继续";
   } else if (status === "unknown" || status === "systemError") {
     tone = "warning";
     label = status === "systemError" ? "运行服务异常" : "状态待确认";

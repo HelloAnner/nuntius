@@ -10,6 +10,7 @@ import {
   IconFolder,
   IconGit,
   IconShield,
+  isRunningStatus,
   relTime,
   providerLabel,
   statusLabel,
@@ -185,7 +186,7 @@ export function ThreadRow({
   context?: string;
   onClick: () => void;
 }) {
-  const active = thread.status === "active";
+  const active = isRunningStatus(thread.status);
   const secondaryStatus =
     !thread.archived && !["active", "completed", "idle"].includes(thread.status)
       ? statusLabel(thread.status)
