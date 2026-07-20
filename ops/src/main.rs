@@ -236,7 +236,7 @@ async fn run(config: OpsConfig) -> Result<()> {
         loop {
             match remote_head(&detector_config).await {
                 Ok(sha) => {
-                    if last.as_deref() != Some(&sha) {
+                    if last.as_deref() != Some(sha.as_str()) {
                         tracing::info!(%sha, "repository change detected");
                         last = Some(sha.clone());
                         tx.send_replace(Some(sha));
@@ -256,7 +256,7 @@ async fn run(config: OpsConfig) -> Result<()> {
             }
             continue;
         };
-        if load_state(&config)?.deployed_sha.as_deref() == Some(&sha) {
+        if load_state(&config)?.deployed_sha.as_deref() == Some(sha.as_str()) {
             if rx.changed().await.is_err() {
                 return Ok(());
             }
@@ -311,7 +311,7 @@ async fn reconcile_once(config: OpsConfig, force: bool) -> Result<()> {
     let _lock = acquire_lock(&config)?;
     ensure_environment(&config).await?;
     let sha = remote_head(&config).await?;
-    if !force && load_state(&config)?.deployed_sha.as_deref() == Some(&sha) {
+    if !force && load_state(&config)?.deployed_sha.as_deref() == Some(sha.as_str()) {
         tracing::info!(%sha, "latest repository commit is already deployed");
         return Ok(());
     }
