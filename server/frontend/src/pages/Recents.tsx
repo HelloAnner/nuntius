@@ -1,5 +1,5 @@
 /* Cross-device session index with the filters from the new console design. */
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Empty,
@@ -16,6 +16,12 @@ import { api } from "../api";
 import { projectNameFrom, useArchiveThreadAction, useNavigate, useProjectNameMap } from "../hooks";
 import { useApprovals } from "../stores";
 import { FilterSelect, SearchField, ThreadRow, TopBar } from "../components";
+import {
+  isRecentStatusFilter,
+  loadRecentFilterPreferences,
+  saveRecentFilterPreferences,
+  type RecentFilterPreferences,
+} from "../recentsFilters";
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
 
 type SessionGroup = { key: string; label: string; threads: ThreadSummary[] };
@@ -24,9 +30,8 @@ export function RecentsPage() {
   const navigate = useNavigate();
   const { archive, busyIds } = useArchiveThreadAction();
   const approvals = useApprovals((state) => state.items);
-  const [deviceFilter, setDeviceFilter] = useState("all");
-  const [projectFilter, setProjectFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [filterPreferences, setFilterPreferences] = useState(loadRecentFilterPreferences);
+  const { deviceFilter, projectFilter, statusFilter } = filterPreferences;
   const [timeFilter, setTimeFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -34,6 +39,14 @@ export function RecentsPage() {
   const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const projectNames = useProjectNameMap((devices.data ?? []).map((device) => device.id));
+
+  const updateFilterPreferences = useCallback((update: Partial<RecentFilterPreferences>) => {
+    setFilterPreferences((current) => {
+      const next = { ...current, ...update };
+      saveRecentFilterPreferences(next);
+      return next;
+    });
+  }, []);
 
   const deviceName = (id: string) =>
     devices.data?.find((device) => device.id === id)?.displayName ?? "设备";
@@ -51,6 +64,20 @@ export function RecentsPage() {
       return [{ value, label: projectNameFrom(projectNames, thread.deviceId, thread.projectId) }];
     });
   }, [deviceFilter, projectNames, threads.data]);
+
+  useEffect(() => {
+    if (!devices.isSuccess || deviceFilter === "all") return;
+    if (!devices.data.some((device) => device.id === deviceFilter)) {
+      updateFilterPreferences({ deviceFilter: "all", projectFilter: "all" });
+    }
+  }, [deviceFilter, devices.data, devices.isSuccess, updateFilterPreferences]);
+
+  useEffect(() => {
+    if (!threads.isSuccess || projectFilter === "all") return;
+    if (!projectOptions.some((option) => option.value === projectFilter)) {
+      updateFilterPreferences({ projectFilter: "all" });
+    }
+  }, [projectFilter, projectOptions, threads.isSuccess, updateFilterPreferences]);
 
   const list = useMemo(() => {
     const now = Date.now();
@@ -115,7 +142,7 @@ export function RecentsPage() {
               <FilterSelect
                 label="设备"
                 value={deviceFilter}
-                onChange={(value) => { setDeviceFilter(value); setProjectFilter("all"); }}
+                onChange={(value) => updateFilterPreferences({ deviceFilter: value, projectFilter: "all" })}
                 options={[
                   { value: "all", label: "全部设备" },
                   ...(devices.data ?? []).map((device) => ({ value: device.id, label: device.displayName })),
@@ -124,7 +151,7 @@ export function RecentsPage() {
               <FilterSelect
                 label="项目"
                 value={projectFilter}
-                onChange={setProjectFilter}
+                onChange={(value) => updateFilterPreferences({ projectFilter: value })}
                 options={[{ value: "all", label: "全部项目" }, ...projectOptions]}
               />
               <FilterSelect
@@ -147,7 +174,13 @@ export function RecentsPage() {
                 ["idle", "空闲"],
                 ["archived", "已归档"],
               ].map(([value, label]) => (
-                <button key={value} className={statusFilter === value ? "on" : ""} onClick={() => setStatusFilter(value)}>
+                <button
+                  key={value}
+                  className={statusFilter === value ? "on" : ""}
+                  onClick={() => {
+                    if (isRecentStatusFilter(value)) updateFilterPreferences({ statusFilter: value });
+                  }}
+                >
                   {label}
                 </button>
               ))}
@@ -157,7 +190,7 @@ export function RecentsPage() {
             <FilterSelect
               label="设备"
               value={deviceFilter}
-              onChange={(value) => { setDeviceFilter(value); setProjectFilter("all"); }}
+              onChange={(value) => updateFilterPreferences({ deviceFilter: value, projectFilter: "all" })}
               options={[
                 { value: "all", label: "全部设备" },
                 ...(devices.data ?? []).map((device) => ({ value: device.id, label: device.displayName })),
@@ -166,14 +199,16 @@ export function RecentsPage() {
             <FilterSelect
               label="项目"
               value={projectFilter}
-              onChange={setProjectFilter}
+              onChange={(value) => updateFilterPreferences({ projectFilter: value })}
               options={[{ value: "all", label: "全部项目" }, ...projectOptions]}
             />
             <span className="accent-filter">
               <FilterSelect
                 label="状态"
                 value={statusFilter}
-                onChange={setStatusFilter}
+                onChange={(value) => {
+                  if (isRecentStatusFilter(value)) updateFilterPreferences({ statusFilter: value });
+                }}
                 options={[
                   { value: "all", label: "状态：全部" },
                   { value: "running", label: "运行中" },
