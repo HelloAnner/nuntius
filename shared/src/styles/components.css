@@ -820,15 +820,8 @@
   min-width: 0;
   font-size: 15px;
 }
-.msg-agent .caret {
-  display: inline-block;
-  width: 8px;
-  height: 17px;
-  margin-left: 2px;
-  vertical-align: -3px;
-  background: var(--accent-ink);
-  border-radius: 2px;
-  animation: caret-blink 1s steps(1) infinite;
+.msg-agent.streaming .mark {
+  animation: pulse-dot 1.2s ease-in-out infinite;
 }
 .thinking-indicator {
   width: 22px;
@@ -1105,11 +1098,17 @@
   );
 }
 .thread-runtime {
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  z-index: 1;
   width: 18px;
   height: 18px;
-  margin: 0 auto 3px;
+  margin: 0;
   display: grid;
   place-items: center;
+  transform: translateX(-50%);
+  pointer-events: none;
 }
 .thread-runtime-dot {
   width: 7px;

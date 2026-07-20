@@ -122,7 +122,10 @@ export const AgentMessage = memo(function AgentMessage({
   streaming?: boolean;
 }) {
   return (
-    <div className="msg-agent">
+    <div
+      className={`msg-agent${streaming ? " streaming" : ""}`}
+      aria-busy={streaming || undefined}
+    >
       <span className="mark">
         <IconSparkle size={13} />
       </span>
@@ -134,7 +137,6 @@ export const AgentMessage = memo(function AgentMessage({
             <span aria-hidden="true" />
           </span>
         ) : null}
-        {streaming && text ? <span className="caret" /> : null}
       </div>
     </div>
   );

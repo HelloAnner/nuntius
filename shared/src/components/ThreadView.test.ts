@@ -5,12 +5,26 @@ import type { HistoryGroup } from "./ThreadView";
 import {
   liveTurnIsInHistory,
   freshLiveTurnsForHistory,
+  isThreadNearBottom,
   orderedHistory,
   liveTurnHasTranscript,
   optimisticEchoIsInHistory,
   visibleHistoryItems,
   visibleLiveItems,
 } from "./ThreadView";
+
+describe("ThreadView bottom following", () => {
+  test("follows only within the final visual line", () => {
+    expect(isThreadNearBottom(1_000, 376, 600)).toBe(true);
+    expect(isThreadNearBottom(1_000, 375, 600)).toBe(false);
+  });
+
+  test("handles short content and elastic overscroll", () => {
+    expect(isThreadNearBottom(500, 0, 600)).toBe(true);
+    expect(isThreadNearBottom(1_000, 410, 600)).toBe(true);
+    expect(isThreadNearBottom(1_000, -20, 600)).toBe(false);
+  });
+});
 
 function item(key: string, kind: LiveItem["kind"], text: string): LiveItem {
   return {

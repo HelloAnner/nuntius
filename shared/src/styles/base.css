@@ -133,16 +133,6 @@ svg {
     opacity: 0.35;
   }
 }
-@keyframes caret-blink {
-  0%,
-  55% {
-    opacity: 1;
-  }
-  56%,
-  100% {
-    opacity: 0;
-  }
-}
 @keyframes sheet-up {
   from {
     transform: translateY(100%);

@@ -47,6 +47,18 @@ export interface HistoryGroup {
 
 const SEND_ERROR: CommandStatus[] = ["failed", "rejected", "unknown", "expired"];
 const EMPTY_COUNTS = new Map<string, number>();
+const BOTTOM_FOLLOW_EPSILON = 24;
+
+/** Treat only the final visual line as "at bottom". A wider threshold makes a
+ * reader who has deliberately moved upward vulnerable to the next resize. */
+export function isThreadNearBottom(
+  scrollHeight: number,
+  scrollTop: number,
+  clientHeight: number,
+): boolean {
+  const distance = scrollHeight - Math.max(0, scrollTop) - clientHeight;
+  return Math.max(0, distance) <= BOTTOM_FOLLOW_EPSILON;
+}
 
 /**
  * Keep the live transcript stable while App Server events and persisted history
@@ -418,16 +430,12 @@ export function ThreadView({
   });
 
   /* ---- scroll management ---- */
-  const scrollToBottom = useCallback((smooth = false) => {
+  const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const reducedMotion =
-      typeof window !== "undefined" &&
-      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    el.scrollTo({
-      top: el.scrollHeight,
-      behavior: smooth && !reducedMotion ? "smooth" : "auto",
-    });
+    // Direct assignment is deterministic and cannot leave the follow state in
+    // an intermediate position as a smooth scroll emits multiple events.
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
   }, []);
 
   const setFollowing = useCallback((following: boolean) => {
@@ -435,15 +443,15 @@ export function ThreadView({
     setStick((current) => (current === following ? current : following));
   }, []);
 
-  const followLatest = useCallback((smooth = false) => {
+  const followLatest = useCallback(() => {
     setFollowing(true);
-    scrollToBottom(smooth);
+    scrollToBottom();
   }, [scrollToBottom, setFollowing]);
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight < 140);
+    setFollowing(isThreadNearBottom(el.scrollHeight, el.scrollTop, el.clientHeight));
   }, [setFollowing]);
 
   const loadOlder = useCallback(() => {
@@ -455,8 +463,11 @@ export function ThreadView({
         scrollTop: el.scrollTop,
       };
     }
+    // Loading UI and prepended records both change the content box. Detach
+    // before either can be mistaken for new content that should be followed.
+    setFollowing(false);
     onLoadOlder?.();
-  }, [durableHistory, onLoadOlder]);
+  }, [durableHistory, onLoadOlder, setFollowing]);
 
   useLayoutEffect(() => {
     const anchor = prependAnchorRef.current;
@@ -467,6 +478,13 @@ export function ThreadView({
     setFollowing(false);
   }, [durableHistory, setFollowing]);
 
+  // React-owned transcript changes are known during the commit. Correct the
+  // bottom anchor before the browser paints instead of waiting one frame for a
+  // ResizeObserver delivery.
+  useLayoutEffect(() => {
+    if (stickRef.current) scrollToBottom();
+  });
+
   // Streaming Markdown, tool cards, syntax highlighting and approvals can all
   // change height without changing the number of rendered items. Observing the
   // actual content box keeps the latest response visible in every case.
@@ -475,7 +493,7 @@ export function ThreadView({
     const scroller = scrollRef.current;
     if (!content || !scroller || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      if (stickRef.current) scrollToBottom(false);
+      if (stickRef.current) scrollToBottom();
     });
     observer.observe(content);
     // The composer grows and shrinks independently of the transcript. Watching
@@ -503,7 +521,7 @@ export function ThreadView({
     } catch {
       /* unavailable or malformed session storage */
     }
-    if (!restored) followLatest(false);
+    if (!restored) followLatest();
     return () => {
       try {
         sessionStorage.setItem(
@@ -517,7 +535,7 @@ export function ThreadView({
   }, [draftKey, followLatest, loading, setFollowing]);
 
   const sendAndFollow = useCallback((text: string, attachments: AttachmentView[], clientMessageId: string) => {
-    followLatest(false);
+    followLatest();
     onSend(text, attachments, clientMessageId);
   }, [followLatest, onSend]);
 
@@ -658,7 +676,7 @@ export function ThreadView({
       </div>
 
       {!stick ? (
-        <button className="to-bottom" onClick={() => followLatest(true)}>
+        <button className="to-bottom" onClick={followLatest}>
           <IconArrowDown size={14} />
           回到底部
         </button>
