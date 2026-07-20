@@ -607,6 +607,7 @@ async fn create_archive(binary: &Path, destination: &Path) -> Result<()> {
     let name = binary.file_name().context("binary has no file name")?;
     let mut command = Command::new("tar");
     command
+        .arg("--no-xattrs")
         .args(["-czf"])
         .arg(destination)
         .arg("-C")
