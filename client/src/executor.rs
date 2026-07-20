@@ -1395,13 +1395,18 @@ impl CommandExecutor {
     }
 }
 
-pub async fn process_app_events(executor: CommandExecutor) {
-    let mut receiver = executor.agents.codex.subscribe();
+pub async fn process_app_events(
+    executor: CommandExecutor,
+    mut receiver: broadcast::Receiver<crate::app_server::AppServerEvent>,
+) {
     loop {
         match receiver.recv().await {
-            Ok(message) => {
-                if let Err(error) = process_app_event(&executor, message).await {
+            Ok(event) => {
+                if let Err(error) = process_app_event(&executor, event.payload.clone()).await {
                     tracing::warn!(error=?error,"failed to process App Server event")
+                }
+                if let Err(error) = executor.agents.codex.acknowledge(&event).await {
+                    tracing::warn!(error=?error, "failed to persist Agent Host event cursor");
                 }
             }
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -1424,6 +1429,10 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
         .and_then(Value::as_str)
         .unwrap_or("app_server/message");
     let params = message.get("params").cloned().unwrap_or(Value::Null);
+    if method == "nuntius/resync_required" {
+        executor.discover_all().await?;
+        return Ok(());
+    }
     let event_params = bounded_event_payload(&params, 256 * 1024);
     let app_thread = find_string(&params, &["threadId", "thread/id"]);
     let thread_id = if let Some(id) = app_thread.as_deref() {
@@ -2023,7 +2032,7 @@ done
         CommandExecutor {
             config: Arc::new(config.clone()),
             store,
-            agents: AgentRuntimes::new(Arc::new(config)),
+            agents: AgentRuntimes::new_local(Arc::new(config)),
             device_id: "dev_test".into(),
             display_name: Arc::new(RwLock::new("Nuntius Device".into())),
             events,

@@ -23,9 +23,22 @@ pub struct AgentThreadState {
 }
 
 impl AgentRuntimes {
-    pub fn new(config: Arc<ClientConfig>) -> Self {
+    pub fn new(config: Arc<ClientConfig>) -> Result<Self> {
+        #[cfg(unix)]
+        let kimi = KimiRuntime::new(config.clone());
+        #[cfg(not(unix))]
+        let kimi = KimiRuntime::new_host(config.clone());
+        Ok(Self {
+            codex: AppServerRuntime::new(config.clone())?,
+            kimi,
+            config,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn new_local(config: Arc<ClientConfig>) -> Self {
         Self {
-            codex: AppServerRuntime::new(config.clone()),
+            codex: AppServerRuntime::new_local(config.clone()),
             kimi: KimiRuntime::new(config.clone()),
             config,
         }
@@ -422,6 +435,10 @@ impl AgentRuntimes {
     pub async fn shutdown(&self) -> Result<()> {
         self.kimi.shutdown().await;
         self.codex.shutdown().await
+    }
+
+    pub async fn request_host_upgrade_if_idle(&self) -> Result<bool> {
+        self.codex.request_host_upgrade_if_idle().await
     }
 }
 

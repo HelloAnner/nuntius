@@ -44,7 +44,11 @@ Manifest 包含：
 6. `/api/v1/info` 验证通过后，Server 持久加载 `desired-client.json`。
 7. Server 向在线 Client 广播目标版本，并在每次重连时补发。
 8. Client 下载自己的平台产物，校验来源、大小、checksum、目标架构和内嵌构建身份。
-9. Client 原子安装并保留 previous；启动 self-check 失败时回滚。
+9. Client 原子安装并保留 previous，立即 `exec` 新二进制；独立 Agent Host 不退出，
+   provider turn 和本机事件日志继续运行。
+10. 新 Client 在启动屏障中恢复全部运行中会话和待审批状态，消费 Agent Host 游标之后的
+    事件，再启动命令入口、本地 HTTP 和公网 Tunnel。
+11. 启动 self-check 失败时回滚 Client；Agent Host 仅在 provider 空闲后独立轮换代码。
 
 滚动通道采用 latest-wins desired state，而不是逐 commit FIFO 部署：
 

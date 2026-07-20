@@ -11,9 +11,11 @@ use std::{
 };
 
 const LABEL: &str = "com.helloanner.nuntius-client";
+const AGENT_HOST_LABEL: &str = "com.helloanner.nuntius-agent-host";
 const LAUNCHCTL: &str = "/bin/launchctl";
 
 pub fn start() -> Result<()> {
+    ensure_agent_host()?;
     let executable = std::env::current_exe().context("resolve nuntius-client executable")?;
     let plist = launch_agent_path()?;
     let changed = install_launch_agent(&plist, &executable)?;
@@ -45,6 +47,31 @@ pub fn start() -> Result<()> {
     Ok(())
 }
 
+pub fn ensure_agent_host() -> Result<()> {
+    let executable = std::env::current_exe().context("resolve nuntius-client executable")?;
+    let plist = agent_host_launch_agent_path()?;
+    let contents = launch_agent_plist(
+        AGENT_HOST_LABEL,
+        &executable,
+        "agent-host",
+        &config::data_dir()?,
+        &config::log_path()?,
+        &std::env::var("PATH").unwrap_or_else(|_| {
+            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()
+        }),
+    );
+    install_launch_agent_contents(&plist, &contents)?;
+    if !is_label_loaded(AGENT_HOST_LABEL)? {
+        let domain = launch_domain();
+        checked_launchctl([
+            OsStr::new("bootstrap"),
+            OsStr::new(domain.as_str()),
+            plist.as_os_str(),
+        ])?;
+    }
+    Ok(())
+}
+
 /// Stops launchd ownership and removes the plist so an explicit `stop` remains
 /// stopped across the next login. `start` recreates it atomically.
 pub fn stop() -> Result<bool> {
@@ -65,20 +92,30 @@ pub fn stop() -> Result<bool> {
 }
 
 pub fn is_loaded() -> Result<bool> {
-    let target = launch_target();
+    is_label_loaded(LABEL)
+}
+
+fn is_label_loaded(label: &str) -> Result<bool> {
+    let target = launch_target_for(label);
     let output = launchctl([OsStr::new("print"), OsStr::new(target.as_str())])?;
     Ok(output.status.success())
 }
 
 fn install_launch_agent(path: &Path, executable: &Path) -> Result<bool> {
     let contents = launch_agent_plist(
+        LABEL,
         executable,
+        "run",
         &config::data_dir()?,
         &config::log_path()?,
         &std::env::var("PATH").unwrap_or_else(|_| {
             "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()
         }),
     );
+    install_launch_agent_contents(path, &contents)
+}
+
+fn install_launch_agent_contents(path: &Path, contents: &str) -> Result<bool> {
     if fs::read(path).ok().as_deref() == Some(contents.as_bytes()) {
         return Ok(false);
     }
@@ -100,7 +137,14 @@ fn install_launch_agent(path: &Path, executable: &Path) -> Result<bool> {
     Ok(true)
 }
 
-fn launch_agent_plist(executable: &Path, data_dir: &Path, log_path: &Path, path: &str) -> String {
+fn launch_agent_plist(
+    label: &str,
+    executable: &Path,
+    subcommand: &str,
+    data_dir: &Path,
+    log_path: &Path,
+    path: &str,
+) -> String {
     let home = data_dir.parent().unwrap_or(data_dir);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -112,7 +156,7 @@ fn launch_agent_plist(executable: &Path, data_dir: &Path, log_path: &Path, path:
   <key>ProgramArguments</key>
   <array>
     <string>{executable}</string>
-    <string>run</string>
+    <string>{subcommand}</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -144,7 +188,8 @@ fn launch_agent_plist(executable: &Path, data_dir: &Path, log_path: &Path, path:
 </dict>
 </plist>
 "#,
-        label = LABEL,
+        label = label,
+        subcommand = subcommand,
         executable = xml_escape(&executable.to_string_lossy()),
         data_dir = xml_escape(&data_dir.to_string_lossy()),
         log_path = xml_escape(&log_path.to_string_lossy()),
@@ -163,6 +208,16 @@ fn launch_agent_path() -> Result<PathBuf> {
         .join(format!("{LABEL}.plist")))
 }
 
+fn agent_host_launch_agent_path() -> Result<PathBuf> {
+    let home = config::data_dir()?
+        .parent()
+        .context("client data directory has no home directory")?
+        .to_path_buf();
+    Ok(home
+        .join("Library/LaunchAgents")
+        .join(format!("{AGENT_HOST_LABEL}.plist")))
+}
+
 fn launch_domain() -> String {
     // SAFETY: geteuid has no preconditions and does not dereference memory.
     let uid = unsafe { libc::geteuid() };
@@ -170,7 +225,11 @@ fn launch_domain() -> String {
 }
 
 fn launch_target() -> String {
-    format!("{}/{LABEL}", launch_domain())
+    launch_target_for(LABEL)
+}
+
+fn launch_target_for(label: &str) -> String {
+    format!("{}/{label}", launch_domain())
 }
 
 fn checked_launchctl<'a>(arguments: impl IntoIterator<Item = &'a OsStr>) -> Result<Output> {
@@ -208,7 +267,9 @@ mod tests {
     #[test]
     fn launch_agent_escapes_paths_and_keeps_expected_supervision() {
         let plist = launch_agent_plist(
+            LABEL,
             Path::new("/Applications/Nuntius & Tools/nuntius-client"),
+            "run",
             Path::new("/Users/test/.nuntius"),
             Path::new("/Users/test/.nuntius/logs/client.log"),
             "/usr/bin:/A&B/bin",

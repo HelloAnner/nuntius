@@ -149,7 +149,10 @@ startup_timeout_seconds = 20
 - 只执行向前迁移，不自动降级数据库。
 - 新版本先兼容旧配置字段。
 - 更新过程中保留上一二进制和配置备份以便回滚。
-- 活跃 Turn 时默认延迟自动更新。
+- Client 与 Agent Host 分进程运行；Client 更新立即激活，Agent Host 和 provider 继续承载
+  活跃 Turn，并缓存 Client 短暂离线期间的事件。
+- 新 Client 必须恢复全部运行态投影后才能开放命令入口和设备 Tunnel；Agent Host 的代码
+  轮换才需要等待 provider 空闲。
 
 ## 11. 健康状态
 

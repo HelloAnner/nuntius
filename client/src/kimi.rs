@@ -41,10 +41,19 @@ pub struct KimiRuntime {
     approvals_seen: Arc<Mutex<HashSet<String>>>,
     subscriptions_changed: Arc<Notify>,
     events: broadcast::Sender<Value>,
+    owns_process: bool,
 }
 
 impl KimiRuntime {
     pub fn new(config: Arc<ClientConfig>) -> Self {
+        Self::with_process_ownership(config, false)
+    }
+
+    pub fn new_host(config: Arc<ClientConfig>) -> Self {
+        Self::with_process_ownership(config, true)
+    }
+
+    fn with_process_ownership(config: Arc<ClientConfig>, owns_process: bool) -> Self {
         let (events, _) = broadcast::channel(4096);
         Self {
             config,
@@ -59,6 +68,7 @@ impl KimiRuntime {
             approvals_seen: Arc::new(Mutex::new(HashSet::new())),
             subscriptions_changed: Arc::new(Notify::new()),
             events,
+            owns_process,
         }
     }
 
@@ -145,6 +155,21 @@ impl KimiRuntime {
         if let Ok(meta) = self.probe_meta().await {
             return Ok(meta);
         }
+        if !self.owns_process {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Ok(meta) = self.probe_meta().await {
+                    return Ok(meta);
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    bail!(
+                        "Kimi service managed by the Agent Host did not become ready at {}",
+                        self.config.kimi_server_url
+                    )
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
         {
             let mut process = self.process.lock().await;
             let must_start = match process.as_mut() {
@@ -159,7 +184,10 @@ impl KimiRuntime {
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
-                    .kill_on_drop(true);
+                    // The Agent Host can rotate independently of provider work. An
+                    // explicitly owned process is stopped through `shutdown`; an
+                    // abrupt Host replacement must not terminate active Kimi turns.
+                    .kill_on_drop(false);
                 *process =
                     Some(command.spawn().with_context(|| {
                         format!("failed to start `{}`", self.config.kimi_command)

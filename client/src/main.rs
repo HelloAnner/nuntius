@@ -1,4 +1,6 @@
 mod agent;
+#[cfg(unix)]
+mod agent_host;
 mod api;
 mod app_server;
 mod assets;
@@ -91,6 +93,9 @@ enum Command {
     Backup,
     Paths,
     BuildInfo,
+    #[cfg(unix)]
+    #[command(hide = true)]
+    AgentHost,
 }
 
 #[tokio::main]
@@ -156,7 +161,16 @@ async fn main() -> Result<()> {
             );
             Ok(())
         }
+        #[cfg(unix)]
+        Command::AgentHost => run_agent_host().await,
     }
+}
+
+#[cfg(unix)]
+async fn run_agent_host() -> Result<()> {
+    let config = Arc::new(ClientConfig::load()?);
+    init_tracing(&config);
+    agent_host::run(config).await
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -302,6 +316,10 @@ fn copy_private_tree(source: &Path, destination: &Path) -> Result<()> {
 async fn run() -> Result<()> {
     let cfg = Arc::new(ClientConfig::load()?);
     init_tracing(&cfg);
+    #[cfg(target_os = "macos")]
+    service::ensure_agent_host()?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    agent_host::ensure_started()?;
     let _pid = PidGuard::acquire()?;
     let root = config::data_dir()?;
     let mut update_probation_pending = nuntius_updater::startup_update_pending(&root)?;
@@ -309,7 +327,7 @@ async fn run() -> Result<()> {
     let recovery_candidates = store.recover_process_state().await?;
     let (events, _) = tokio::sync::broadcast::channel(4096);
     let (command_acks, _) = tokio::sync::broadcast::channel(1024);
-    let agents = AgentRuntimes::new(cfg.clone());
+    let agents = AgentRuntimes::new(cfg.clone())?;
     let device_id = cfg.device_id.clone().unwrap_or_else(|| "unpaired".into());
     let executor = CommandExecutor {
         config: cfg.clone(),
@@ -324,7 +342,12 @@ async fn run() -> Result<()> {
     };
     // Subscribe before `thread/resume`: resumed threads may begin streaming
     // notifications as soon as the App Server accepts the request.
-    let app_events_task = tokio::spawn(executor::process_app_events(executor.clone()));
+    let app_event_receiver = agents.codex.subscribe();
+    let codex_event_stream_task = tokio::spawn(agents.codex.clone().run_event_stream());
+    let app_events_task = tokio::spawn(executor::process_app_events(
+        executor.clone(),
+        app_event_receiver,
+    ));
     let kimi_event_stream_task = tokio::spawn(agents.kimi.clone().run_event_stream());
     let kimi_events_task = tokio::spawn(executor::process_kimi_events(executor.clone()));
     if !recovery_candidates.is_empty() {
@@ -337,14 +360,13 @@ async fn run() -> Result<()> {
     // project the old process state until every candidate received one resume
     // attempt and was either resolved or explicitly left as `recovering`.
     let pending_recovery = executor.recover_threads_once(&recovery_candidates).await;
-    let startup_recovery_task = if pending_recovery.is_empty() {
-        None
-    } else {
-        let recovery = executor.clone();
-        Some(tokio::spawn(async move {
-            recovery.retry_thread_recovery(pending_recovery).await;
-        }))
-    };
+    if !pending_recovery.is_empty() {
+        // The Agent Host keeps provider work alive across the Client process
+        // replacement. Finish reattaching every durable runtime projection
+        // before commands, HTTP and the public device tunnel can expose the new
+        // process as ready.
+        executor.retry_thread_recovery(pending_recovery).await;
+    }
     let command_queue_task = tokio::spawn(command_queue::run(executor.clone()));
     let maintenance_store = executor.store.clone();
     let maintenance_task = tokio::spawn(async move {
@@ -374,6 +396,7 @@ async fn run() -> Result<()> {
         .as_ref()
         .map(|_| tokio::spawn(tunnel::run_forever(executor.clone(), desired_release_tx)));
     let runtime_store = executor.store.clone();
+    let runtime_agents = agents.clone();
     let router = api::router(executor)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(CatchPanicLayer::new())
@@ -408,7 +431,7 @@ async fn run() -> Result<()> {
     let mut update_rx_open = update_task.is_some();
     let mut runtime_health = tokio::time::interval(RUNTIME_HEALTH_INTERVAL);
     runtime_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut update_defer_logged = false;
+    let mut next_host_upgrade_check = tokio::time::Instant::now();
     let stop_reason = loop {
         tokio::select! {
             result = &mut server => {
@@ -420,11 +443,15 @@ async fn run() -> Result<()> {
                 update_rx_open = false;
                 prepared_update = update;
                 if let Some(update) = prepared_update.as_ref() {
-                    tracing::info!(target=%update.target_sha(), "client update staged; waiting for an idle and healthy activation window");
+                    tracing::info!(target=%update.target_sha(), "client update staged; activating immediately while provider work remains in the Agent Host");
+                    if client_update_ready(true, update_probation_pending) {
+                        break RunStopReason::Update;
+                    }
                 }
             }
             _ = runtime_health.tick() => {
                 if let Some(name) = finished_critical_task(
+                    &codex_event_stream_task,
                     &app_events_task,
                     &kimi_event_stream_task,
                     &kimi_events_task,
@@ -448,19 +475,21 @@ async fn run() -> Result<()> {
                         }
                     }
                 }
-                if prepared_update.is_some() && !update_probation_pending {
-                    match update_activation_blocker(&runtime_store).await {
-                        Ok(None) => break RunStopReason::Update,
-                        Ok(Some(blocker)) if !update_defer_logged => {
-                            tracing::info!(%blocker, "deferring staged client update");
-                            update_defer_logged = true;
-                        }
+                if client_update_ready(prepared_update.is_some(), update_probation_pending) {
+                    break RunStopReason::Update;
+                }
+                if !update_probation_pending
+                    && tokio::time::Instant::now() >= next_host_upgrade_check
+                {
+                    next_host_upgrade_check = tokio::time::Instant::now() + Duration::from_secs(60);
+                    match host_upgrade_blocker(&runtime_store).await {
+                        Ok(None) => match runtime_agents.request_host_upgrade_if_idle().await {
+                            Ok(true) => tracing::info!("rotating idle Agent Host to the current Client release"),
+                            Ok(false) => {}
+                            Err(error) => tracing::warn!(error=?error, "Agent Host release check failed"),
+                        },
                         Ok(Some(_)) => {}
-                        Err(error) if !update_defer_logged => {
-                            tracing::warn!(error=?error, "cannot confirm an idle update window; deferring staged client update");
-                            update_defer_logged = true;
-                        }
-                        Err(_) => {}
+                        Err(error) => tracing::warn!(error=?error, "cannot inspect Agent Host upgrade window"),
                     }
                 }
             }
@@ -486,12 +515,10 @@ async fn run() -> Result<()> {
     if let Some(task) = tunnel_task {
         task.abort()
     }
-    if let Some(task) = startup_recovery_task {
-        task.abort();
-    }
     discovery_task.abort();
     history_monitor_task.abort();
     runtime_reconciler_task.abort();
+    codex_event_stream_task.abort();
     app_events_task.abort();
     kimi_event_stream_task.abort();
     kimi_events_task.abort();
@@ -509,6 +536,7 @@ async fn run() -> Result<()> {
 }
 
 fn finished_critical_task(
+    codex_event_stream: &tokio::task::JoinHandle<()>,
     app_events: &tokio::task::JoinHandle<()>,
     kimi_event_stream: &tokio::task::JoinHandle<()>,
     kimi_events: &tokio::task::JoinHandle<()>,
@@ -519,6 +547,7 @@ fn finished_critical_task(
     tunnel: Option<&tokio::task::JoinHandle<()>>,
 ) -> Option<&'static str> {
     [
+        ("codex_event_stream", codex_event_stream),
         ("app_events", app_events),
         ("kimi_event_stream", kimi_event_stream),
         ("kimi_events", kimi_events),
@@ -536,15 +565,13 @@ fn finished_critical_task(
     })
 }
 
-async fn update_activation_blocker(store: &ClientStore) -> Result<Option<String>> {
+async fn host_upgrade_blocker(store: &ClientStore) -> Result<Option<String>> {
     let (_, inbox, _, active) = store.counts().await?;
     let approvals = store.pending_approval_count().await?;
-    Ok(update_activation_blocker_for_counts(
-        inbox, active, approvals,
-    ))
+    Ok(host_upgrade_blocker_for_counts(inbox, active, approvals))
 }
 
-fn update_activation_blocker_for_counts(inbox: i64, active: i64, approvals: i64) -> Option<String> {
+fn host_upgrade_blocker_for_counts(inbox: i64, active: i64, approvals: i64) -> Option<String> {
     if active > 0 {
         return Some(format!("{active} active or recovering thread(s)"));
     }
@@ -555,6 +582,10 @@ fn update_activation_blocker_for_counts(inbox: i64, active: i64, approvals: i64)
         return Some(format!("{approvals} pending approval(s)"));
     }
     None
+}
+
+fn client_update_ready(prepared: bool, probation_pending: bool) -> bool {
+    prepared && !probation_pending
 }
 
 fn start() -> Result<()> {
@@ -848,19 +879,28 @@ mod setup_tests {
     }
 
     #[test]
-    fn update_activation_waits_for_active_work() {
-        assert_eq!(update_activation_blocker_for_counts(0, 0, 0), None);
+    fn agent_host_upgrade_waits_for_active_work() {
+        assert_eq!(host_upgrade_blocker_for_counts(0, 0, 0), None);
         assert_eq!(
-            update_activation_blocker_for_counts(0, 2, 0).as_deref(),
+            host_upgrade_blocker_for_counts(0, 2, 0).as_deref(),
             Some("2 active or recovering thread(s)")
         );
         assert_eq!(
-            update_activation_blocker_for_counts(1, 0, 0).as_deref(),
+            host_upgrade_blocker_for_counts(1, 0, 0).as_deref(),
             Some("1 accepted or applying command(s)")
         );
         assert_eq!(
-            update_activation_blocker_for_counts(0, 0, 3).as_deref(),
+            host_upgrade_blocker_for_counts(0, 0, 3).as_deref(),
             Some("3 pending approval(s)")
         );
+    }
+
+    #[test]
+    fn client_update_activation_never_waits_for_conversations() {
+        assert!(client_update_ready(true, false));
+        assert!(!client_update_ready(false, false));
+        // Startup probation protects the rollback chain; conversation counts
+        // are deliberately absent from the Client activation decision.
+        assert!(!client_update_ready(true, true));
     }
 }

@@ -115,22 +115,18 @@ impl ClientStore {
         .bind(&stamp)
         .execute(&mut *tx)
         .await?;
-        // Preserve every conversation that may still be executing. `unknown`
-        // with an in-progress turn covers clients upgraded from the previous
-        // restart behavior, which changed only the thread status.
+        // Preserve every conversation that may still be executing or waiting
+        // for a provider decision. The Agent Host survives Client replacement,
+        // so these projections remain actionable after the new Client attaches.
+        // Looking at the whole runtime projection also recovers older releases
+        // whose thread row drifted away from an active turn or item.
         let recovery_threads = sqlx::query_scalar(
-            "SELECT t.id FROM threads t WHERE t.status IN ('active','recovering') OR (t.status='unknown' AND EXISTS(SELECT 1 FROM turns r WHERE r.thread_id=t.id AND r.status IN ('active','running','inProgress'))) ORDER BY t.id",
+            "SELECT t.id FROM threads t WHERE lower(t.status) IN ('active','running','inprogress','recovering','stalled') OR EXISTS(SELECT 1 FROM turns r WHERE r.thread_id=t.id AND lower(r.status) IN ('active','running','inprogress','stalled')) OR EXISTS(SELECT 1 FROM items i JOIN turns r ON r.id=i.turn_id WHERE r.thread_id=t.id AND lower(i.status) IN ('active','running','inprogress','stalled')) OR EXISTS(SELECT 1 FROM pending_app_requests a WHERE a.thread_id=t.id AND a.status IN ('pending','responding')) ORDER BY t.id",
         )
         .fetch_all(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE pending_app_requests SET status='unknown',decided_at=?,error_message='client_restarted_before_decision' WHERE status IN ('pending','responding')",
-        )
-        .bind(&stamp)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE threads SET status='recovering',updated_at=? WHERE status IN ('active','recovering') OR (status='unknown' AND EXISTS(SELECT 1 FROM turns r WHERE r.thread_id=threads.id AND r.status IN ('active','running','inProgress')))",
+            "UPDATE threads SET status='recovering',updated_at=? WHERE id IN (SELECT t.id FROM threads t WHERE lower(t.status) IN ('active','running','inprogress','recovering','stalled') OR EXISTS(SELECT 1 FROM turns r WHERE r.thread_id=t.id AND lower(r.status) IN ('active','running','inprogress','stalled')) OR EXISTS(SELECT 1 FROM items i JOIN turns r ON r.id=i.turn_id WHERE r.thread_id=t.id AND lower(i.status) IN ('active','running','inprogress','stalled')) OR EXISTS(SELECT 1 FROM pending_app_requests a WHERE a.thread_id=t.id AND a.status IN ('pending','responding')))",
         )
             .bind(&stamp)
             .execute(&mut *tx)
@@ -142,11 +138,11 @@ impl ClientStore {
             .await?;
         // Keep active projections for threads that will be reattached below. Orphaned
         // active records outside the recovery set cannot be reconciled and are closed.
-        sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE status IN ('active','running','inProgress') AND thread_id NOT IN (SELECT id FROM threads WHERE status='recovering')")
+        sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE lower(status) IN ('active','running','inprogress','stalled') AND thread_id NOT IN (SELECT id FROM threads WHERE status='recovering')")
             .bind(&stamp)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE items SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE status IN ('active','running','inProgress') AND turn_id NOT IN (SELECT r.id FROM turns r JOIN threads t ON t.id=r.thread_id WHERE t.status='recovering')")
+        sqlx::query("UPDATE items SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE lower(status) IN ('active','running','inprogress','stalled') AND turn_id NOT IN (SELECT r.id FROM turns r JOIN threads t ON t.id=r.thread_id WHERE t.status='recovering')")
             .bind(&stamp)
             .execute(&mut *tx)
             .await?;
@@ -1092,10 +1088,20 @@ impl ClientStore {
             sqlx::query("UPDATE turns SET status=?,completed_at=? WHERE id=(SELECT id FROM turns WHERE thread_id=? ORDER BY ordinal DESC LIMIT 1)")
                 .bind(status).bind(&stamp).bind(thread_id).execute(&mut *tx).await?;
         }
+        sqlx::query("UPDATE items SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE turn_id IN (SELECT id FROM turns WHERE thread_id=?) AND lower(status) IN ('active','running','inprogress','stalled')")
+            .bind(&stamp)
+            .bind(thread_id)
+            .execute(&mut *tx)
+            .await?;
         // A Codex thread has at most one executing turn. Once the authoritative
         // completion arrives, any other non-terminal row is a stale projection,
         // not evidence that work is still running.
-        sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE thread_id=? AND status IN ('active','running','inProgress')")
+        sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE thread_id=? AND lower(status) IN ('active','running','inprogress','stalled')")
+            .bind(&stamp)
+            .bind(thread_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE pending_app_requests SET status='unknown',decided_at=COALESCE(decided_at,?),error_message=COALESCE(error_message,'provider_turn_already_terminal') WHERE thread_id=? AND status IN ('pending','responding')")
             .bind(&stamp)
             .bind(thread_id)
             .execute(&mut *tx)
@@ -2509,6 +2515,97 @@ mod tests {
             .unwrap();
             assert!(completed_at.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn process_recovery_preserves_items_and_approvals_until_provider_is_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_projection", "Projection", &workspace, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_thread(
+                "thr_projection",
+                "prj_projection",
+                "app_projection",
+                "Projection",
+                &json!({}),
+            )
+            .await
+            .unwrap();
+        let turn_id = store
+            .mark_app_turn_started("thr_projection", Some("turn_projection"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE threads SET status='idle' WHERE id='thr_projection'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE turns SET status='completed',completed_at=? WHERE id=?")
+            .bind(now())
+            .bind(&turn_id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO items(id,turn_id,ordinal,kind,status,occurred_at) VALUES('itm_projection',?,1,'command_execution','running',?)")
+            .bind(&turn_id)
+            .bind(now())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .save_provider_request(
+                AgentProvider::Codex,
+                "apr_projection",
+                &json!("provider-request"),
+                "item/commandExecution/requestApproval",
+                &json!({}),
+                Some("prj_projection"),
+                Some("thr_projection"),
+            )
+            .await
+            .unwrap();
+
+        let candidates = store.recover_process_state().await.unwrap();
+        assert_eq!(candidates, vec!["thr_projection"]);
+        assert_eq!(
+            store
+                .thread("thr_projection", "dev_test")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "recovering"
+        );
+        let approval_status: String = sqlx::query_scalar(
+            "SELECT status FROM pending_app_requests WHERE approval_id='apr_projection'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(approval_status, "pending");
+
+        store
+            .complete_app_turn("thr_projection", Some("turn_projection"), "completed")
+            .await
+            .unwrap();
+        let item_status: String =
+            sqlx::query_scalar("SELECT status FROM items WHERE id='itm_projection'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        let approval_status: String = sqlx::query_scalar(
+            "SELECT status FROM pending_app_requests WHERE approval_id='apr_projection'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(item_status, "unknown");
+        assert_eq!(approval_status, "unknown");
     }
 
     #[tokio::test]

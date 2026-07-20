@@ -200,7 +200,7 @@ pub fn initialize(force: bool) -> Result<PathBuf> {
     Ok(root)
 }
 
-fn atomic_private_write(path: &Path, contents: &[u8]) -> Result<()> {
+pub(crate) fn atomic_private_write(path: &Path, contents: &[u8]) -> Result<()> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())

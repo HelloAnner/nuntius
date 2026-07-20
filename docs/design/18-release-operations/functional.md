@@ -26,6 +26,9 @@
 - Client 只接受已配对 Server 下发的自身目标版本，不参与 Server 构建或部署。
 - Server 持久保存 desired Client release；离线设备重连后仍能收到。
 - Client 下载失败会按配置退避重试。
+- Client 校验完成后立即激活更新，不能因 active/recovering 会话长期阻塞。
+- Client 更新期间 Agent Host 保持 provider 任务运行；新 Client 恢复全部运行中会话、
+  待审批状态和遗漏事件后再恢复 Server Tunnel。
 - 更新失败自动回滚上一二进制。
 - 数据库迁移后无法安全回滚时必须在更新前明确提示。
 
