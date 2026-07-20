@@ -112,6 +112,7 @@ impl CommandExecutor {
                 let (input, views) = self
                     .prepare_user_input(thread_id, &request.text, attachments)
                     .await?;
+                let options = self.provider_turn_options(&thread, &json!({})).await?;
                 let result = self
                     .agents
                     .steer_turn(
@@ -123,7 +124,7 @@ impl CommandExecutor {
                         state.active_turn_id.as_deref(),
                         &input,
                         self.store.thread_access_mode(thread_id).await?,
-                        &json!({}),
+                        &options,
                         request.client_message_id.as_deref(),
                     )
                     .await?;
@@ -512,6 +513,9 @@ impl CommandExecutor {
         if state.active_turn_id.is_some()
             || (thread.provider == AgentProvider::Kimi && state.status == "active")
         {
+            let options = self
+                .provider_turn_options(&thread, &request.options)
+                .await?;
             let result = self
                 .agents
                 .steer_turn(
@@ -523,7 +527,7 @@ impl CommandExecutor {
                     state.active_turn_id.as_deref(),
                     &input,
                     request.access_mode,
-                    &request.options,
+                    &options,
                     request.client_message_id.as_deref(),
                 )
                 .await?;
@@ -593,6 +597,18 @@ impl CommandExecutor {
         Ok((input, views))
     }
 
+    async fn provider_turn_options(
+        &self,
+        thread: &ThreadSummary,
+        requested: &Value,
+    ) -> Result<Value> {
+        if thread.provider != AgentProvider::Kimi {
+            return Ok(requested.clone());
+        }
+        let saved = self.store.app_server_options(&thread.id).await?;
+        Ok(merge_kimi_turn_options(&saved, requested))
+    }
+
     async fn begin_turn(
         &self,
         thread: &ThreadSummary,
@@ -600,6 +616,7 @@ impl CommandExecutor {
         input: &[Value],
         attachments: &[AttachmentView],
     ) -> Result<Value> {
+        let options = self.provider_turn_options(thread, &request.options).await?;
         let result = self
             .agents
             .start_turn(
@@ -610,7 +627,7 @@ impl CommandExecutor {
                     .context("thread has no provider session id")?,
                 input,
                 request.access_mode,
-                &request.options,
+                &options,
                 request.client_message_id.as_deref(),
             )
             .await?;
@@ -1651,6 +1668,11 @@ fn kimi_event_id(payload: &Value, key: &str) -> Option<String> {
 fn object(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
 }
+fn merge_kimi_turn_options(saved: &Value, requested: &Value) -> Value {
+    let mut options = object(saved.clone());
+    options.extend(object(requested.clone()));
+    Value::Object(options)
+}
 fn is_missing_app_thread(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<AppServerCallError>()
@@ -2066,5 +2088,24 @@ done
             assert!(calls.contains(&format!("\"threadId\":\"{app_id}\"")));
         }
         executor.agents.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn kimi_turn_options_inherit_saved_selection_and_allow_request_overrides() {
+        assert_eq!(
+            merge_kimi_turn_options(
+                &json!({
+                    "model": "kimi-code/k3",
+                    "thinking": "max",
+                    "plan_mode": false
+                }),
+                &json!({"thinking": "high", "plan_mode": true}),
+            ),
+            json!({
+                "model": "kimi-code/k3",
+                "thinking": "high",
+                "plan_mode": true
+            })
+        );
     }
 }

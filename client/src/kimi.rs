@@ -28,6 +28,8 @@ use tokio_tungstenite::{
 use url::Url;
 
 const API_PREFIX: &str = "/api/v1";
+const DEFAULT_MODEL: &str = "kimi-code/k3";
+const DEFAULT_THINKING: &str = "max";
 
 #[derive(Clone)]
 pub struct KimiRuntime {
@@ -203,14 +205,14 @@ impl KimiRuntime {
                 .get("model")
                 .filter(|value| !value.is_null())
                 .cloned()
-                .unwrap_or_else(|| json!("kimi-code/k3")),
+                .unwrap_or_else(|| json!(DEFAULT_MODEL)),
         );
         agent_config.insert(
             "thinking".into(),
             options
                 .get("thinking")
                 .and_then(kimi_thinking_value)
-                .unwrap_or_else(|| json!("max")),
+                .unwrap_or_else(|| json!(DEFAULT_THINKING)),
         );
         for key in ["plan_mode", "swarm_mode"] {
             copy_option(options, &mut agent_config, key);
@@ -366,12 +368,7 @@ impl KimiRuntime {
             "permission_mode".into(),
             json!(permission_mode(access_mode)),
         );
-        copy_option(options, &mut body, "model");
-        if let Some(thinking) = options.get("thinking").and_then(kimi_thinking_value) {
-            body.insert("thinking".into(), thinking);
-        }
-        copy_option(options, &mut body, "plan_mode");
-        copy_option(options, &mut body, "swarm_mode");
+        apply_prompt_options(options, &mut body);
         self.request(
             Method::POST,
             &format!("/sessions/{session_id}/prompts"),
@@ -730,6 +727,26 @@ fn copy_option(source: &Value, target: &mut serde_json::Map<String, Value>, key:
     }
 }
 
+fn apply_prompt_options(options: &Value, body: &mut serde_json::Map<String, Value>) {
+    body.insert(
+        "model".into(),
+        options
+            .get("model")
+            .filter(|value| !value.is_null())
+            .cloned()
+            .unwrap_or_else(|| json!(DEFAULT_MODEL)),
+    );
+    body.insert(
+        "thinking".into(),
+        options
+            .get("thinking")
+            .and_then(kimi_thinking_value)
+            .unwrap_or_else(|| json!(DEFAULT_THINKING)),
+    );
+    copy_option(options, body, "plan_mode");
+    copy_option(options, body, "swarm_mode");
+}
+
 fn kimi_thinking_value(value: &Value) -> Option<Value> {
     if let Some(effort) = value.as_str().filter(|effort| !effort.is_empty()) {
         return Some(json!(effort));
@@ -812,6 +829,34 @@ mod tests {
         assert_eq!(
             kimi_thinking_value(&json!({"enabled":false})),
             Some(json!("none"))
+        );
+    }
+
+    #[test]
+    fn kimi_prompt_options_always_include_a_model_and_thinking_effort() {
+        let mut defaults = serde_json::Map::new();
+        apply_prompt_options(&json!({}), &mut defaults);
+        assert_eq!(
+            Value::Object(defaults),
+            json!({"model":"kimi-code/k3","thinking":"max"})
+        );
+
+        let mut selected = serde_json::Map::new();
+        apply_prompt_options(
+            &json!({
+                "model": "kimi-code/kimi-for-coding-highspeed",
+                "thinking": "on",
+                "plan_mode": true
+            }),
+            &mut selected,
+        );
+        assert_eq!(
+            Value::Object(selected),
+            json!({
+                "model": "kimi-code/kimi-for-coding-highspeed",
+                "thinking": "on",
+                "plan_mode": true
+            })
         );
     }
 }
