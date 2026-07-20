@@ -959,6 +959,61 @@ impl CommandExecutor {
         Ok(refreshed)
     }
 
+    /// Import the cheap, durable inventory projection embedded in a rollout.
+    ///
+    /// `thread/list` can be incomplete when Codex's state database lags behind
+    /// its rollout files. The monitor calls this before the expensive
+    /// `thread/read` hydration so every existing workspace and conversation is
+    /// visible immediately, even while full history is still reconciling.
+    pub async fn import_rollout_inventory(&self, app_thread: &Value) -> Result<bool> {
+        let app_id = app_thread
+            .get("id")
+            .and_then(Value::as_str)
+            .context("rollout inventory has no thread id")?;
+        let _guard = self.history_import_lock.lock().await;
+        if self
+            .store
+            .local_provider_thread_id(AgentProvider::Codex, app_id)
+            .await?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        if self
+            .provider_thread_is_removed(AgentProvider::Codex, app_thread)
+            .await?
+        {
+            return Ok(false);
+        }
+        let Some(raw_cwd) = app_thread.get("cwd").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        if directory::validate_project_path(&self.config, std::path::Path::new(raw_cwd)).is_err() {
+            // Deleted, temporary and out-of-scope working directories must not
+            // turn into empty projects merely because an old rollout remains.
+            return Ok(false);
+        }
+        let project_id = self.project_for_app_thread(None, app_thread).await?;
+        let local_thread = self
+            .store
+            .import_provider_thread(AgentProvider::Codex, &project_id, app_thread)
+            .await?;
+        self.sync_thread(&local_thread).await?;
+        if let Some(project) = self.store.project(&project_id, &self.device_id).await? {
+            self.emit(
+                "project.summary",
+                Some(&project_id),
+                Some(&local_thread),
+                None,
+                serde_json::to_value(&project.summary)?,
+                true,
+            )
+            .await?;
+        }
+        self.emit_thread_summary(&local_thread).await?;
+        Ok(true)
+    }
+
     /// Force a single App Server thread into the local durable history outbox.
     /// Used by the rollout-file monitor so external terminal activity does not
     /// depend on this App Server instance receiving runtime notifications.
@@ -1237,10 +1292,23 @@ impl CommandExecutor {
             .file_name()
             .map(|value| value.to_string_lossy().into_owned())
             .unwrap_or_else(|| "导入项目".into());
-        self.store
+        match self
+            .store
             .create_project(&id, &name, &path, &json!({}))
-            .await?;
-        Ok(id)
+            .await
+        {
+            Ok(()) => Ok(id),
+            Err(error) => {
+                // Full App Server discovery and rollout inventory recovery run
+                // concurrently at startup. If both discover the same cwd,
+                // converge on the winner of the canonical-path UNIQUE key.
+                if let Some(existing) = self.store.project_by_path(&path).await? {
+                    Ok(existing)
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
 
     async fn import_and_sync_thread(

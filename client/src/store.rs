@@ -197,14 +197,14 @@ impl ClientStore {
     }
 
     pub async fn list_projects(&self, device_id: &str) -> Result<Vec<ProjectSummary>> {
-        let rows=sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id AND t.archived=0) thread_count FROM projects p WHERE status='active' ORDER BY julianday(updated_at) DESC,id DESC").fetch_all(&self.pool).await?;
+        let rows=sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id AND t.archived=0) thread_count,COALESCE((SELECT CASE WHEN t.last_activity_at IS NOT NULL AND julianday(t.last_activity_at)>=julianday(t.updated_at) THEN t.last_activity_at ELSE t.updated_at END FROM threads t WHERE t.project_id=p.id AND t.archived=0 ORDER BY julianday(CASE WHEN t.last_activity_at IS NOT NULL AND julianday(t.last_activity_at)>=julianday(t.updated_at) THEN t.last_activity_at ELSE t.updated_at END) DESC LIMIT 1),p.updated_at) project_activity_at FROM projects p WHERE status='active' ORDER BY julianday(project_activity_at) DESC,id DESC").fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
             .map(|r| project_summary(&r, device_id))
             .collect())
     }
     pub async fn project(&self, id: &str, device_id: &str) -> Result<Option<ProjectRecord>> {
-        let row=sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id AND t.archived=0) thread_count FROM projects p WHERE id=? AND status='active'").bind(id).fetch_optional(&self.pool).await?;
+        let row=sqlx::query("SELECT p.*,(SELECT COUNT(*) FROM threads t WHERE t.project_id=p.id AND t.archived=0) thread_count,COALESCE((SELECT CASE WHEN t.last_activity_at IS NOT NULL AND julianday(t.last_activity_at)>=julianday(t.updated_at) THEN t.last_activity_at ELSE t.updated_at END FROM threads t WHERE t.project_id=p.id AND t.archived=0 ORDER BY julianday(CASE WHEN t.last_activity_at IS NOT NULL AND julianday(t.last_activity_at)>=julianday(t.updated_at) THEN t.last_activity_at ELSE t.updated_at END) DESC LIMIT 1),p.updated_at) project_activity_at FROM projects p WHERE id=? AND status='active'").bind(id).fetch_optional(&self.pool).await?;
         Ok(row.map(|r| ProjectRecord {
             canonical_path: PathBuf::from(r.get::<String, _>("canonical_path")),
             defaults: serde_json::from_str(&r.get::<String, _>("defaults_json"))
@@ -943,14 +943,28 @@ impl ClientStore {
         let created_at =
             unix_value_to_rfc3339(thread.get("createdAt")).unwrap_or_else(|| updated_at.clone());
         let status = imported_execution_status(thread);
-        sqlx::query("INSERT INTO threads(id,project_id,provider,app_server_thread_id,title,status,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)")
+        let inserted = sqlx::query("INSERT INTO threads(id,project_id,provider,app_server_thread_id,title,status,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(app_server_thread_id) DO NOTHING")
             .bind(&id).bind(project_id).bind(provider.as_str()).bind(app_id).bind(title).bind(status).bind(&updated_at).bind(&created_at).bind(&updated_at)
             .execute(&self.pool).await?;
-        Ok(id)
+        if inserted.rows_affected() == 1 {
+            return Ok(id);
+        }
+        // App Server discovery and rollout inventory recovery intentionally run
+        // together. If another path inserted this provider thread after the
+        // optimistic lookup above, adopt and refresh that canonical row.
+        let existing = self
+            .local_provider_thread_id(provider, app_id)
+            .await?
+            .ok_or_else(|| anyhow!("provider thread id is owned by another provider"))?;
+        self.update_imported_thread(&existing, thread).await?;
+        Ok(existing)
     }
     async fn update_imported_thread(&self, id: &str, thread: &Value) -> Result<()> {
         let title = imported_thread_title(thread);
-        let stamp = unix_value_to_rfc3339(thread.get("updatedAt")).unwrap_or_else(now);
+        // Inventory/status snapshots are allowed to omit `updatedAt` (Kimi's
+        // session list does this). Treating the poll time as conversation
+        // activity makes every idle project jump to the top on every poll.
+        let stamp = unix_value_to_rfc3339(thread.get("updatedAt"));
         let created_at = unix_value_to_rfc3339(thread.get("createdAt"));
         let raw_status = value_status(thread.get("status"), "idle");
         let residency_only = is_not_loaded_status(&raw_status);
@@ -959,12 +973,14 @@ impl ClientStore {
         } else {
             raw_status.as_str()
         };
-        sqlx::query("UPDATE threads SET title=?,status=CASE WHEN status='stalled' AND ?='active' THEN status WHEN ? AND status IN ('active','recovering','stalled') THEN status ELSE ? END,created_at=COALESCE(?,created_at),last_activity_at=CASE WHEN last_activity_at IS NULL OR julianday(?)>julianday(last_activity_at) THEN ? ELSE last_activity_at END,updated_at=CASE WHEN julianday(?)>julianday(updated_at) THEN ? ELSE updated_at END WHERE id=?")
+        sqlx::query("UPDATE threads SET title=?,status=CASE WHEN status='stalled' AND ?='active' THEN status WHEN ? AND status IN ('active','recovering','stalled') THEN status ELSE ? END,created_at=COALESCE(?,created_at),last_activity_at=CASE WHEN ? IS NULL THEN last_activity_at WHEN last_activity_at IS NULL OR julianday(?)>julianday(last_activity_at) THEN ? ELSE last_activity_at END,updated_at=CASE WHEN ? IS NOT NULL AND julianday(?)>julianday(updated_at) THEN ? ELSE updated_at END WHERE id=?")
         .bind(title)
         .bind(&raw_status)
         .bind(residency_only)
         .bind(status)
         .bind(created_at)
+        .bind(&stamp)
+        .bind(&stamp)
         .bind(&stamp)
         .bind(&stamp)
         .bind(&stamp)
@@ -1763,13 +1779,17 @@ fn project_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ProjectSumma
             ProjectKind::Workspace
         },
         display_name: r.get("display_name"),
-        path_hint: path.file_name().map(|v| v.to_string_lossy().into_owned()),
+        // A basename cannot distinguish common layouts such as
+        // `~/moss-ops` and `~/fine/ai/moss-ops`. This field is already a path
+        // hint shown only inside the authenticated device consoles, so retain
+        // enough context for the user to select the real workspace.
+        path_hint: Some(path.to_string_lossy().into_owned()),
         status: r.get("status"),
         repo_name: None,
         branch: None,
         is_dirty: None,
         thread_count: r.get("thread_count"),
-        last_activity_at: Some(r.get("updated_at")),
+        last_activity_at: Some(r.get("project_activity_at")),
     }
 }
 fn thread_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ThreadSummary {
@@ -2078,6 +2098,101 @@ mod tests {
             store.list_projects("dev_test").await.unwrap()[0].thread_count,
             0
         );
+    }
+
+    #[tokio::test]
+    async fn project_summary_uses_thread_activity_and_unambiguous_path_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first").join("moss-ops");
+        let second = temp.path().join("second").join("moss-ops");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_first", "moss-ops", &first, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_project("prj_second", "moss-ops", &second, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_thread(
+                "thr_second",
+                "prj_second",
+                "app_second",
+                "Live terminal turn",
+                &json!({}),
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE projects SET updated_at='2026-01-01T00:00:00Z'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE threads SET last_activity_at='2026-07-20T10:00:00Z',updated_at='2026-07-20T10:00:00Z' WHERE id='thr_second'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .import_provider_thread(
+                AgentProvider::Codex,
+                "prj_second",
+                &json!({"id":"app_second","preview":"Polled inventory","status":"idle"}),
+            )
+            .await
+            .unwrap();
+        let preserved_activity: String =
+            sqlx::query_scalar("SELECT last_activity_at FROM threads WHERE id='thr_second'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(preserved_activity, "2026-07-20T10:00:00Z");
+
+        let projects = store.list_projects("dev_test").await.unwrap();
+        assert_eq!(projects[0].id, "prj_second");
+        assert_eq!(
+            projects[0].last_activity_at.as_deref(),
+            Some("2026-07-20T10:00:00Z")
+        );
+        let expected_hint = second.to_string_lossy().into_owned();
+        assert_eq!(
+            projects[0].path_hint.as_deref(),
+            Some(expected_hint.as_str())
+        );
+        assert_ne!(projects[0].path_hint, projects[1].path_hint);
+    }
+
+    #[tokio::test]
+    async fn concurrent_inventory_imports_converge_on_one_thread() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_race", "Race", &workspace, &json!({}))
+            .await
+            .unwrap();
+        let snapshot = json!({
+            "id":"app_race",
+            "cwd":workspace,
+            "preview":"Terminal conversation",
+            "status":{"type":"notLoaded"},
+            "createdAt":"2026-07-20T10:00:00Z",
+            "updatedAt":"2026-07-20T10:01:00Z"
+        });
+        let (first, second) = tokio::join!(
+            store.import_provider_thread(AgentProvider::Codex, "prj_race", &snapshot),
+            store.import_provider_thread(AgentProvider::Codex, "prj_race", &snapshot)
+        );
+        assert_eq!(first.unwrap(), second.unwrap());
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM threads WHERE app_server_thread_id='app_race'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]
