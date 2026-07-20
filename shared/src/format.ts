@@ -162,3 +162,12 @@ export function truncateMiddle(text: string, max = 48): string {
   const tail = Math.floor(max * 0.32);
   return `${text.slice(0, head)}…${text.slice(-tail)}`;
 }
+
+/** Keep the meaningful beginning of a title while giving surrounding actions room. */
+export function truncateEnd(text: string, max = 22): string {
+  if (max <= 0) return "";
+  const characters = Array.from(text);
+  if (characters.length <= max) return text;
+  if (max === 1) return "…";
+  return `${characters.slice(0, max - 1).join("")}…`;
+}

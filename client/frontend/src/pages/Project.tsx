@@ -6,24 +6,18 @@ import {
   IconArchive,
   IconChat,
   IconPlus,
-  ModelPicker,
-  ProviderPicker,
-  Sheet,
   Spinner,
   SwipeActionRow,
   compareThreadCreation,
-  agentThreadOptions,
-  defaultAgentSelection,
   newIdemKey,
   useConfirmAction,
   useToast,
-  type AgentProvider,
-  type AgentSelection,
 } from "@nuntius/shared";
 import { api } from "../api";
 import { useArchiveThreadAction, useNavigate } from "../hooks";
-import { liveStore, useRoute } from "../stores";
+import { useRoute } from "../stores";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
+import { NewThreadSheet } from "../sheets/NewThreadSheet";
 
 export function ProjectPage({ projectId }: { projectId: string }) {
   const navigate = useNavigate();
@@ -33,12 +27,6 @@ export function ProjectPage({ projectId }: { projectId: string }) {
   const qc = useQueryClient();
   const { confirm, node: confirmNode } = useConfirmAction();
   const [creating, setCreating] = useState(false);
-  const [firstMessage, setFirstMessage] = useState("");
-  const [provider, setProvider] = useState<AgentProvider>("codex");
-  const [selection, setSelection] = useState<AgentSelection>(() =>
-    defaultAgentSelection("codex"),
-  );
-  const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
   const info = useQuery({ queryKey: ["info"], queryFn: api.info });
@@ -58,77 +46,8 @@ export function ProjectPage({ projectId }: { projectId: string }) {
 
   const unassigned = project?.kind === "system_unassigned";
   const providerStatuses = info.data?.providers ?? [];
-  const selectedProviderStatus = providerStatuses.find(
-    (status) => status.provider === provider,
-  );
-  const selectedProviderAvailable =
-    selectedProviderStatus?.available ?? provider === "codex";
   const canCreate = Boolean(!unassigned && providerStatuses.some((status) => status.available));
   const sorted = [...(threads.data ?? [])].sort(compareThreadCreation);
-
-  useEffect(() => {
-    if (!creating) return;
-    setProvider("codex");
-    setSelection(
-      defaultAgentSelection(
-        "codex",
-        providerStatuses.find((status) => status.provider === "codex"),
-      ),
-    );
-  }, [creating]);
-
-  useEffect(() => {
-    if (!creating) return;
-    const models = selectedProviderStatus?.models ?? [];
-    if (
-      !selection.model ||
-      (models.length > 0 && !models.some((model) => model.id === selection.model))
-    ) {
-      setSelection(defaultAgentSelection(provider, selectedProviderStatus));
-    }
-  }, [creating, provider, selectedProviderStatus, selection.model]);
-
-  const create = async () => {
-    const text = firstMessage.trim();
-    if (busy) return;
-    setBusy(true);
-    try {
-      const result = await api.createThread(
-        projectId,
-        text ? Array.from(text).slice(0, 48).join("") : null,
-        provider,
-        agentThreadOptions(provider, selection),
-      );
-      setCreating(false);
-      setFirstMessage("");
-      void qc.invalidateQueries({ queryKey: ["projectThreads", projectId] });
-      void qc.invalidateQueries({ queryKey: ["threads"] });
-      navigate({ name: "thread", projectId, threadId: result.threadId });
-      if (text) {
-        const optimisticKey = `initial:${Date.now()}`;
-        const clientMessageId = newIdemKey();
-        liveStore.addOptimistic(result.threadId, optimisticKey, text, [], clientMessageId);
-        void api
-          .startTurn(result.threadId, text, clientMessageId)
-          .then(() => {
-            liveStore.applyCommandStatus(optimisticKey, "completed");
-            void qc.invalidateQueries({ queryKey: ["projectThreads", projectId] });
-          })
-          .catch((error) => {
-            liveStore.applyCommandStatus(
-              optimisticKey,
-              "failed",
-              "request_failed",
-              error instanceof Error ? error.message : "发送失败",
-            );
-          });
-      }
-    } catch (e) {
-      toast(e instanceof Error ? e.message : "创建失败", { error: true });
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const remove = () => {
     if (!project || unassigned || deleting) return;
@@ -232,50 +151,12 @@ export function ProjectPage({ projectId }: { projectId: string }) {
         </div>
       </div>
 
-      <Sheet open={creating} onClose={() => setCreating(false)} title="新建会话">
-        <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
-          <ProviderPicker
-            value={provider}
-            onChange={(nextProvider) => {
-              setProvider(nextProvider);
-              setSelection(
-                defaultAgentSelection(
-                  nextProvider,
-                  providerStatuses.find((status) => status.provider === nextProvider),
-                ),
-              );
-            }}
-            statuses={providerStatuses}
-            disabled={busy}
-          />
-          <ModelPicker
-            provider={provider}
-            status={selectedProviderStatus}
-            model={selection.model}
-            reasoningEffort={selection.reasoningEffort}
-            onChange={(model, reasoningEffort) => setSelection({ model, reasoningEffort })}
-            disabled={busy}
-          />
-          <div className="field">
-            <label htmlFor="first-msg">第一条消息（可选）</label>
-            <textarea
-              id="first-msg"
-              rows={4}
-              style={{ resize: "vertical", minHeight: 96 }}
-              placeholder={`描述一下想让 ${provider === "kimi" ? "Kimi" : "Codex"} 做什么…`}
-              value={firstMessage}
-              onChange={(e) => setFirstMessage(e.target.value)}
-            />
-          </div>
-          <button
-            className="btn primary block"
-            onClick={create}
-            disabled={busy || !selectedProviderAvailable}
-          >
-            开始对话
-          </button>
-        </div>
-      </Sheet>
+      <NewThreadSheet
+        projectId={projectId}
+        open={creating}
+        onClose={() => setCreating(false)}
+        onCreated={(threadId) => navigate({ name: "thread", projectId, threadId })}
+      />
       {confirmNode}
     </div>
   );

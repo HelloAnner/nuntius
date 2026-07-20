@@ -14,6 +14,7 @@ import {
   newIdemKey,
   providerLabel,
   statusLabel,
+  truncateEnd,
   useConfirmAction,
   useToast,
   type ApprovalView,
@@ -144,6 +145,7 @@ export function ThreadPage({
     projectThreads.data?.find((t) => t.id === threadId) ??
     allThreads.data?.find((t) => t.id === threadId) ??
     threadSnapshot.data;
+  const fullThreadTitle = thread?.title || "会话";
 
   useEffect(() => {
     setTurnCount(12);
@@ -347,7 +349,8 @@ export function ThreadPage({
 
   const topbar = (
     <TopBar
-      title={thread?.title ?? "会话"}
+      title={truncateEnd(fullThreadTitle)}
+      titleHint={fullThreadTitle}
       subtitle={device && project
         ? `${online ? device.displayName : statusLabel(device.status)} · ${project.displayName}${thread ? ` · ${providerLabel(thread.provider)}` : ""}`
         : undefined}
@@ -359,6 +362,17 @@ export function ThreadPage({
       onTitleClick={() => setSwitcherOpen(true)}
       trailing={
         <>
+          {project && !unassigned ? (
+            <button
+              className="icon-btn"
+              onClick={() => setCreating(true)}
+              disabled={!online}
+              aria-label={online ? "在当前项目新建会话" : "设备离线，无法新建会话"}
+              title={online ? "在当前项目新建会话" : "设备离线，无法新建会话"}
+            >
+              <IconPlus size={19} />
+            </button>
+          ) : null}
           {!unassigned && !archived ? (
             <button
               className="icon-btn"
@@ -374,6 +388,18 @@ export function ThreadPage({
     />
   );
 
+  const newThreadSheet = project && !unassigned ? (
+    <NewThreadSheet
+      deviceId={deviceId}
+      projectId={projectId}
+      open={creating}
+      onClose={() => setCreating(false)}
+      onCreated={(createdThreadId) =>
+        navigate({ name: "thread", deviceId, projectId, threadId: createdThreadId })
+      }
+    />
+  ) : null;
+
   if (!wide) {
     return (
       <div className="page">
@@ -385,6 +411,7 @@ export function ThreadPage({
           currentThreadId={threadId}
           navigationContext={navigationContext}
         />
+        {newThreadSheet}
         {confirmNode}
       </div>
     );
@@ -415,19 +442,6 @@ export function ThreadPage({
               fromRecents
                 ? undefined
                 : () => navigate({ name: "device", deviceId }, { replace: true })
-            }
-            trailing={
-              !fromRecents && !unassigned ? (
-                <button
-                  className="icon-btn"
-                  onClick={() => setCreating(true)}
-                  disabled={!online}
-                  aria-label={online ? "新建会话" : "设备离线，无法新建会话"}
-                  title={online ? "新建会话" : "设备离线，无法新建会话"}
-                >
-                  <IconPlus size={19} />
-                </button>
-              ) : undefined
             }
           />
           <div className="page-scroll">
@@ -494,17 +508,7 @@ export function ThreadPage({
         currentThreadId={threadId}
         navigationContext={navigationContext}
       />
-      {!fromRecents ? (
-        <NewThreadSheet
-          deviceId={deviceId}
-          projectId={projectId}
-          open={creating}
-          onClose={() => setCreating(false)}
-          onCreated={(createdThreadId) =>
-            navigate({ name: "thread", deviceId, projectId, threadId: createdThreadId })
-          }
-        />
-      ) : null}
+      {newThreadSheet}
       {confirmNode}
     </div>
   );

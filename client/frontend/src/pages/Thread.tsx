@@ -3,11 +3,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   IconArchive,
+  IconPlus,
   SwipeActionRow,
   ThreadView,
   compareThreadCreation,
   newIdemKey,
   providerLabel,
+  truncateEnd,
   useConfirmAction,
   useToast,
   type ApprovalView,
@@ -20,6 +22,7 @@ import { api } from "../api";
 import { useArchiveThreadAction, useMedia, useNavigate } from "../hooks";
 import { liveStore, useApprovals, useRoute, useThreadLive } from "../stores";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
+import { NewThreadSheet } from "../sheets/NewThreadSheet";
 
 function groupHistory(records: HistoryRecord[]): HistoryGroup[] {
   const groups: HistoryGroup[] = [];
@@ -66,6 +69,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
   const back = useRoute((s) => s.back);
   const wide = useMedia("(min-width: 768px)");
   const { confirm, node: confirmNode } = useConfirmAction();
+  const [creating, setCreating] = useState(false);
   const [sendBusy, setSendBusy] = useState(false);
   const [interruptBusy, setInterruptBusy] = useState(false);
   const sendPendingRef = useRef(false);
@@ -95,6 +99,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     allThreads.data?.find((t) => t.id === threadId) ??
     threadSnapshot.data ??
     historyThread;
+  const fullThreadTitle = thread?.title || "会话";
 
   useEffect(() => {
     const missingProject = projects.isSuccess && !project;
@@ -133,6 +138,15 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
   const providerStatus = info.data?.providers.find((status) => status.provider === thread?.provider);
   const providerAvailable = providerStatus?.available ?? thread?.provider === "codex";
   const providerConnected = providerStatus?.status === "online";
+  const unassigned = project?.kind === "system_unassigned";
+  const canCreate = Boolean(
+    project && !unassigned && info.data?.providers.some((status) => status.available),
+  );
+  const createLabel = canCreate
+    ? "在当前项目新建会话"
+    : info.isLoading
+      ? "正在检查可用的编码代理"
+      : "没有可用的编码代理";
   const archived = thread?.archived ?? false;
   // SQLite is authoritative. Live events render output but never manufacture
   // the execution state shown to the user.
@@ -241,11 +255,23 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
 
   const topbar = (
     <TopBar
-      title={thread?.title ?? "会话"}
+      title={truncateEnd(fullThreadTitle)}
+      titleHint={fullThreadTitle}
       subtitle={thread ? `${project?.displayName ?? "项目"} · ${providerLabel(thread.provider)}` : project?.displayName}
       onBack={() => back({ name: "project", projectId })}
       trailing={
         <>
+          {project && !unassigned ? (
+            <button
+              className="icon-btn"
+              onClick={() => setCreating(true)}
+              disabled={!canCreate}
+              aria-label={createLabel}
+              title={createLabel}
+            >
+              <IconPlus size={19} />
+            </button>
+          ) : null}
           {!archived ? (
             <button
               className="icon-btn"
@@ -262,11 +288,23 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     />
   );
 
+  const newThreadSheet = project && !unassigned ? (
+    <NewThreadSheet
+      projectId={projectId}
+      open={creating}
+      onClose={() => setCreating(false)}
+      onCreated={(createdThreadId) =>
+        navigate({ name: "thread", projectId, threadId: createdThreadId })
+      }
+    />
+  ) : null;
+
   if (!wide) {
     return (
       <div className="page">
         {topbar}
         {threadView}
+        {newThreadSheet}
         {confirmNode}
       </div>
     );
@@ -308,6 +346,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
           {threadView}
         </div>
       </div>
+      {newThreadSheet}
       {confirmNode}
     </div>
   );

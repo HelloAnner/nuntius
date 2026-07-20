@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compareThreadCreation } from "./format";
+import { compareThreadCreation, truncateEnd } from "./format";
 
 describe("compareThreadCreation", () => {
   test("orders threads by creation time, newest first", () => {
@@ -26,5 +26,16 @@ describe("compareThreadCreation", () => {
       "thread-b",
       "thread-a",
     ]);
+  });
+});
+
+describe("truncateEnd", () => {
+  test("keeps short titles unchanged and shortens long titles from the end", () => {
+    expect(truncateEnd("修复登录页", 8)).toBe("修复登录页");
+    expect(truncateEnd("梳理并修复登录页面的状态同步问题", 8)).toBe("梳理并修复登录…");
+  });
+
+  test("counts unicode characters instead of UTF-16 code units", () => {
+    expect(truncateEnd("检查🧪测试流程", 5)).toBe("检查🧪测…");
   });
 });

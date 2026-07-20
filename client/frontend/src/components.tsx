@@ -40,12 +40,14 @@ export function TopBar({
   onBack,
   trailing,
   onTitleClick,
+  titleHint,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
   onBack?: () => void;
   trailing?: ReactNode;
   onTitleClick?: () => void;
+  titleHint?: string;
 }) {
   return (
     <header className="topbar">
@@ -60,6 +62,8 @@ export function TopBar({
         className={`topbar-title${onTitleClick ? " clickable" : ""}`}
         onClick={onTitleClick}
         disabled={!onTitleClick}
+        aria-label={titleHint}
+        title={titleHint}
       >
         <span className="t">{title}</span>
         {subtitle ? <span className="s">{subtitle}</span> : null}
