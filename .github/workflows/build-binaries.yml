@@ -247,7 +247,19 @@ jobs:
         env:
           EXPECTED_SHA: ${{ github.sha }}
         run: |
-          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)"
+          api_error="$RUNNER_TEMP/nuntius-main-head.err"
+          current_sha=""
+          for attempt in $(seq 1 12); do
+            if current_sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha 2>"$api_error")"; then
+              break
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              cat "$api_error" >&2
+              exit 1
+            fi
+            echo "::warning::GitHub API unavailable while checking main (attempt $attempt/12); retrying in 10s"
+            sleep 10
+          done
           if [ "$current_sha" = "$EXPECTED_SHA" ]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
           else
