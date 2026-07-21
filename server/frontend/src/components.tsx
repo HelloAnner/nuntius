@@ -328,11 +328,13 @@ export function ThreadListItem({
   thread,
   pendingApproval = false,
   selected = false,
+  contextLabel,
   onClick,
 }: {
   thread: ThreadSummary;
   pendingApproval?: boolean;
   selected?: boolean;
+  contextLabel?: string;
   onClick: () => void;
 }) {
   const tone = pendingApproval ? "warning" : threadTone(thread);
@@ -346,7 +348,10 @@ export function ThreadListItem({
       <StatusDot tone={tone} pulse={tone === "active"} />
       <span className="thread-list-copy">
         <span className="thread-list-title">{thread.title || "未命名会话"}</span>
-        <span className="thread-list-meta">{state} · {providerLabel(thread.provider)} · {relTime(thread.lastActivityAt ?? thread.createdAt)}</span>
+        <span className="thread-list-meta">
+          {contextLabel ? <span className="thread-list-context">{contextLabel}</span> : null}
+          {state} · {providerLabel(thread.provider)} · {relTime(thread.lastActivityAt ?? thread.createdAt)}
+        </span>
       </span>
     </button>
   );

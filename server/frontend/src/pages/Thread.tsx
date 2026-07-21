@@ -25,7 +25,7 @@ import {
 } from "@nuntius/shared";
 import { api, ApiError } from "../api";
 import { trackCommand } from "../events";
-import { useArchiveThreadAction, useMedia, useNavigate } from "../hooks";
+import { useArchiveThreadAction, useMedia, useNavigate, useProjectNameMap, projectNameFrom } from "../hooks";
 import { liveStore, useAccessMode, useApprovals, useThreadLive } from "../stores";
 import { ProviderBadge, StatusDot, ThreadListItem, TopBar, threadTone } from "../components";
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
@@ -344,6 +344,11 @@ export function ThreadPage({
   const currentTone = thread ? (pendingApproval ? "warning" : threadTone(thread)) : "offline";
   const currentStateLabel = pendingApproval ? "等待审批" : statusLabel(thread?.status ?? "offline");
 
+  const sidebarSource = fromRecents ? (allThreads.data ?? []) : (projectThreads.data ?? []);
+  const sidebarProjectNames = useProjectNameMap(
+    fromRecents ? sidebarSource.map((item) => item.deviceId) : [],
+  );
+
   const mobileTopbar = (
     <TopBar
       title={truncateEnd(fullThreadTitle)}
@@ -438,7 +443,12 @@ export function ThreadPage({
     );
   }
 
-  const sidebarThreads = [...(projectThreads.data ?? [])].sort(compareThreadCreation);
+  const sidebarThreads = [...sidebarSource].sort(compareThreadCreation);
+  const sidebarLoading = fromRecents ? allThreads.isLoading : projectThreads.isLoading;
+  const sidebarContextFor = fromRecents
+    ? (item: ThreadSummary) =>
+        `${devices.data?.find((d) => d.id === item.deviceId)?.displayName ?? "设备"} / ${projectNameFrom(sidebarProjectNames, item.deviceId, item.projectId)}`
+    : undefined;
   const pendingThreadIds = new Set(
     Object.values(approvals)
       .flatMap((approval) => approval.state === "pending" && approval.threadId ? [approval.threadId] : []),
@@ -461,9 +471,27 @@ export function ThreadPage({
       <div className="detail-grid">
         <aside className="detail-side">
           <div className="thread-sidebar-scroll">
-            <button className="thread-sidebar-context" onClick={() => navigate({ name: "project", deviceId, projectId })}>
-              <strong>{project?.displayName ?? "项目"}</strong>
-              <span>{device?.displayName ?? "设备"}{project?.pathHint ? ` · ${project.pathHint}` : ""}</span>
+            <button
+              className="thread-sidebar-context"
+              onClick={() =>
+                navigate(
+                  fromRecents
+                    ? { name: "recents" }
+                    : { name: "project", deviceId, projectId },
+                )
+              }
+            >
+              {fromRecents ? (
+                <>
+                  <strong>最近会话</strong>
+                  <span>全部设备 · 已同步会话</span>
+                </>
+              ) : (
+                <>
+                  <strong>{project?.displayName ?? "项目"}</strong>
+                  <span>{device?.displayName ?? "设备"}{project?.pathHint ? ` · ${project.pathHint}` : ""}</span>
+                </>
+              )}
             </button>
             {project && !unassigned ? (
               <button className="quick-new-thread" onClick={() => setCreating(true)} disabled={!online}>
@@ -472,10 +500,10 @@ export function ThreadPage({
                 <small>同设备 · 同项目</small>
               </button>
             ) : null}
-            {projectThreads.isLoading ? (
+            {sidebarLoading ? (
               <div className="detail-list-state"><Spinner /></div>
             ) : sidebarThreads.length === 0 ? (
-              <Empty icon={<IconClock size={22} />} headline="还没有会话" />
+              <Empty icon={<IconClock size={22} />} headline={fromRecents ? "最近没有会话" : "还没有会话"} />
             ) : (
               <>
                 {ongoingThreads.length ? (
@@ -484,6 +512,7 @@ export function ThreadPage({
                     threads={ongoingThreads}
                     pendingThreadIds={pendingThreadIds}
                     currentThreadId={threadId}
+                    contextFor={sidebarContextFor}
                     onSelect={selectSidebarThread}
                   />
                 ) : null}
@@ -493,6 +522,7 @@ export function ThreadPage({
                     threads={recentThreads}
                     pendingThreadIds={pendingThreadIds}
                     currentThreadId={threadId}
+                    contextFor={sidebarContextFor}
                     onSelect={selectSidebarThread}
                   />
                 ) : null}
@@ -524,12 +554,14 @@ function ThreadSidebarGroup({
   threads,
   pendingThreadIds,
   currentThreadId,
+  contextFor,
   onSelect,
 }: {
   label: string;
   threads: ThreadSummary[];
   pendingThreadIds: Set<string>;
   currentThreadId: string;
+  contextFor?: (thread: ThreadSummary) => string;
   onSelect: (thread: ThreadSummary) => void;
 }) {
   return (
@@ -541,6 +573,7 @@ function ThreadSidebarGroup({
           thread={thread}
           pendingApproval={pendingThreadIds.has(thread.id)}
           selected={thread.id === currentThreadId}
+          contextLabel={contextFor?.(thread)}
           onClick={() => onSelect(thread)}
         />
       ))}
