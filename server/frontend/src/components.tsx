@@ -350,7 +350,7 @@ export function ThreadListItem({
         <span className="thread-list-title">{thread.title || "未命名会话"}</span>
         <span className="thread-list-meta">
           {contextLabel ? <span className="thread-list-context">{contextLabel}</span> : null}
-          {state} · {providerLabel(thread.provider)} · {relTime(thread.lastActivityAt ?? thread.createdAt)}
+          <span className="thread-list-state">{state} · {providerLabel(thread.provider)} · {relTime(thread.lastActivityAt ?? thread.createdAt)}</span>
         </span>
       </span>
     </button>

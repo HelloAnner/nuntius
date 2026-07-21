@@ -1,5 +1,5 @@
 /* Thread page: the focused conversation surface. */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Empty,
@@ -30,6 +30,12 @@ import { liveStore, useAccessMode, useApprovals, useThreadLive } from "../stores
 import { ProviderBadge, StatusDot, ThreadListItem, TopBar, threadTone } from "../components";
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
 import { ThreadSwitcher } from "../sheets/ThreadSwitcher";
+import {
+  THREAD_SIDEBAR_DEFAULT_WIDTH,
+  clampThreadSidebarWidth,
+  loadThreadSidebarWidth,
+  saveThreadSidebarWidth,
+} from "../threadSidebarPrefs";
 
 function mapHistoryItem(item: HistoryItemView) {
   return {
@@ -74,11 +80,39 @@ export function ThreadPage({
   const [interruptBusy, setInterruptBusy] = useState(false);
   const sendPendingRef = useRef(false);
   const interruptPendingRef = useRef(false);
+  const [sidebarWidth, setSidebarWidth] = useState(loadThreadSidebarWidth);
+  const sidebarWidthRef = useRef(sidebarWidth);
+
+  const startSidebarResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidthRef.current;
+    document.body.classList.add("col-resizing");
+    const onMove = (moveEvent: PointerEvent) => {
+      const next = clampThreadSidebarWidth(startWidth + moveEvent.clientX - startX);
+      sidebarWidthRef.current = next;
+      setSidebarWidth(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.classList.remove("col-resizing");
+      saveThreadSidebarWidth(sidebarWidthRef.current);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+  const resetSidebarWidth = () => {
+    sidebarWidthRef.current = THREAD_SIDEBAR_DEFAULT_WIDTH;
+    setSidebarWidth(THREAD_SIDEBAR_DEFAULT_WIDTH);
+    saveThreadSidebarWidth(THREAD_SIDEBAR_DEFAULT_WIDTH);
+  };
 
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const projects = useQuery({
     queryKey: ["projects", deviceId],
     queryFn: () => api.projects(deviceId),
+    placeholderData: keepPreviousData,
   });
   const projectThreads = useQuery({
     queryKey: ["projectThreads", deviceId, projectId],
@@ -379,7 +413,7 @@ export function ThreadPage({
 
   const desktopTopbar = (
     <TopBar
-      title={truncateEnd(fullThreadTitle)}
+      title={fullThreadTitle}
       titleHint={fullThreadTitle}
       subtitle={device && project ? `${device.displayName} / ${project.displayName}` : undefined}
       trailing={
@@ -469,7 +503,16 @@ export function ThreadPage({
   return (
     <div className="page thread-page">
       <div className="detail-grid">
-        <aside className="detail-side">
+        <aside className="detail-side" style={{ width: sidebarWidth }}>
+          <div
+            className="thread-sidebar-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整会话列表宽度"
+            title="拖动调整宽度，双击恢复默认"
+            onPointerDown={startSidebarResize}
+            onDoubleClick={resetSidebarWidth}
+          />
           <div className="thread-sidebar-scroll">
             <button
               className="thread-sidebar-context"
@@ -566,7 +609,7 @@ function ThreadSidebarGroup({
 }) {
   return (
     <section className="thread-sidebar-group">
-      <div className="thread-sidebar-label">{label}</div>
+      <div className="thread-sidebar-label">{label} · {threads.length}</div>
       {threads.map((thread) => (
         <ThreadListItem
           key={thread.id}

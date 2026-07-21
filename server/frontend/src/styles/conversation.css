@@ -102,13 +102,24 @@
   transition: background 160ms ease;
 }
 .thread-list-item:hover { background: var(--surface-2); }
-.thread-list-item.selected { background: var(--surface-2); }
-.thread-list-item .status-orbit { width: 16px; height: 16px; }
+.thread-list-item.selected { background: var(--accent-soft); box-shadow: inset 2.5px 0 0 var(--accent); }
+.thread-list-item .status-orbit { width: 16px; height: 16px; flex: none; }
 .thread-list-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.thread-list-title { overflow: hidden; color: var(--ink); font-size: 13.5px; font-weight: 520; text-overflow: ellipsis; white-space: nowrap; }
-.thread-list-meta { overflow: hidden; color: var(--ink-3); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
-.thread-list-context { color: var(--ink-2); font-weight: 550; }
-.thread-list-context::after { content: " · "; color: var(--ink-3); font-weight: 400; }
+.thread-list-title {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13.5px;
+  font-weight: 520;
+  line-height: 1.32;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+.thread-list-meta { display: flex; align-items: baseline; gap: 6px; overflow: hidden; color: var(--ink-3); font-size: 11.5px; white-space: nowrap; }
+.thread-list-context { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--ink-3); font-weight: 500; text-overflow: ellipsis; }
+.thread-list-state { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.thread-list-state:only-child { flex: 1 1 auto; min-width: 0; }
 .thread-list-item.selected .thread-list-title { font-weight: 650; }
 .thread-list-item.thread-active .thread-list-meta { color: var(--accent); }
 .thread-list-item.thread-warning .thread-list-meta { color: var(--warn); }
@@ -145,14 +156,39 @@
 .thread-switcher-group { display: flex; flex-direction: column; }
 
 @media (min-width: 900px) {
+  .thread-page .detail-side { position: relative; }
+  .thread-sidebar-resizer {
+    position: absolute;
+    top: 0;
+    right: -4px;
+    z-index: 30;
+    width: 9px;
+    height: 100%;
+    cursor: col-resize;
+    touch-action: none;
+  }
+  .thread-sidebar-resizer::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 4px;
+    width: 2px;
+    height: 100%;
+    background: transparent;
+    transition: background 140ms ease;
+  }
+  .thread-sidebar-resizer:hover::after { background: var(--accent); }
+  body.col-resizing { cursor: col-resize; user-select: none; }
+  body.col-resizing .thread-sidebar-resizer::after { background: var(--accent); }
   .detail-side {
     width: 300px;
     display: flex;
     background: var(--surface);
     border-right-color: var(--hairline);
   }
-  .thread-sidebar-scroll { height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; padding: 16px; }
-  .thread-sidebar-context { width: 100%; display: flex; flex-direction: column; gap: 3px; padding: 0 4px 8px; text-align: left; }
+  .thread-sidebar-scroll { height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; padding: 14px 12px 16px; }
+  .thread-sidebar-context { width: 100%; display: flex; flex-direction: column; gap: 3px; padding: 6px 8px 8px; border-radius: var(--r-sm); text-align: left; transition: background 140ms ease; }
+  .thread-sidebar-context:hover { background: var(--surface-2); }
   .thread-sidebar-context strong { overflow: hidden; color: var(--ink); font-size: 15px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
   .thread-sidebar-context span { overflow: hidden; color: var(--ink-2); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
   .thread-sidebar-group { display: flex; flex-direction: column; }
@@ -163,8 +199,9 @@
     border-bottom: 1px solid var(--hairline);
     background: var(--surface);
   }
+  .detail-main > .topbar .topbar-title { align-items: flex-start; padding: 4px 0; }
   .detail-main > .topbar .topbar-title .t { font-size: 15px; }
-  .detail-main > .topbar .topbar-title .s { font-size: 10.5px; }
+  .detail-main > .topbar .topbar-title .s { font-size: 11.5px; }
   .thread-col { padding: 22px 20px 30px; }
   .composer { padding: 6px 20px 20px; border-top: 0; background: linear-gradient(180deg, transparent, var(--bg) 22%); }
 }
