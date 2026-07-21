@@ -245,8 +245,10 @@ body {
 }
 
 .provider-badge.kimi { color: var(--kimi); background: var(--kimi-soft); }
+.provider-badge.pi { color: var(--pi); background: var(--pi-soft); }
 .provider-badge .provider-mark { width: 14px; height: 14px; display: grid; place-items: center; border-radius: 5px; color: white; background: var(--codex); font-size: 8px; }
 .provider-badge.kimi .provider-mark { background: var(--kimi); }
+.provider-badge.pi .provider-mark { background: var(--pi); }
 
 .sheet-backdrop { background: rgba(16, 24, 40, 0.35); }
 .sheet { border-radius: 18px 18px 0 0; border-color: var(--hairline); }

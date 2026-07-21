@@ -2012,10 +2012,10 @@ fn thread_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ThreadSummary
 }
 
 fn provider_from_str(value: &str) -> AgentProvider {
-    if value == "kimi" {
-        AgentProvider::Kimi
-    } else {
-        AgentProvider::Codex
+    match value {
+        "kimi" => AgentProvider::Kimi,
+        "pi" => AgentProvider::Pi,
+        _ => AgentProvider::Codex,
     }
 }
 

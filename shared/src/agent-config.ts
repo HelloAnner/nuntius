@@ -37,6 +37,24 @@ const FALLBACK_MODELS: Record<AgentProvider, AgentModelOption[]> = {
       reasoningEfforts: ["on"],
     },
   ],
+  pi: [
+    {
+      id: "anthropic/claude-opus-4-5",
+      label: "Claude Opus 4.5",
+      description: "Pi 默认 Anthropic 模型 · 深度推理",
+      isDefault: true,
+      defaultReasoningEffort: "medium",
+      reasoningEfforts: ["off", "low", "medium", "high"],
+    },
+    {
+      id: "anthropic/claude-sonnet-4-20250514",
+      label: "Claude Sonnet 4",
+      description: "均衡编码模型",
+      isDefault: false,
+      defaultReasoningEffort: "medium",
+      reasoningEfforts: ["off", "low", "medium", "high"],
+    },
+  ],
 };
 
 export interface AgentSelection {
@@ -73,6 +91,12 @@ export function agentThreadOptions(
     return {
       model: selection.model,
       thinking: selection.reasoningEffort || "max",
+    };
+  }
+  if (provider === "pi") {
+    return {
+      model: selection.model,
+      thinking: selection.reasoningEffort || "medium",
     };
   }
   return {

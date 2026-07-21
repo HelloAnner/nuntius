@@ -308,8 +308,10 @@
 .provider-option.selected { box-shadow: none; }
 .provider-option:first-child .provider-mark { color: var(--codex); background: var(--codex-soft); }
 .provider-option:nth-child(2) .provider-mark { color: var(--kimi); background: var(--kimi-soft); }
+.provider-option:nth-child(3) .provider-mark { color: var(--pi); background: var(--pi-soft); }
 .provider-option.selected:first-child .provider-mark { color: var(--codex); background: var(--codex-soft); }
 .provider-option.selected:nth-child(2) .provider-mark { color: var(--kimi); background: var(--kimi-soft); }
+.provider-option.selected:nth-child(3) .provider-mark { color: var(--pi); background: var(--pi-soft); }
 .agent-config-panel { border: 0; background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 6%, transparent), transparent 54%), var(--surface-2); }
 
 /* Authentication */

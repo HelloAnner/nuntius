@@ -2,7 +2,7 @@
  * Field names match the camelCase JSON produced by the Rust backends. */
 
 export type TransportSecurity = "secure" | "insecure" | "local";
-export type AgentProvider = "codex" | "kimi";
+export type AgentProvider = "codex" | "kimi" | "pi";
 
 export interface AgentModelOption {
   id: string;

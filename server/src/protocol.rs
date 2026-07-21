@@ -163,6 +163,7 @@ pub enum AgentProvider {
     #[default]
     Codex,
     Kimi,
+    Pi,
 }
 
 impl AgentProvider {
@@ -170,6 +171,7 @@ impl AgentProvider {
         match self {
             Self::Codex => "codex",
             Self::Kimi => "kimi",
+            Self::Pi => "pi",
         }
     }
 }

@@ -224,7 +224,7 @@ export function StatusDot({ tone, pulse = false }: { tone: StatusTone; pulse?: b
 export function ProviderBadge({ provider }: { provider: ThreadSummary["provider"] }) {
   return (
     <span className={`provider-badge ${provider}`}>
-      <span className="provider-mark">{provider === "kimi" ? "K" : "C"}</span>
+      <span className="provider-mark">{{ codex: "C", kimi: "K", pi: "P" }[provider]}</span>
       {providerLabel(provider)}
     </span>
   );

@@ -1,4 +1,4 @@
-use crate::executor::CommandExecutor;
+use crate::{executor::CommandExecutor, protocol::AgentProvider};
 use anyhow::{Context, Result};
 use directories::BaseDirs;
 use serde_json::Value;
@@ -250,16 +250,26 @@ pub async fn run(executor: CommandExecutor) {
         // than rollout files, so poll its session inventory at a lower rate.
         // This also picks up work started from another Kimi CLI on the device.
         if ticks == 1 || ticks.is_multiple_of(8) {
-            match executor.reconcile_kimi_recent(false).await {
+            match executor.reconcile_provider_recent(AgentProvider::Kimi, false).await {
                 Ok(count) if count > 0 => tracing::info!(count, "recent Kimi sessions reconciled"),
                 Ok(_) => {}
                 Err(error) => tracing::warn!(error=?error,"recent Kimi reconciliation failed"),
             }
         }
         if ticks.is_multiple_of(160)
-            && let Err(error) = executor.reconcile_kimi_recent(true).await
+            && let Err(error) = executor.reconcile_provider_recent(AgentProvider::Kimi, true).await
         {
             tracing::warn!(error=?error,"recent archived Kimi reconciliation failed");
+        }
+
+        // Pi's durable history lives in `~/.pi/agent/sessions`; poll it at the
+        // same rate to pick up sessions from external `pi` CLI processes.
+        if ticks == 1 || ticks.is_multiple_of(8) {
+            match executor.reconcile_provider_recent(AgentProvider::Pi, false).await {
+                Ok(count) if count > 0 => tracing::info!(count, "recent Pi sessions reconciled"),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(error=?error,"recent Pi reconciliation failed"),
+            }
         }
         if (ticks == 1 || ticks.is_multiple_of(80))
             && let Err(error) = mark_stalled_rollouts(&executor).await

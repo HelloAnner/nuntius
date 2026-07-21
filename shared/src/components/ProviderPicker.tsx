@@ -8,6 +8,7 @@ const PROVIDERS: Array<{
 }> = [
   { id: "codex", label: "Codex", mark: "C", description: "OpenAI 编码代理" },
   { id: "kimi", label: "Kimi", mark: "K", description: "Kimi Code CLI" },
+  { id: "pi", label: "Pi", mark: "P", description: "Pi 编码代理 (RPC)" },
 ];
 
 export function ProviderPicker({

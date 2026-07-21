@@ -224,7 +224,8 @@ async fn publish_repaired_thread(executor: &CommandExecutor, thread_id: &str) ->
 
 fn is_identified_active(provider: AgentProvider, state: &AgentThreadState) -> bool {
     state.status.eq_ignore_ascii_case("active")
-        && (provider == AgentProvider::Kimi || state.active_turn_id.is_some())
+        && (matches!(provider, AgentProvider::Kimi | AgentProvider::Pi)
+            || state.active_turn_id.is_some())
 }
 
 fn is_ambiguous_non_running(provider: AgentProvider, state: &AgentThreadState) -> bool {
@@ -318,5 +319,6 @@ mod tests {
         assert!(!is_identified_active(AgentProvider::Codex, &codex));
         assert!(is_ambiguous_non_running(AgentProvider::Codex, &codex));
         assert!(is_identified_active(AgentProvider::Kimi, &codex));
+        assert!(is_identified_active(AgentProvider::Pi, &codex));
     }
 }

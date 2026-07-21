@@ -3,6 +3,12 @@ import { modelsForProvider } from "../agent-config";
 import type { AgentProvider, AgentProviderStatus } from "../types";
 import { SelectMenu } from "./ui";
 
+const PROVIDER_HEADINGS: Record<AgentProvider, string> = {
+  codex: "OpenAI Codex",
+  kimi: "Kimi Code",
+  pi: "Pi Agent",
+};
+
 const EFFORT_LABELS: Record<string, string> = {
   none: "关闭",
   on: "开启",
@@ -41,7 +47,7 @@ export function ModelPicker({
     <section className="agent-config-panel" aria-label="模型配置">
       <div className="agent-config-heading">
         <span>模型配置</span>
-        <small>{provider === "kimi" ? "Kimi Code" : "OpenAI Codex"}</small>
+        <small>{PROVIDER_HEADINGS[provider]}</small>
       </div>
       <div className="agent-model-field">
         <span>模型</span>

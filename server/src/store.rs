@@ -1603,10 +1603,10 @@ fn thread_from_row(r: sqlx::sqlite::SqliteRow) -> ThreadSummary {
         id: r.get("id"),
         device_id: r.get("device_id"),
         project_id: r.get("project_id"),
-        provider: if r.get::<String, _>("provider") == "kimi" {
-            AgentProvider::Kimi
-        } else {
-            AgentProvider::Codex
+        provider: match r.get::<String, _>("provider").as_str() {
+            "kimi" => AgentProvider::Kimi,
+            "pi" => AgentProvider::Pi,
+            _ => AgentProvider::Codex,
         },
         app_server_thread_id: r.get("app_server_thread_id"),
         title: r.get("title"),

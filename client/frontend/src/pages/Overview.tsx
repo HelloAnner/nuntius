@@ -65,7 +65,7 @@ export function OverviewPage() {
                   <div className="section-label micro">需要处理 · {issueCount}</div>
                   <div className="list-group">
                     {!hasProvider ? (
-                      <IssueRow title="没有可用的编码代理" detail="请安装 Codex 或 Kimi CLI" />
+                      <IssueRow title="没有可用的编码代理" detail="请安装 Codex、Kimi 或 Pi CLI" />
                     ) : null}
                     {!data.paired ? (
                       <IssueRow title="尚未配对" detail="可在远程控制台的设置页获取配对码" />

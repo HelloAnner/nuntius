@@ -420,7 +420,7 @@ components:
             type: object
             required: [provider, label, available, status, models]
             properties:
-              provider: {enum: [codex, kimi]}
+              provider: {enum: [codex, kimi, pi]}
               label: {type: string}
               available: {type: boolean}
               status: {type: string}
@@ -456,7 +456,7 @@ components:
         id: {type: string}
         deviceId: {type: string}
         projectId: {type: string}
-        provider: {enum: [codex, kimi], default: codex}
+        provider: {enum: [codex, kimi, pi], default: codex}
         appServerThreadId: {type: [string, 'null']}
         title: {type: string}
         status: {type: string}
@@ -487,7 +487,7 @@ components:
       properties:
         title: {type: [string, 'null'], maxLength: 256}
         firstMessage: {type: [string, 'null'], maxLength: 262144}
-        provider: {enum: [codex, kimi], default: codex}
+        provider: {enum: [codex, kimi, pi], default: codex}
         accessMode: {enum: [full, ask], default: full}
         options: {type: object, additionalProperties: true}
     StartTurn:

@@ -144,7 +144,8 @@ impl CommandExecutor {
                 let state = self.resume_provider_thread(&thread).await?;
                 let provider_turn = state.active_turn_id;
                 if provider_turn.is_none()
-                    && !(thread.provider == AgentProvider::Kimi && state.status == "active")
+                    && !(matches!(thread.provider, AgentProvider::Kimi | AgentProvider::Pi)
+                        && state.status == "active")
                 {
                     if state.status == "active" {
                         bail!("active provider turn identity is unavailable")
@@ -500,9 +501,12 @@ impl CommandExecutor {
             {
                 Ok(result) => Ok(result),
                 Err(error)
-                    if thread.provider == AgentProvider::Codex && is_missing_app_thread(&error) =>
+                    if (thread.provider == AgentProvider::Codex
+                        && is_missing_app_thread(&error))
+                        || (thread.provider == AgentProvider::Pi
+                            && is_missing_pi_session(&error)) =>
                 {
-                    thread = self.recreate_empty_app_thread(&thread).await?;
+                    thread = self.recreate_empty_provider_thread(&thread).await?;
                     self.begin_turn(&thread, request, &input, &attachment_views)
                         .await
                 }
@@ -511,7 +515,8 @@ impl CommandExecutor {
         }
         let state = self.resume_provider_thread(&thread).await?;
         if state.active_turn_id.is_some()
-            || (thread.provider == AgentProvider::Kimi && state.status == "active")
+            || (matches!(thread.provider, AgentProvider::Kimi | AgentProvider::Pi)
+                && state.status == "active")
         {
             let options = self
                 .provider_turn_options(&thread, &request.options)
@@ -602,11 +607,11 @@ impl CommandExecutor {
         thread: &ThreadSummary,
         requested: &Value,
     ) -> Result<Value> {
-        if thread.provider != AgentProvider::Kimi {
+        if thread.provider == AgentProvider::Codex {
             return Ok(requested.clone());
         }
         let saved = self.store.app_server_options(&thread.id).await?;
-        Ok(merge_kimi_turn_options(&saved, requested))
+        Ok(merge_turn_options(&saved, requested))
     }
 
     async fn begin_turn(
@@ -658,18 +663,18 @@ impl CommandExecutor {
         Ok(json!({"operation":"start","turnId":local_turn,"providerResult":result}))
     }
 
-    async fn recreate_empty_app_thread(&self, thread: &ThreadSummary) -> Result<ThreadSummary> {
+    async fn recreate_empty_provider_thread(&self, thread: &ThreadSummary) -> Result<ThreadSummary> {
         if self.store.thread_has_turns(&thread.id).await? {
-            bail!("refusing to replace an App Server thread that already has local history")
+            bail!("refusing to replace a provider thread that already has local history")
         }
-        if thread.provider != AgentProvider::Codex {
-            bail!("only an empty Codex thread can be recreated")
+        if !matches!(thread.provider, AgentProvider::Codex | AgentProvider::Pi) {
+            bail!("only an empty Codex or Pi thread can be recreated")
         }
         let options = self.store.app_server_options(&thread.id).await?;
         let access_mode = self.store.thread_access_mode(&thread.id).await?;
         let app_id = self
             .start_provider_thread(
-                AgentProvider::Codex,
+                thread.provider,
                 &thread.project_id,
                 &thread.title,
                 access_mode,
@@ -681,9 +686,10 @@ impl CommandExecutor {
             .await?;
         tracing::info!(
             thread_id = %thread.id,
+            provider = thread.provider.as_str(),
             previous_app_thread_id = ?thread.app_server_thread_id,
             app_thread_id = %app_id,
-            "recreated empty App Server thread after missing rollout"
+            "recreated empty provider thread after missing provider session"
         );
         self.command_thread(&thread.id).await
     }
@@ -890,30 +896,32 @@ impl CommandExecutor {
         Ok(refreshed)
     }
 
-    /// Reconcile Kimi sessions created or changed outside Nuntius. Kimi's web
-    /// service owns the durable session index, so there is no rollout-file
-    /// watcher equivalent to Codex's.
-    pub async fn reconcile_kimi_recent(&self, archived: bool) -> Result<usize> {
-        let threads = self
-            .agents
-            .list_threads(AgentProvider::Kimi, None, archived)
-            .await?;
+    /// Reconcile sessions created or changed outside Nuntius for providers
+    /// with a service/file-owned session index (Kimi's web service, Pi's
+    /// session directory), so there is no rollout-file watcher equivalent to
+    /// Codex's.
+    pub async fn reconcile_provider_recent(
+        &self,
+        provider: AgentProvider,
+        archived: bool,
+    ) -> Result<usize> {
+        let threads = self.agents.list_threads(provider, None, archived).await?;
         let mut refreshed = 0;
         for provider_thread in threads {
             let Some(session_id) = provider_thread.get("id").and_then(Value::as_str) else {
                 continue;
             };
             if self
-                .provider_thread_is_removed(AgentProvider::Kimi, &provider_thread)
+                .provider_thread_is_removed(provider, &provider_thread)
                 .await?
             {
                 continue;
             }
             let fingerprint = thread_fingerprint(&provider_thread)?;
-            let key = thread_fingerprint_key(AgentProvider::Kimi, session_id);
+            let key = thread_fingerprint_key(provider, session_id);
             let local_thread_id = self
                 .store
-                .local_provider_thread_id(AgentProvider::Kimi, session_id)
+                .local_provider_thread_id(provider, session_id)
                 .await?;
             let active = app_thread_status(&provider_thread) == "active";
             if local_thread_id.is_some()
@@ -929,10 +937,10 @@ impl CommandExecutor {
             };
             let local_thread_id = self
                 .store
-                .import_provider_thread(AgentProvider::Kimi, &project_id, &provider_thread)
+                .import_provider_thread(provider, &project_id, &provider_thread)
                 .await?;
             match self
-                .import_and_sync_thread(AgentProvider::Kimi, &local_thread_id, &provider_thread)
+                .import_and_sync_thread(provider, &local_thread_id, &provider_thread)
                 .await
             {
                 Ok(()) => {
@@ -952,7 +960,7 @@ impl CommandExecutor {
                     refreshed += 1;
                 }
                 Err(error) => {
-                    tracing::warn!(%session_id,error=?error,"recent Kimi session reconciliation failed")
+                    tracing::warn!(provider=provider.as_str(),%session_id,error=?error,"recent provider session reconciliation failed")
                 }
             }
         }
@@ -1080,7 +1088,7 @@ impl CommandExecutor {
             .await?
             .context("project not found")?;
         let mut imported = 0;
-        for provider in [AgentProvider::Codex, AgentProvider::Kimi] {
+        for provider in [AgentProvider::Codex, AgentProvider::Kimi, AgentProvider::Pi] {
             match self
                 .discover_pages(
                     provider,
@@ -1106,7 +1114,7 @@ impl CommandExecutor {
             .state_set("history_completion_announced", "false")
             .await?;
         let mut imported = 0;
-        for provider in [AgentProvider::Codex, AgentProvider::Kimi] {
+        for provider in [AgentProvider::Codex, AgentProvider::Kimi, AgentProvider::Pi] {
             for archived in [false, true] {
                 match self.discover_pages(provider, None, None, archived).await {
                     Ok(count) => imported += count,
@@ -1724,6 +1732,237 @@ async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Resul
     Ok(())
 }
 
+pub async fn process_pi_events(executor: CommandExecutor) {
+    let mut receiver = executor.agents.pi.subscribe();
+    loop {
+        match receiver.recv().await {
+            Ok(message) => {
+                if let Err(error) = process_pi_event(&executor, message).await {
+                    tracing::warn!(error=?error, "failed to process Pi event")
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::warn!(skipped, "Pi event processor lagged; reconciling history");
+                if let Err(error) = executor.discover_all().await {
+                    tracing::warn!(error=?error, "history reconciliation after Pi event loss failed");
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+/// Pi RPC events are translated into the same `agent.*` vocabulary the Kimi
+/// pipeline emits, so both consoles reuse one live-stream merger.
+async fn process_pi_event(executor: &CommandExecutor, message: Value) -> Result<()> {
+    let session_id = message
+        .get("session_id")
+        .and_then(Value::as_str)
+        .context("Pi event has no session id")?;
+    if session_id.is_empty() {
+        // The process has not been registered to a session yet.
+        return Ok(());
+    }
+    let event = message.get("event").cloned().unwrap_or(Value::Null);
+    let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+    let Some(thread_id) = executor
+        .store
+        .local_provider_thread_id(AgentProvider::Pi, session_id)
+        .await?
+    else {
+        return Ok(());
+    };
+    let thread = executor.thread(&thread_id).await?;
+
+    if event_type == "extension_ui_request" {
+        let method = event.get("method").and_then(Value::as_str).unwrap_or("");
+        if !matches!(method, "select" | "confirm" | "input" | "editor") {
+            return Ok(());
+        }
+        let request_id = event
+            .get("id")
+            .and_then(Value::as_str)
+            .context("Pi extension UI request has no id")?;
+        let approval_id = format!("apr_pi_{request_id}");
+        executor
+            .store
+            .save_provider_request(
+                AgentProvider::Pi,
+                &approval_id,
+                &json!({"sessionId":session_id,"requestId":request_id,"uiMethod":method}),
+                "pi/extension_ui",
+                &event,
+                Some(&thread.project_id),
+                Some(&thread_id),
+            )
+            .await?;
+        executor
+            .emit(
+                "approval.requested",
+                Some(&thread.project_id),
+                Some(&thread_id),
+                None,
+                json!({"approvalId":approval_id,"method":"pi/extension_ui","params":event}),
+                true,
+            )
+            .await?;
+        return Ok(());
+    }
+
+    match event_type {
+        "agent_start" => {
+            executor
+                .store
+                .mark_app_turn_started(&thread_id, None)
+                .await?;
+            executor.sync_thread(&thread_id).await?;
+            executor.emit_thread_summary(&thread_id).await?;
+            executor
+                .emit(
+                    "agent.turn.started",
+                    Some(&thread.project_id),
+                    Some(&thread_id),
+                    None,
+                    json!({}),
+                    true,
+                )
+                .await?;
+        }
+        "agent_end" => {
+            let reason = pi_agent_end_reason(&event);
+            executor
+                .store
+                .complete_app_turn(&thread_id, None, kimi_turn_status(reason))
+                .await?;
+            executor.sync_thread(&thread_id).await?;
+            executor.emit_thread_summary(&thread_id).await?;
+            executor
+                .emit(
+                    "agent.turn.ended",
+                    Some(&thread.project_id),
+                    Some(&thread_id),
+                    None,
+                    json!({"reason":reason}),
+                    true,
+                )
+                .await?;
+            executor.refresh_thread_history(&thread_id).await?;
+            executor.emit_thread_summary(&thread_id).await?;
+        }
+        "message_update" => {
+            let delta = event.get("assistantMessageEvent").cloned().unwrap_or(Value::Null);
+            let (kind, text) = match delta.get("type").and_then(Value::as_str) {
+                Some("text_delta") => (
+                    "agent.assistant.delta",
+                    delta.get("delta").and_then(Value::as_str),
+                ),
+                Some("thinking_delta") => (
+                    "agent.thinking.delta",
+                    delta.get("delta").and_then(Value::as_str),
+                ),
+                _ => ("", None),
+            };
+            if let Some(text) = text.filter(|text| !text.is_empty()) {
+                executor
+                    .emit(
+                        kind,
+                        Some(&thread.project_id),
+                        Some(&thread_id),
+                        None,
+                        json!({"delta":text}),
+                        false,
+                    )
+                    .await?;
+            }
+        }
+        "tool_execution_start" => {
+            executor
+                .emit(
+                    "agent.tool.call.started",
+                    Some(&thread.project_id),
+                    Some(&thread_id),
+                    None,
+                    json!({
+                        "toolCallId": event.get("toolCallId"),
+                        "name": event.get("toolName"),
+                        "args": event.get("args"),
+                    }),
+                    true,
+                )
+                .await?;
+        }
+        "tool_execution_update" => {
+            let update = event
+                .pointer("/partialResult/content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !update.is_empty() {
+                executor
+                    .emit(
+                        "agent.tool.progress",
+                        Some(&thread.project_id),
+                        Some(&thread_id),
+                        None,
+                        json!({
+                            "toolCallId": event.get("toolCallId"),
+                            "name": event.get("toolName"),
+                            "update": update,
+                        }),
+                        false,
+                    )
+                    .await?;
+            }
+        }
+        "tool_execution_end" => {
+            let output = event
+                .pointer("/result/content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            executor
+                .emit(
+                    "agent.tool.result",
+                    Some(&thread.project_id),
+                    Some(&thread_id),
+                    None,
+                    json!({
+                        "toolCallId": event.get("toolCallId"),
+                        "name": event.get("toolName"),
+                        "output": output,
+                        "isError": event.get("isError").and_then(Value::as_bool).unwrap_or(false),
+                    }),
+                    true,
+                )
+                .await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn pi_agent_end_reason(event: &Value) -> &'static str {
+    let stop_reason = event
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .rev()
+        .find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+        .and_then(|message| message.get("stopReason").and_then(Value::as_str));
+    match stop_reason {
+        Some("aborted") => "cancelled",
+        Some("error") => "failed",
+        _ => "completed",
+    }
+}
+
 fn kimi_turn_status(reason: &str) -> &'static str {
     match reason {
         "cancelled" => "interrupted",
@@ -1745,7 +1984,7 @@ fn kimi_event_id(payload: &Value, key: &str) -> Option<String> {
 fn object(value: Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
 }
-fn merge_kimi_turn_options(saved: &Value, requested: &Value) -> Value {
+fn merge_turn_options(saved: &Value, requested: &Value) -> Value {
     let mut options = object(saved.clone());
     options.extend(object(requested.clone()));
     Value::Object(options)
@@ -1754,6 +1993,12 @@ fn is_missing_app_thread(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<AppServerCallError>()
         .is_some_and(AppServerCallError::is_missing_thread)
+}
+/// Pi only persists a session file on its first message; a thread created
+/// but never prompted has nothing to reattach to after a Client restart.
+fn is_missing_pi_session(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    message.contains("Pi session") && message.contains("not found")
 }
 fn derive_title(text: &str) -> String {
     text.chars().take(40).collect()
@@ -2170,7 +2415,7 @@ done
     #[test]
     fn kimi_turn_options_inherit_saved_selection_and_allow_request_overrides() {
         assert_eq!(
-            merge_kimi_turn_options(
+            merge_turn_options(
                 &json!({
                     "model": "kimi-code/k3",
                     "thinking": "max",

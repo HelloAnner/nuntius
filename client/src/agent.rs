@@ -2,6 +2,7 @@ use crate::{
     app_server::AppServerRuntime,
     config::ClientConfig,
     kimi::KimiRuntime,
+    pi::PiRuntime,
     protocol::{AgentModelOption, AgentProvider, AgentProviderStatus, ConversationAccessMode},
 };
 use anyhow::{Context, Result, bail};
@@ -13,6 +14,7 @@ use tokio::process::Command;
 pub struct AgentRuntimes {
     pub codex: AppServerRuntime,
     pub kimi: KimiRuntime,
+    pub pi: PiRuntime,
     config: Arc<ClientConfig>,
 }
 
@@ -31,6 +33,7 @@ impl AgentRuntimes {
         Ok(Self {
             codex: AppServerRuntime::new(config.clone())?,
             kimi,
+            pi: PiRuntime::new(config.clone()),
             config,
         })
     }
@@ -40,6 +43,7 @@ impl AgentRuntimes {
         Self {
             codex: AppServerRuntime::new_local(config.clone()),
             kimi: KimiRuntime::new(config.clone()),
+            pi: PiRuntime::new(config.clone()),
             config,
         }
     }
@@ -94,7 +98,7 @@ impl AgentRuntimes {
             version: codex_version,
             models: codex_models,
         };
-        vec![codex, self.kimi.provider_status().await]
+        vec![codex, self.kimi.provider_status().await, self.pi.provider_status().await]
     }
 
     async fn codex_model_catalog(&self) -> Result<Vec<AgentModelOption>> {
@@ -151,6 +155,13 @@ impl AgentRuntimes {
                 self.kimi.subscribe_session(&id).await;
                 Ok(id)
             }
+            AgentProvider::Pi => {
+                let result = self
+                    .pi
+                    .create_session(cwd, title, access_mode, &options)
+                    .await?;
+                extract_id(&result, &["id"]).context("Pi create-session response has no session id")
+            }
         }
     }
 
@@ -172,6 +183,8 @@ impl AgentRuntimes {
                     .await
             }
             AgentProvider::Kimi => self.kimi.archive_session(session_id, archived).await,
+            // Pi has no provider-side archive; Nuntius keeps the projection.
+            AgentProvider::Pi => Ok(json!({"archived":archived,"scope":"nuntius"})),
         }
     }
 
@@ -238,6 +251,7 @@ impl AgentRuntimes {
                         .map(str::to_owned),
                 })
             }
+            AgentProvider::Pi => self.pi.thread_state(session_id).await,
         }
     }
 
@@ -268,6 +282,7 @@ impl AgentRuntimes {
                     .submit_prompt(session_id, input, access_mode, options)
                     .await
             }
+            AgentProvider::Pi => self.pi.submit_prompt(session_id, input, options).await,
         }
     }
 
@@ -299,6 +314,7 @@ impl AgentRuntimes {
                     .steer_prompt(session_id, input, access_mode, options)
                     .await
             }
+            AgentProvider::Pi => self.pi.steer_prompt(session_id, input, options).await,
         }
     }
 
@@ -319,6 +335,7 @@ impl AgentRuntimes {
                     .await
             }
             AgentProvider::Kimi => self.kimi.interrupt(session_id).await,
+            AgentProvider::Pi => self.pi.interrupt(session_id).await,
         }
     }
 
@@ -340,6 +357,7 @@ impl AgentRuntimes {
                 let snapshot = self.kimi.snapshot(session_id).await?;
                 normalize_kimi_snapshot(&snapshot)
             }
+            AgentProvider::Pi => self.pi.read_thread(session_id).await,
         }
     }
 
@@ -391,6 +409,7 @@ impl AgentRuntimes {
                 }
                 Ok(threads)
             }
+            AgentProvider::Pi => self.pi.list_sessions(cwd, archived).await,
         }
     }
 
@@ -429,10 +448,34 @@ impl AgentRuntimes {
                     .await?;
                 Ok(())
             }
+            AgentProvider::Pi => {
+                let session_id = provider_request_id
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .context("Pi approval has no session")?;
+                let request_id = provider_request_id
+                    .get("requestId")
+                    .and_then(Value::as_str)
+                    .context("Pi approval has no request id")?;
+                let ui_method = provider_request_id
+                    .get("uiMethod")
+                    .and_then(Value::as_str)
+                    .unwrap_or("confirm");
+                self.pi
+                    .resolve_ui(
+                        session_id,
+                        request_id,
+                        ui_method,
+                        decision,
+                        response.as_ref(),
+                    )
+                    .await
+            }
         }
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        self.pi.shutdown().await;
         self.kimi.shutdown().await;
         self.codex.shutdown().await
     }

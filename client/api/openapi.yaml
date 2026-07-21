@@ -3,7 +3,7 @@ info:
   title: Nuntius Client Local API
   version: 0.1.0
   description: |
-    当前工作电脑的 loopback-only 管理 API，通过统一 provider 层控制本机 Codex 或 Kimi。
+    当前工作电脑的 loopback-only 管理 API，通过统一 provider 层控制本机 Codex、Kimi 或 Pi。
     服务仅允许 127.0.0.1/localhost/[::1] Host；带 Origin 时也必须是本机 HTTP
     Origin。请求体上限 1 MiB。该 API 不代理其他设备。
 servers:
@@ -35,7 +35,7 @@ paths:
                       type: object
                       required: [provider, label, available, status, models]
                       properties:
-                        provider: {enum: [codex, kimi]}
+                        provider: {enum: [codex, kimi, pi]}
                         label: {type: string}
                         available: {type: boolean}
                         status: {type: string}
@@ -210,7 +210,7 @@ components:
         id: {type: string}
         deviceId: {type: string}
         projectId: {type: string}
-        provider: {enum: [codex, kimi], default: codex}
+        provider: {enum: [codex, kimi, pi], default: codex}
         appServerThreadId: {type: [string, 'null']}
         title: {type: string}
         status: {type: string}
@@ -231,7 +231,7 @@ components:
       properties:
         title: {type: [string, 'null'], maxLength: 256}
         firstMessage: {type: [string, 'null'], maxLength: 262144}
-        provider: {enum: [codex, kimi], default: codex}
+        provider: {enum: [codex, kimi, pi], default: codex}
         accessMode: {enum: [full, ask], default: full}
         options: {type: object, additionalProperties: true}
     StartTurn:

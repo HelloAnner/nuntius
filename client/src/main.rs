@@ -13,6 +13,7 @@ mod executor;
 mod history_monitor;
 mod kimi;
 mod pairing;
+mod pi;
 mod protocol;
 mod runtime_reconciler;
 mod service;
@@ -350,6 +351,7 @@ async fn run() -> Result<()> {
     ));
     let kimi_event_stream_task = tokio::spawn(agents.kimi.clone().run_event_stream());
     let kimi_events_task = tokio::spawn(executor::process_kimi_events(executor.clone()));
+    let pi_events_task = tokio::spawn(executor::process_pi_events(executor.clone()));
     if !recovery_candidates.is_empty() {
         tracing::info!(
             count = recovery_candidates.len(),
@@ -455,6 +457,7 @@ async fn run() -> Result<()> {
                     &app_events_task,
                     &kimi_event_stream_task,
                     &kimi_events_task,
+                    &pi_events_task,
                     &command_queue_task,
                     &maintenance_task,
                     &history_monitor_task,
@@ -522,6 +525,7 @@ async fn run() -> Result<()> {
     app_events_task.abort();
     kimi_event_stream_task.abort();
     kimi_events_task.abort();
+    pi_events_task.abort();
     command_queue_task.abort();
     maintenance_task.abort();
     agents.shutdown().await?;
@@ -540,6 +544,7 @@ fn finished_critical_task(
     app_events: &tokio::task::JoinHandle<()>,
     kimi_event_stream: &tokio::task::JoinHandle<()>,
     kimi_events: &tokio::task::JoinHandle<()>,
+    pi_events: &tokio::task::JoinHandle<()>,
     command_queue: &tokio::task::JoinHandle<()>,
     maintenance: &tokio::task::JoinHandle<()>,
     history_monitor: &tokio::task::JoinHandle<()>,
@@ -551,6 +556,7 @@ fn finished_critical_task(
         ("app_events", app_events),
         ("kimi_event_stream", kimi_event_stream),
         ("kimi_events", kimi_events),
+        ("pi_events", pi_events),
         ("command_queue", command_queue),
         ("maintenance", maintenance),
         ("history_monitor", history_monitor),

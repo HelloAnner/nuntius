@@ -8,6 +8,7 @@ import {
   agentThreadOptions,
   defaultAgentSelection,
   newIdemKey,
+  providerLabel,
   useToast,
   type AgentProvider,
   type AgentSelection,
@@ -136,7 +137,7 @@ export function NewThreadSheet({
             id={`first-msg-${projectId}`}
             rows={4}
             style={{ resize: "vertical", minHeight: 96 }}
-            placeholder={`描述一下想让 ${provider === "kimi" ? "Kimi" : "Codex"} 做什么…`}
+            placeholder={`描述一下想让 ${providerLabel(provider)} 做什么…`}
             value={firstMessage}
             onChange={(event) => setFirstMessage(event.target.value)}
           />

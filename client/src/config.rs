@@ -27,6 +27,8 @@ pub struct ClientConfig {
     pub kimi_command: String,
     pub kimi_args: Vec<String>,
     pub kimi_server_url: String,
+    pub pi_command: String,
+    pub pi_args: Vec<String>,
     pub log_format: String,
     pub auto_update: bool,
     pub update_interval_seconds: u64,
@@ -57,6 +59,8 @@ impl Default for ClientConfig {
                 "58627".into(),
             ],
             kimi_server_url: "http://127.0.0.1:58627".into(),
+            pi_command: "pi".into(),
+            pi_args: vec!["--mode".into(), "rpc".into()],
             log_format: "pretty".into(),
             auto_update: true,
             update_interval_seconds: 60,
@@ -147,6 +151,14 @@ impl ClientConfig {
                 .any(|argument| argument.is_empty() || argument.contains('\0'))
         {
             bail!("kimi_command and kimi_args must not contain empty or NUL arguments")
+        }
+        if self.pi_command.trim().is_empty()
+            || self
+                .pi_args
+                .iter()
+                .any(|argument| argument.is_empty() || argument.contains('\0'))
+        {
+            bail!("pi_command and pi_args must not contain empty or NUL arguments")
         }
         if self.auto_update && self.update_interval_seconds < 10 {
             bail!("update_interval_seconds must be at least 10")

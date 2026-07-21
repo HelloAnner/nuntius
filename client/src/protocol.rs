@@ -81,12 +81,14 @@ pub enum AgentProvider {
     #[default]
     Codex,
     Kimi,
+    Pi,
 }
 impl AgentProvider {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Kimi => "kimi",
+            Self::Pi => "pi",
         }
     }
 }

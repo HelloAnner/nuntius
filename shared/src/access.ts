@@ -1,7 +1,14 @@
 export type ConversationAccessMode = "full" | "ask";
 
 export function providerLabel(provider: import("./types").AgentProvider): string {
-  return provider === "kimi" ? "Kimi" : "Codex";
+  switch (provider) {
+    case "kimi":
+      return "Kimi";
+    case "pi":
+      return "Pi";
+    default:
+      return "Codex";
+  }
 }
 
 /** Options accepted by Codex app-server thread/start. */
