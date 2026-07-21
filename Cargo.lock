@@ -1495,6 +1495,7 @@ dependencies = [
  "directories",
  "fs2",
  "hex",
+ "nuntius-updater",
  "reqwest",
  "serde",
  "serde_json",

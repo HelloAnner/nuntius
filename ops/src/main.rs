@@ -22,6 +22,9 @@ const MACOS_TARGET: &str = "aarch64-apple-darwin";
 const LINUX_TARGET: &str = "x86_64-unknown-linux-gnu";
 const DEFAULT_MACOS_SIGNING_IDENTITY: &str = "Nuntius Local Release";
 const MACOS_CLIENT_SIGNING_IDENTIFIER: &str = "com.helloanner.nuntius-client";
+const MACOS_OPS_SIGNING_IDENTIFIER: &str = "com.helloanner.nuntius-ops";
+const OPS_UPDATE_PROBATION: Duration = Duration::from_secs(60);
+const OPS_UPDATE_INPUTS: &[&str] = &["ops", "updater", "Cargo.toml", "Cargo.lock"];
 const SERVER_BUILDER_DOCKERFILE: &str = include_str!("../docker/server-builder.Dockerfile");
 
 #[derive(Parser)]
@@ -49,6 +52,7 @@ enum OpsCommand {
         force: bool,
     },
     Status,
+    BuildInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +65,7 @@ struct OpsConfig {
     rust_toolchain: String,
     linux_builder_image: String,
     macos_signing_identity: String,
+    macos_signing_identity_sha1: Option<String>,
     state_dir: PathBuf,
     public_base_url: String,
     ssh_program: String,
@@ -84,6 +89,7 @@ impl Default for OpsConfig {
             rust_toolchain: "1.94.0".into(),
             linux_builder_image: "nuntius-server-builder:rust-1.94.0".into(),
             macos_signing_identity: DEFAULT_MACOS_SIGNING_IDENTITY.into(),
+            macos_signing_identity_sha1: None,
             state_dir: default_root().unwrap_or_else(|_| PathBuf::from(".nuntius-ops")),
             public_base_url: "http://47.97.154.221:8765/".into(),
             ssh_program: "ssh".into(),
@@ -117,6 +123,10 @@ impl OpsConfig {
             || self.rust_toolchain.trim().is_empty()
             || self.linux_builder_image.trim().is_empty()
             || !valid_signing_identity(&self.macos_signing_identity)
+            || self
+                .macos_signing_identity_sha1
+                .as_deref()
+                .is_some_and(|value| !valid_certificate_sha1(value))
             || !self.state_dir.is_absolute()
             || self.ssh_program.trim().is_empty()
             || self.scp_program.trim().is_empty()
@@ -149,6 +159,7 @@ struct OpsState {
     observed_sha: Option<String>,
     building_sha: Option<String>,
     deployed_sha: Option<String>,
+    ops_sha: Option<String>,
     last_sequence: u64,
     phase: String,
     last_error: Option<String>,
@@ -189,6 +200,11 @@ struct BuildOutput {
     release: ClientRelease,
 }
 
+#[derive(Debug, Clone)]
+struct SigningIdentity {
+    sha1: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -200,11 +216,34 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     let config_path = cli.config.unwrap_or(default_config_path()?);
+    if matches!(&cli.command, OpsCommand::Run | OpsCommand::Once { .. }) {
+        // Advance or roll back an in-flight update before the new binary parses
+        // and validates the complete configuration. This keeps a config-schema
+        // regression from trapping launchd in a crash loop on the bad binary.
+        let update_dir = startup_update_dir(&config_path);
+        nuntius_updater::handle_startup(&update_dir)?;
+    }
     match cli.command {
         OpsCommand::Init { force } => initialize(&config_path, force),
-        OpsCommand::Run => run(OpsConfig::load(&config_path)?).await,
-        OpsCommand::Once { force } => reconcile_once(OpsConfig::load(&config_path)?, force).await,
+        OpsCommand::Run => {
+            let config = OpsConfig::load(&config_path)?;
+            run(config).await
+        }
+        OpsCommand::Once { force } => {
+            let config = OpsConfig::load(&config_path)?;
+            reconcile_once(config, force).await
+        }
         OpsCommand::Status => print_status(&OpsConfig::load(&config_path)?),
+        OpsCommand::BuildInfo => {
+            println!(
+                "{}",
+                serde_json::to_string(&nuntius_updater::BuildInfo::current(
+                    "nuntius-ops",
+                    env!("CARGO_PKG_VERSION"),
+                ))?
+            );
+            Ok(())
+        }
     }
 }
 
@@ -234,6 +273,7 @@ async fn run(config: OpsConfig) -> Result<()> {
     prepare_state_dirs(&config)?;
     let _lock = acquire_lock(&config)?;
     ensure_environment(&config).await?;
+    complete_ops_update_probation(&config).await?;
     let (tx, mut rx) = watch::channel::<Option<String>>(None);
     let detector_config = config.clone();
     tokio::spawn(async move {
@@ -268,6 +308,18 @@ async fn run(config: OpsConfig) -> Result<()> {
             continue;
         }
         loop {
+            if let Err(error) = ensure_ops_current(&config, &sha).await {
+                record_failure(&config, &sha, &error)?;
+                tracing::error!(%sha,error=?error,"ops self-update failed");
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(config.retry_seconds)) => {}
+                    changed = rx.changed() => {
+                        if changed.is_err() { return Ok(()); }
+                        if let Some(latest) = rx.borrow().clone() { sha = latest; }
+                    }
+                }
+                continue;
+            }
             match build_release(&config, &sha).await {
                 Ok(output) => {
                     if let Some(latest) = rx.borrow().clone()
@@ -315,7 +367,9 @@ async fn reconcile_once(config: OpsConfig, force: bool) -> Result<()> {
     prepare_state_dirs(&config)?;
     let _lock = acquire_lock(&config)?;
     ensure_environment(&config).await?;
+    complete_ops_update_probation(&config).await?;
     let sha = remote_head(&config).await?;
+    ensure_ops_current(&config, &sha).await?;
     if !force && load_state(&config)?.deployed_sha.as_deref() == Some(sha.as_str()) {
         tracing::info!(%sha, "latest repository commit is already deployed");
         return Ok(());
@@ -330,6 +384,188 @@ async fn reconcile_once(config: OpsConfig, force: bool) -> Result<()> {
     })?;
     cleanup_local_builds(&config, &output.source_dir)?;
     Ok(())
+}
+
+async fn complete_ops_update_probation(config: &OpsConfig) -> Result<()> {
+    if !nuntius_updater::startup_update_pending(&config.state_dir)? {
+        update_state(config, |state| {
+            state.ops_sha = Some(nuntius_updater::build_sha().into());
+        })?;
+        return Ok(());
+    }
+    tracing::info!(
+        seconds = OPS_UPDATE_PROBATION.as_secs(),
+        "ops self-update is in startup probation"
+    );
+    tokio::time::sleep(OPS_UPDATE_PROBATION).await;
+    remote_head(config)
+        .await
+        .context("ops self-update probation repository check failed")?;
+    nuntius_updater::mark_healthy(&config.state_dir)?;
+    update_state(config, |state| {
+        state.ops_sha = Some(nuntius_updater::build_sha().into());
+        state.phase = "idle".into();
+        state.last_error = None;
+    })?;
+    Ok(())
+}
+
+async fn ensure_ops_current(config: &OpsConfig, sha: &str) -> Result<()> {
+    validate_sha(sha)?;
+    let current = nuntius_updater::build_sha();
+    if current == sha {
+        return Ok(());
+    }
+    validate_sha(current).context(
+        "running Ops has no release build identity; install one signed cloud artifact before enabling self-update",
+    )?;
+    if nuntius_updater::update_build_is_rejected(&config.state_dir, sha)? {
+        bail!("Ops release {sha} previously failed startup probation; waiting for a newer commit");
+    }
+
+    update_state(config, |state| {
+        state.observed_sha = Some(sha.into());
+        state.phase = "ops_checkout".into();
+        state.last_error = None;
+    })?;
+    let source_dir = checkout_ops_source(config, current, sha).await?;
+    if !ops_inputs_changed(&source_dir, current, sha).await? {
+        if let Some(build_root) = source_dir.parent() {
+            fs::remove_dir_all(build_root).with_context(|| {
+                format!(
+                    "remove unchanged Ops update checkout {}",
+                    build_root.display()
+                )
+            })?;
+        }
+        return Ok(());
+    }
+
+    update_state(config, |state| state.phase = "ops_build".into())?;
+    let candidate = build_ops_candidate(config, &source_dir, sha).await?;
+    verify_ops_binary(&candidate, sha).await?;
+    let identity = resolve_signing_identity(config).await?;
+    update_state(config, |state| state.phase = "ops_signing".into())?;
+    sign_macos_binary(&identity, MACOS_OPS_SIGNING_IDENTIFIER, &candidate).await?;
+    verify_macos_signature(&candidate, MACOS_OPS_SIGNING_IDENTIFIER, &identity.sha1).await?;
+    verify_ops_binary(&candidate, sha).await?;
+
+    let update = nuntius_updater::prepare_local_update(
+        &config.state_dir,
+        "nuntius-ops",
+        MACOS_TARGET,
+        MACOS_OPS_SIGNING_IDENTIFIER,
+        sha,
+        &candidate,
+    )
+    .await?;
+    update_state(config, |state| state.phase = "ops_activating".into())?;
+    tracing::info!(from=%current,to=%sha,"activating signed Ops self-update");
+    update.activate()?;
+    bail!("Ops self-update activation returned unexpectedly")
+}
+
+async fn checkout_ops_source(config: &OpsConfig, current: &str, target: &str) -> Result<PathBuf> {
+    let build_root = config.state_dir.join("ops-updates").join(target);
+    let source_dir = build_root.join("source");
+    if build_root.exists() {
+        fs::remove_dir_all(&build_root)
+            .with_context(|| format!("clear previous Ops update {}", build_root.display()))?;
+    }
+    fs::create_dir_all(&source_dir)?;
+
+    let mut init = Command::new("git");
+    init.args(["init", "--quiet"]).arg(&source_dir);
+    checked(
+        init,
+        "initialize Ops update source repository",
+        Duration::from_secs(30),
+    )
+    .await?;
+    let mut remote = Command::new("git");
+    remote
+        .current_dir(&source_dir)
+        .args(["remote", "add", "origin", &config.repository_url]);
+    checked(
+        remote,
+        "configure Ops update source repository",
+        Duration::from_secs(30),
+    )
+    .await?;
+    for revision in [target, current] {
+        let mut fetch = Command::new("git");
+        fetch
+            .current_dir(&source_dir)
+            .args(["fetch", "--depth", "1", "origin", revision]);
+        checked(
+            fetch,
+            "fetch Ops update source commit",
+            Duration::from_secs(300),
+        )
+        .await?;
+    }
+    let mut checkout = Command::new("git");
+    checkout
+        .current_dir(&source_dir)
+        .args(["checkout", "--quiet", "--detach", target]);
+    checked(
+        checkout,
+        "checkout Ops update source commit",
+        Duration::from_secs(30),
+    )
+    .await?;
+    Ok(source_dir)
+}
+
+async fn ops_inputs_changed(source_dir: &Path, current: &str, target: &str) -> Result<bool> {
+    let mut diff = Command::new("git");
+    diff.current_dir(source_dir)
+        .args(["diff", "--quiet", current, target, "--"])
+        .args(OPS_UPDATE_INPUTS);
+    let output = output(diff, "compare Ops update inputs", Duration::from_secs(30)).await?;
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => bail!(
+            "compare Ops update inputs failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
+}
+
+async fn build_ops_candidate(config: &OpsConfig, source_dir: &Path, sha: &str) -> Result<PathBuf> {
+    let mac_target = config.state_dir.join("cache/macos-target");
+    fs::create_dir_all(&mac_target)?;
+    let mut command = Command::new("rustup");
+    command
+        .current_dir(source_dir)
+        .args([
+            "run",
+            &config.rust_toolchain,
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "--package",
+            "nuntius-ops",
+        ])
+        .env("NUNTIUS_BUILD_SHA", sha)
+        .env("NUNTIUS_BUILD_TARGET", MACOS_TARGET)
+        .env("CARGO_TARGET_DIR", &mac_target);
+    checked(
+        command,
+        "build macOS ARM Ops update",
+        Duration::from_secs(1800),
+    )
+    .await?;
+    Ok(mac_target.join("release/nuntius-ops"))
+}
+
+async fn verify_ops_binary(path: &Path, sha: &str) -> Result<()> {
+    let mut command = Command::new(path);
+    command.arg("build-info");
+    let output = checked(command, "probe macOS Ops", Duration::from_secs(30)).await?;
+    validate_build_info(&output.stdout, "nuntius-ops", sha, 0, MACOS_TARGET)
 }
 
 async fn ensure_environment(config: &OpsConfig) -> Result<()> {
@@ -529,7 +765,7 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
 
     update_state(config, |state| state.phase = "signing".into())?;
     sign_client_binary(config, &client_binary).await?;
-    verify_client_signature(&client_binary).await?;
+    verify_client_signature(config, &client_binary).await?;
     verify_client_binary(&client_binary, sha, sequence).await?;
 
     update_state(config, |state| state.phase = "package".into())?;
@@ -574,6 +810,28 @@ async fn verify_client_binary(path: &Path, sha: &str, sequence: u64) -> Result<(
 }
 
 async fn verify_macos_signing_identity(config: &OpsConfig) -> Result<()> {
+    let identity = resolve_signing_identity(config).await?;
+    let probe = config
+        .state_dir
+        .join(format!(".signing-probe-{}", std::process::id()));
+    fs::copy("/usr/bin/true", &probe).context("prepare macOS signing preflight")?;
+    let result = async {
+        sign_macos_binary(&identity, MACOS_CLIENT_SIGNING_IDENTIFIER, &probe).await?;
+        verify_macos_signature(&probe, MACOS_CLIENT_SIGNING_IDENTIFIER, &identity.sha1).await
+    }
+    .await;
+    let cleanup = fs::remove_file(&probe).context("remove macOS signing preflight binary");
+    if let Err(error) = result {
+        let _ = cleanup;
+        return Err(error).context(
+            "macOS signing preflight failed; run `nuntius-ops once --force` interactively and allow codesign to use the private key",
+        );
+    }
+    cleanup?;
+    Ok(())
+}
+
+async fn resolve_signing_identity(config: &OpsConfig) -> Result<SigningIdentity> {
     let mut command = Command::new("/usr/bin/security");
     command.args(["find-identity", "-v", "-p", "codesigning"]);
     let output = checked(
@@ -584,49 +842,65 @@ async fn verify_macos_signing_identity(config: &OpsConfig) -> Result<()> {
     .await?;
     let identities = String::from_utf8(output.stdout)
         .context("macOS code-signing identity list is not UTF-8")?;
-    if !signing_identity_is_available(&identities, &config.macos_signing_identity) {
+    let matches = signing_identity_matches(&identities, &config.macos_signing_identity);
+    let matched = if let Some(expected_sha1) = config.macos_signing_identity_sha1.as_deref() {
+        matches
+            .into_iter()
+            .find(|candidate| candidate.eq_ignore_ascii_case(expected_sha1))
+            .with_context(|| {
+                format!(
+                    "macOS code-signing identity {:?} does not match pinned certificate {}",
+                    config.macos_signing_identity, expected_sha1
+                )
+            })?
+    } else if matches.len() == 1 {
+        matches[0].clone()
+    } else if matches.is_empty() {
         bail!(
             "macOS code-signing identity {:?} is unavailable; create or import it into the OPS login Keychain before running a release",
             config.macos_signing_identity
         );
-    }
-
-    let probe = config
-        .state_dir
-        .join(format!(".signing-probe-{}", std::process::id()));
-    fs::copy("/usr/bin/true", &probe).context("prepare macOS signing preflight")?;
-    let result = async {
-        sign_client_binary(config, &probe).await?;
-        verify_client_signature(&probe).await
-    }
-    .await;
-    let cleanup = fs::remove_file(&probe).context("remove macOS signing preflight binary");
-    result.context(
-        "macOS signing preflight failed; run `nuntius-ops once --force` interactively and allow codesign to use the private key",
-    )?;
-    cleanup?;
-    Ok(())
+    } else {
+        bail!(
+            "multiple macOS code-signing identities are named {:?}; configure macos_signing_identity_sha1",
+            config.macos_signing_identity
+        );
+    };
+    Ok(SigningIdentity {
+        sha1: matched.to_ascii_uppercase(),
+    })
 }
 
 async fn sign_client_binary(config: &OpsConfig, path: &Path) -> Result<()> {
+    let identity = resolve_signing_identity(config).await?;
+    sign_macos_binary(&identity, MACOS_CLIENT_SIGNING_IDENTIFIER, path).await
+}
+
+async fn sign_macos_binary(
+    identity: &SigningIdentity,
+    identifier: &str,
+    path: &Path,
+) -> Result<()> {
+    let requirement = explicit_designated_requirement(identifier, &identity.sha1);
     let mut command = Command::new("/usr/bin/codesign");
     command
         .args(["--force", "--sign"])
-        .arg(config.macos_signing_identity.trim())
-        .args([
-            "--identifier",
-            MACOS_CLIENT_SIGNING_IDENTIFIER,
-            "--options",
-            "runtime",
-            "--timestamp=none",
-        ])
+        .arg(&identity.sha1)
+        .args(["--identifier", identifier, "--requirements"])
+        .arg(format!("={requirement}"))
+        .args(["--options", "runtime", "--timestamp=none"])
         .arg(path)
         .stdin(Stdio::null());
-    checked(command, "sign macOS Client", Duration::from_secs(60)).await?;
+    checked(command, "sign macOS binary", Duration::from_secs(60)).await?;
     Ok(())
 }
 
-async fn verify_client_signature(path: &Path) -> Result<()> {
+async fn verify_client_signature(config: &OpsConfig, path: &Path) -> Result<()> {
+    let identity = resolve_signing_identity(config).await?;
+    verify_macos_signature(path, MACOS_CLIENT_SIGNING_IDENTIFIER, &identity.sha1).await
+}
+
+async fn verify_macos_signature(path: &Path, identifier: &str, sha1: &str) -> Result<()> {
     let mut verify = Command::new("/usr/bin/codesign");
     verify
         .args(["--verify", "--strict", "--verbose=2"])
@@ -634,11 +908,38 @@ async fn verify_client_signature(path: &Path) -> Result<()> {
         .stdin(Stdio::null());
     checked(
         verify,
-        "verify macOS Client code signature",
+        "verify macOS code signature",
         Duration::from_secs(30),
     )
     .await?;
 
+    let expected = explicit_designated_requirement(identifier, sha1);
+    let mut requirement_check = Command::new("/usr/bin/codesign");
+    requirement_check
+        .args(["--verify", "--strict", "--verbose=2"])
+        .arg(format!("-R={expected}"))
+        .arg(path)
+        .stdin(Stdio::null());
+    checked(
+        requirement_check,
+        "verify pinned macOS signing requirement",
+        Duration::from_secs(30),
+    )
+    .await?;
+
+    let requirement = inspect_designated_requirement(path).await?;
+    let embedded_sha1 = certificate_leaf_sha1(&requirement)?;
+    if !embedded_sha1.eq_ignore_ascii_case(sha1) {
+        bail!("macOS binary is signed by an unpinned certificate");
+    }
+    if requirement != expected {
+        bail!("macOS binary has an unexpected designated requirement: {requirement}");
+    }
+    tracing::info!(%identifier,certificate_sha1=%sha1,%requirement,"macOS signing identity verified");
+    Ok(())
+}
+
+async fn inspect_designated_requirement(path: &Path) -> Result<String> {
     let mut inspect = Command::new("/usr/bin/codesign");
     inspect
         .args(["--display", "--requirements", "-"])
@@ -646,21 +947,11 @@ async fn verify_client_signature(path: &Path) -> Result<()> {
         .stdin(Stdio::null());
     let output = checked(
         inspect,
-        "inspect macOS Client designated requirement",
+        "inspect macOS designated requirement",
         Duration::from_secs(30),
     )
     .await?;
-    let requirement = parse_designated_requirement(&output.stdout)?;
-    let expected_identifier = format!("identifier \"{MACOS_CLIENT_SIGNING_IDENTIFIER}\"");
-    if requirement.contains("cdhash") || !requirement.contains(&expected_identifier) {
-        bail!(
-            "macOS Client signature is not stable: expected identifier {}, got {}",
-            MACOS_CLIENT_SIGNING_IDENTIFIER,
-            requirement
-        );
-    }
-    tracing::info!(%requirement, "macOS Client signing identity verified");
-    Ok(())
+    parse_designated_requirement(&output.stdout)
 }
 
 async fn verify_server_binary(
@@ -1084,6 +1375,8 @@ fn prepare_state_dirs(config: &OpsConfig) -> Result<()> {
         config.state_dir.join("builds"),
         config.state_dir.join("cache"),
         config.state_dir.join("bootstrap"),
+        config.state_dir.join("ops-updates"),
+        config.state_dir.join("run"),
     ] {
         fs::create_dir_all(&path)?;
     }
@@ -1176,23 +1469,54 @@ fn valid_signing_identity(value: &str) -> bool {
         && !value.contains('"')
 }
 
-fn signing_identity_is_available(output: &str, expected: &str) -> bool {
-    let expected = expected.trim();
-    if expected.len() == 40 && expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return output
-            .split_whitespace()
-            .any(|token| token.eq_ignore_ascii_case(expected));
-    }
+fn valid_certificate_sha1(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn signing_identity_matches(output: &str, expected: &str) -> Vec<String> {
     let quoted = format!("\"{expected}\"");
-    output.lines().any(|line| line.contains(&quoted))
+    output
+        .lines()
+        .filter(|line| line.contains(&quoted))
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find(|token| valid_certificate_sha1(token))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+fn explicit_designated_requirement(identifier: &str, certificate_sha1: &str) -> String {
+    format!(
+        "identifier \"{identifier}\" and certificate leaf = H\"{}\"",
+        certificate_sha1.to_ascii_uppercase()
+    )
+}
+
+fn certificate_leaf_sha1(requirement: &str) -> Result<String> {
+    let prefix = "certificate leaf = H\"";
+    let start = requirement
+        .find(prefix)
+        .map(|index| index + prefix.len())
+        .context("designated requirement does not pin the leaf certificate")?;
+    let remainder = &requirement[start..];
+    let end = remainder
+        .find('"')
+        .context("designated requirement has an unterminated certificate hash")?;
+    let sha1 = &remainder[..end];
+    if !valid_certificate_sha1(sha1) {
+        bail!("designated requirement has an invalid certificate SHA-1")
+    }
+    Ok(sha1.to_ascii_uppercase())
 }
 
 fn parse_designated_requirement(output: &[u8]) -> Result<String> {
     let text = std::str::from_utf8(output).context("codesign requirement output is not UTF-8")?;
     text.lines()
         .find_map(|line| {
-            line.trim()
-                .strip_prefix("# designated => ")
+            let line = line.trim();
+            line.strip_prefix("# designated => ")
+                .or_else(|| line.strip_prefix("designated => "))
                 .map(str::to_owned)
         })
         .filter(|requirement| !requirement.is_empty())
@@ -1259,6 +1583,26 @@ fn default_root() -> Result<PathBuf> {
         .join(".nuntius-ops"))
 }
 
+fn startup_update_dir(config_path: &Path) -> PathBuf {
+    let fallback = config_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let Ok(source) = fs::read_to_string(config_path) else {
+        return fallback;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&source) else {
+        return fallback;
+    };
+    value
+        .get("state_dir")
+        .and_then(toml::Value::as_str)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or(fallback)
+}
+
 fn default_config_path() -> Result<PathBuf> {
     Ok(default_root()?.join("config.toml"))
 }
@@ -1298,25 +1642,44 @@ mod tests {
     }
 
     #[test]
-    fn finds_named_or_fingerprinted_signing_identity() {
+    fn finds_and_pins_named_signing_identity() {
         let identities = "  1) 0123456789ABCDEF0123456789ABCDEF01234567 \"Nuntius Local Release\"\n     1 valid identities found\n";
-        assert!(signing_identity_is_available(
-            identities,
-            "Nuntius Local Release"
-        ));
-        assert!(signing_identity_is_available(
-            identities,
+        assert_eq!(
+            signing_identity_matches(identities, "Nuntius Local Release"),
+            vec!["0123456789ABCDEF0123456789ABCDEF01234567"]
+        );
+        assert!(signing_identity_matches(identities, "Other Identity").is_empty());
+        assert!(valid_certificate_sha1(
             "0123456789abcdef0123456789abcdef01234567"
         ));
-        assert!(!signing_identity_is_available(identities, "Other Identity"));
     }
 
     #[test]
     fn parses_stable_designated_requirement() {
-        let output = b"Executable=/tmp/nuntius-client\n# designated => identifier \"com.helloanner.nuntius-client\" and anchor H\"abc\"\n";
+        let sha1 = "0123456789ABCDEF0123456789ABCDEF01234567";
+        let expected = explicit_designated_requirement(MACOS_CLIENT_SIGNING_IDENTIFIER, sha1);
+        let output = format!("Executable=/tmp/nuntius-client\ndesignated => {expected}\n");
         assert_eq!(
-            parse_designated_requirement(output).unwrap(),
-            "identifier \"com.helloanner.nuntius-client\" and anchor H\"abc\""
+            parse_designated_requirement(output.as_bytes()).unwrap(),
+            expected
         );
+        assert_eq!(certificate_leaf_sha1(&expected).unwrap(), sha1);
+    }
+
+    #[test]
+    fn startup_update_directory_is_read_without_full_config_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        let state_dir = temp.path().join("runtime");
+        fs::write(
+            &config_path,
+            format!(
+                "state_dir = {:?}\npoll_interval_seconds = 0\n",
+                state_dir.display().to_string()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(startup_update_dir(&config_path), state_dir);
     }
 }

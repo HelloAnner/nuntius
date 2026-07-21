@@ -15,6 +15,7 @@ clap.workspace = true
 directories.workspace = true
 fs2.workspace = true
 hex.workspace = true
+nuntius-updater = { path = "../updater" }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

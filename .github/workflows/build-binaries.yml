@@ -249,6 +249,9 @@ jobs:
     needs: [release_sequence, test]
     runs-on: macos-14
     timeout-minutes: 30
+    env:
+      NUNTIUS_BUILD_SHA: ${{ github.sha }}
+      NUNTIUS_BUILD_TARGET: aarch64-apple-darwin
 
     steps:
       - name: Check out source
@@ -263,7 +266,9 @@ jobs:
         run: test "$(uname -m)" = "arm64"
 
       - name: Build ops controller
-        run: cargo build --locked --release --package nuntius-ops
+        run: |
+          cargo build --locked --release --package nuntius-ops
+          target/release/nuntius-ops build-info
 
       - name: Package ops controller
         run: |

@@ -44,6 +44,60 @@ pub struct UpdateConfig {
     pub trusted_server_url: String,
 }
 
+/// Stages an already-built local binary using the same atomic replacement,
+/// signature continuity and startup rollback protocol as Client downloads.
+/// The caller remains responsible for obtaining and signing `candidate`.
+pub async fn prepare_local_update(
+    data_dir: &Path,
+    binary_name: &str,
+    expected_target: &str,
+    signing_identifier: &str,
+    commit_sha: &str,
+    candidate: &Path,
+) -> Result<PreparedUpdate> {
+    validate_commit_sha(commit_sha)?;
+    if binary_name.is_empty()
+        || binary_name.len() > 128
+        || !binary_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        || signing_identifier.is_empty()
+        || signing_identifier.len() > 256
+        || signing_identifier.chars().any(char::is_control)
+    {
+        bail!("invalid local update identity");
+    }
+
+    let stage_guard = STAGE_UPDATE_LOCK.clone().lock_owned().await;
+    let executable_path = std::env::current_exe().context("resolve current executable")?;
+    let directory = executable_path
+        .parent()
+        .context("current executable has no parent directory")?;
+    let staged_path = directory.join(format!(".{binary_name}.update-{commit_sha}"));
+    copy_synced(candidate, &staged_path)?;
+    verify_macos_update_identity(&executable_path, &staged_path, signing_identifier)
+        .await
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&staged_path);
+        })?;
+    probe_binary(&staged_path, binary_name, commit_sha, 0, expected_target)
+        .await
+        .inspect_err(|_| {
+            let _ = fs::remove_file(&staged_path);
+        })?;
+
+    Ok(PreparedUpdate {
+        _stage_guard: stage_guard,
+        staged_path,
+        executable_path,
+        previous_path: directory.join(format!("{binary_name}.previous")),
+        marker_path: marker_path(data_dir),
+        from_sha: build_sha().into(),
+        to_sha: commit_sha.into(),
+        release_sequence: 0,
+    })
+}
+
 impl UpdateConfig {
     pub fn client(
         binary_name: impl Into<String>,
@@ -291,11 +345,15 @@ async fn stage_update(
         .context("current executable has no parent directory")?;
     let staged_path = directory.join(format!(".{}.update-{}", config.binary_name, commit_sha));
     write_executable(&staged_path, &binary)?;
-    verify_macos_update_identity(&executable_path, &staged_path)
-        .await
-        .inspect_err(|_| {
-            let _ = fs::remove_file(&staged_path);
-        })?;
+    verify_macos_update_identity(
+        &executable_path,
+        &staged_path,
+        MACOS_CLIENT_SIGNING_IDENTIFIER,
+    )
+    .await
+    .inspect_err(|_| {
+        let _ = fs::remove_file(&staged_path);
+    })?;
     probe_binary(
         &staged_path,
         &config.binary_name,
@@ -359,7 +417,11 @@ fn validate_client_release(config: &UpdateConfig, release: &ClientRelease) -> Re
 }
 
 #[cfg(target_os = "macos")]
-async fn verify_macos_update_identity(installed: &Path, candidate: &Path) -> Result<()> {
+async fn verify_macos_update_identity(
+    installed: &Path,
+    candidate: &Path,
+    expected_signing_identifier: &str,
+) -> Result<()> {
     let mut inspect = Command::new("/usr/bin/codesign");
     inspect
         .args(["--display", "--requirements", "-"])
@@ -368,18 +430,18 @@ async fn verify_macos_update_identity(installed: &Path, candidate: &Path) -> Res
     let output = inspect
         .output()
         .await
-        .with_context(|| format!("inspect installed Client signature {}", installed.display()))?;
+        .with_context(|| format!("inspect installed binary signature {}", installed.display()))?;
     if !output.status.success() {
         bail!(
-            "cannot inspect installed Client signature: {}",
+            "cannot inspect installed binary signature: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
     let requirement = parse_designated_requirement(&output.stdout)?;
-    let expected_identifier = format!("identifier \"{MACOS_CLIENT_SIGNING_IDENTIFIER}\"");
+    let expected_identifier = format!("identifier \"{expected_signing_identifier}\"");
     if requirement.contains("cdhash") || !requirement.contains(&expected_identifier) {
         bail!(
-            "installed Client does not have the stable Nuntius signing identity; reinstall the first OPS-signed release before enabling automatic updates"
+            "installed binary does not have the stable Nuntius signing identity; reinstall the first OPS-signed release before enabling automatic updates"
         );
     }
 
@@ -392,10 +454,10 @@ async fn verify_macos_update_identity(installed: &Path, candidate: &Path) -> Res
     let output = verify
         .output()
         .await
-        .with_context(|| format!("verify update Client signature {}", candidate.display()))?;
+        .with_context(|| format!("verify updated binary signature {}", candidate.display()))?;
     if !output.status.success() {
         bail!(
-            "updated Client does not satisfy the installed signing identity: {}",
+            "updated binary does not satisfy the installed signing identity: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -403,7 +465,11 @@ async fn verify_macos_update_identity(installed: &Path, candidate: &Path) -> Res
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn verify_macos_update_identity(_installed: &Path, _candidate: &Path) -> Result<()> {
+async fn verify_macos_update_identity(
+    _installed: &Path,
+    _candidate: &Path,
+    _expected_signing_identifier: &str,
+) -> Result<()> {
     Ok(())
 }
 
@@ -411,8 +477,9 @@ fn parse_designated_requirement(output: &[u8]) -> Result<String> {
     let text = std::str::from_utf8(output).context("codesign requirement output is not UTF-8")?;
     text.lines()
         .find_map(|line| {
-            line.trim()
-                .strip_prefix("# designated => ")
+            let line = line.trim();
+            line.strip_prefix("# designated => ")
+                .or_else(|| line.strip_prefix("designated => "))
                 .map(str::to_owned)
         })
         .filter(|requirement| !requirement.is_empty())
@@ -607,6 +674,10 @@ pub fn startup_update_pending(data_dir: &Path) -> Result<bool> {
     Ok(read_marker(&marker_path(data_dir))?.is_some())
 }
 
+pub fn update_build_is_rejected(data_dir: &Path, commit_sha: &str) -> Result<bool> {
+    Ok(rejected_release(data_dir)?.is_some_and(|rejected| rejected.commit_sha == commit_sha))
+}
+
 #[cfg(unix)]
 fn rollback_and_restart(marker: &UpdateMarker, marker_path: &Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
@@ -787,6 +858,11 @@ mod tests {
         assert_eq!(
             parse_designated_requirement(output).unwrap(),
             "identifier \"com.helloanner.nuntius-client\" and anchor H\"abc\""
+        );
+        let output = b"Executable=/tmp/nuntius-client\ndesignated => identifier \"com.helloanner.nuntius-client\" and certificate leaf = H\"0123456789ABCDEF0123456789ABCDEF01234567\"\n";
+        assert_eq!(
+            parse_designated_requirement(output).unwrap(),
+            "identifier \"com.helloanner.nuntius-client\" and certificate leaf = H\"0123456789ABCDEF0123456789ABCDEF01234567\""
         );
     }
 

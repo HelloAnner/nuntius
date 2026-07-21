@@ -37,21 +37,24 @@ Manifest 包含：
 ## 3. Ops 发布与 Client 更新流程
 
 1. Ops 通过 GitHub remote ref 检测 `main`，在全新 checkout 中固定目标 commit。
-2. 前端生成后，并行构建 Linux AMD64 Server 与 macOS ARM Client；构建缓存位于 checkout 外。
-3. Ops 使用登录 Keychain 中的长期私人代码签名身份签署 macOS Client，验证固定
-   identifier 和不依赖 `cdhash` 的 designated requirement。
-4. Ops 对包计算大小和 SHA-256，并生成严格单调的 `releaseSequence`。
-5. Ops 通过 SCP 上传不可变产物，在目标机执行 Server `build-info` 探针。
-6. Ops 备份旧 Server，原子替换并重启 systemd 服务。
-7. `/api/v1/info` 验证通过后，Server 持久加载 `desired-client.json`。
-8. Server 向在线 Client 广播目标版本，并在每次重连时补发。
-9. Client 下载自己的平台产物，校验来源、大小、checksum 和目标架构；执行候选程序前，
+2. Ops 先比较 `ops/`、`updater/`、workspace manifest/lockfile；自身输入变化时先构建、
+   签名并原子更新 Ops。新进程通过 60 秒 probation 后才继续同一 commit 的发布，失败则
+   由启动标记和 LaunchAgent 自动回滚。
+3. 前端生成后，并行构建 Linux AMD64 Server 与 macOS ARM Client；构建缓存位于 checkout 外。
+4. Ops 使用登录 Keychain 中的长期私人代码签名身份签署 macOS Client，验证固定
+   identifier、固定证书指纹和不依赖 `cdhash` 的显式 designated requirement。
+5. Ops 对包计算大小和 SHA-256，并生成严格单调的 `releaseSequence`。
+6. Ops 通过 SCP 上传不可变产物，在目标机执行 Server `build-info` 探针。
+7. Ops 备份旧 Server，原子替换并重启 systemd 服务。
+8. `/api/v1/info` 验证通过后，Server 持久加载 `desired-client.json`。
+9. Server 向在线 Client 广播目标版本，并在每次重连时补发。
+10. Client 下载自己的平台产物，校验来源、大小、checksum 和目标架构；执行候选程序前，
    要求其代码签名满足当前已安装 Client 的 designated requirement。
-10. Client 原子安装并保留 previous，立即 `exec` 新二进制；独立 Agent Host 不退出，
+11. Client 原子安装并保留 previous，立即 `exec` 新二进制；独立 Agent Host 不退出，
    provider turn 和本机事件日志继续运行。
-11. 新 Client 在启动屏障中恢复全部运行中会话和待审批状态，消费 Agent Host 游标之后的
+12. 新 Client 在启动屏障中恢复全部运行中会话和待审批状态，消费 Agent Host 游标之后的
     事件，再启动命令入口、本地 HTTP 和公网 Tunnel。
-12. 启动 self-check 失败时回滚 Client；Agent Host 仅在 provider 空闲后独立轮换代码。
+13. 启动 self-check 失败时回滚 Client；Agent Host 仅在 provider 空闲后独立轮换代码。
 
 滚动通道采用 latest-wins desired state，而不是逐 commit FIFO 部署：
 
@@ -66,8 +69,10 @@ Manifest 包含：
 私人签名密钥只存在于 Ops Mac 当前用户的登录 Keychain，仓库和 Client 设备均不保存
 私钥或 `.p12`。Client 不依赖独立分发的公钥文件：签名证书包含在 Mach-O 签名中，
 更新器从当前可执行文件提取稳定 requirement 并用其验证候选文件。默认签名身份为
-`Nuntius Local Release`，固定 identifier 为 `com.helloanner.nuntius-client`。缺少
-私钥、签名失败、候选使用 ad-hoc `cdhash` 身份或 requirement 不一致时均 fail closed。
+`Nuntius Local Release`，证书 SHA-1 指纹同时固定在 Ops 私有配置中；Client 和 Ops 的
+identifier 分别为 `com.helloanner.nuntius-client` 与 `com.helloanner.nuntius-ops`。
+缺少私钥、配置指纹不符、签名失败、候选使用 ad-hoc `cdhash` 身份或 requirement 不一致
+时均 fail closed。
 
 ## 4. 系统服务
 
