@@ -281,7 +281,8 @@ fn numeric_version(value: &str) -> Option<Vec<u64>> {
         .trim_start_matches('v')
         .split('.')
         .map(str::parse::<u64>)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
     (!version.is_empty()).then_some(version)
 }
 
