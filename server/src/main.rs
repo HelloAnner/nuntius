@@ -179,7 +179,10 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
     let maintenance_store = state.store.clone();
     let retention_hours = config.event_retention_hours;
     let maintenance_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        let cadence = std::time::Duration::from_secs(300);
+        // Let reconnecting devices publish their current runtime inventory
+        // before retention work competes for SQLite's single writer.
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + cadence, cadence);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;

@@ -1692,6 +1692,60 @@ impl ClientStore {
         sqlx::query("INSERT OR IGNORE INTO history_outbox(batch_id,thread_id,to_cursor,payload,created_at) VALUES(?,?,?,?,?)").bind(&batch.batch_id).bind(&batch.thread_id).bind(&batch.to_cursor).bind(serde_json::to_string(batch)?).bind(now()).execute(&self.pool).await?;
         Ok(())
     }
+
+    /// Replace every unacknowledged snapshot for a thread with its newest full
+    /// revision. Each revision is self-contained, so replaying thousands of
+    /// obsolete snapshots only delays the current summary and can grow the
+    /// outbox faster than the tunnel drains it.
+    pub async fn replace_history(
+        &self,
+        thread_id: &str,
+        inventory_revision: i64,
+        batches: &[HistoryBatch],
+        snapshot_hash: &str,
+    ) -> Result<bool> {
+        let revision_key = format!("history_revision:{thread_id}");
+        let hash_key = format!("history_hash:{thread_id}");
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current_revision: Option<String> =
+            sqlx::query_scalar("SELECT value FROM runtime_state WHERE key=?")
+                .bind(&revision_key)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if current_revision.as_deref().and_then(|value| value.parse().ok())
+            != Some(inventory_revision)
+        {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        sqlx::query("DELETE FROM history_outbox WHERE thread_id=?")
+            .bind(thread_id)
+            .execute(&mut *tx)
+            .await?;
+        for batch in batches {
+            if batch.thread_id != thread_id || batch.inventory_revision != inventory_revision {
+                bail!("replacement history batch identity mismatch");
+            }
+            sqlx::query("INSERT INTO history_outbox(batch_id,thread_id,to_cursor,payload,created_at) VALUES(?,?,?,?,?)")
+                .bind(&batch.batch_id)
+                .bind(&batch.thread_id)
+                .bind(&batch.to_cursor)
+                .bind(serde_json::to_string(batch)?)
+                // Preserve chain order for the outbox's created_at replay.
+                .bind(now())
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("INSERT INTO runtime_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at")
+            .bind(hash_key)
+            .bind(snapshot_hash)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     pub async fn pending_history(&self, limit: i64) -> Result<Vec<HistoryBatch>> {
         let rows = sqlx::query("SELECT payload FROM history_outbox ORDER BY created_at LIMIT ?")
             .bind(limit)
@@ -2248,6 +2302,69 @@ mod tests {
         let current_hash = history_payload_hash(&pending[0].records).unwrap();
         assert_ne!(legacy_hash, current_hash);
         assert_eq!(pending[0].payload_hash, current_hash);
+    }
+
+    #[tokio::test]
+    async fn newest_history_revision_supersedes_unacknowledged_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        let thread_id = "thr_compact";
+
+        let first_revision = store.next_history_revision(thread_id).await.unwrap();
+        let first = HistoryBatch {
+            batch_id: "hbatch_first".into(),
+            device_id: "dev_test".into(),
+            thread_id: thread_id.into(),
+            from_cursor: None,
+            to_cursor: "hist_first".into(),
+            inventory_revision: first_revision,
+            payload_hash: history_payload_hash(&[]).unwrap(),
+            complete: true,
+            records: vec![],
+        };
+        assert!(
+            store
+                .replace_history(thread_id, first_revision, &[first.clone()], "snapshot-one")
+                .await
+                .unwrap()
+        );
+
+        let second_revision = store.next_history_revision(thread_id).await.unwrap();
+        let second = HistoryBatch {
+            batch_id: "hbatch_second".into(),
+            to_cursor: "hist_second".into(),
+            inventory_revision: second_revision,
+            ..first.clone()
+        };
+        assert!(
+            store
+                .replace_history(
+                    thread_id,
+                    second_revision,
+                    &[second.clone()],
+                    "snapshot-two",
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .replace_history(thread_id, first_revision, &[first], "stale-snapshot")
+                .await
+                .unwrap()
+        );
+
+        let pending = store.pending_history(10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].batch_id, second.batch_id);
+        assert_eq!(
+            store
+                .state_get(&format!("history_hash:{thread_id}"))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("snapshot-two")
+        );
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@ use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_kn
 const POLL_INTERVAL: Duration = Duration::from_millis(750);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const RECENT_ROLLOUT_WINDOW: Duration = Duration::from_secs(30 * 60);
+const HISTORY_RECONCILE_INTERVAL: Duration = Duration::from_secs(15);
 const STALLED_AFTER: TimeDuration = TimeDuration::minutes(30);
 const INVENTORY_SCAN_LIMIT: usize = 1024 * 1024;
 
@@ -98,6 +99,8 @@ pub async fn run(executor: CommandExecutor) {
     });
     let mut cursors = HashMap::<PathBuf, RolloutCursor>::new();
     let mut retry = HashMap::<String, RetryEntry>::new();
+    let mut last_reconciled = HashMap::<String, Instant>::new();
+    let mut rollout_reconcile_tasks = HashMap::<String, tokio::task::JoinHandle<()>>::new();
     let mut inventory_imported = 0_usize;
     // Runtime projection is the startup priority. A terminal/IDE turn must be
     // shown as running before the slower full-device inventory backfill starts.
@@ -118,12 +121,18 @@ pub async fn run(executor: CommandExecutor) {
             Ok(cursor) => {
                 let signal = cursor.signal.clone();
                 cursors.insert(path.clone(), cursor);
-                if let Some(signal) = signal.as_ref()
-                    && let Err(error) = apply_rollout_runtime(&executor, thread_id, signal).await
-                {
-                    tracing::warn!(%thread_id,error=?error,"cannot seed recent Codex runtime state");
-                }
-                retry.insert(thread_id.clone(), RetryEntry::new(signal));
+                let pending_signal = if let Some(signal) = signal.as_ref() {
+                    match apply_rollout_runtime(&executor, thread_id, signal).await {
+                        Ok(_) => None,
+                        Err(error) => {
+                            tracing::warn!(%thread_id,error=?error,"cannot seed recent Codex runtime state");
+                            Some(signal.clone())
+                        }
+                    }
+                } else {
+                    None
+                };
+                retry.insert(thread_id.clone(), RetryEntry::new(pending_signal));
             }
             Err(error) => {
                 tracing::warn!(path=%path.display(),error=?error,"cannot seed recent Codex rollout lifecycle");
@@ -151,6 +160,10 @@ pub async fn run(executor: CommandExecutor) {
     let mut interval = tokio::time::interval(POLL_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut ticks = 0_u64;
+    let mut codex_reconcile_task = None;
+    let mut kimi_reconcile_task = None;
+    let mut pi_reconcile_task = None;
+    let mut stalled_task = None;
 
     loop {
         interval.tick().await;
@@ -166,6 +179,7 @@ pub async fn run(executor: CommandExecutor) {
                             tracing::warn!(path=%path.display(),error=?error,"cannot import changed Codex rollout inventory");
                         }
                         let cursor = cursors.remove(path).unwrap_or_default();
+                        let previous_signal = cursor.signal.clone();
                         let signal = match advance_rollout_cursor(
                             path.clone(),
                             cursor,
@@ -176,13 +190,16 @@ pub async fn run(executor: CommandExecutor) {
                             Ok(cursor) => {
                                 let signal = cursor.signal.clone();
                                 cursors.insert(path.clone(), cursor);
-                                signal
+                                (signal != previous_signal).then_some(signal).flatten()
                             }
                             Err(error) => {
                                 tracing::warn!(path=%path.display(),error=?error,"cannot read changed Codex rollout lifecycle");
                                 None
                             }
                         };
+                        // Every append may contain transcript deltas, but only
+                        // lifecycle transitions need another runtime write and
+                        // immediate browser summary.
                         retry
                             .entry(thread_id.clone())
                             .and_modify(|entry| entry.update_signal(signal.clone()))
@@ -197,6 +214,7 @@ pub async fn run(executor: CommandExecutor) {
         // A failed read remains queued: a rollout can be observed between the
         // append and fsync/JSON completion, and must be retried without waiting
         // for another filesystem timestamp change.
+        rollout_reconcile_tasks.retain(|_, task| !task.is_finished());
         let ready = retry
             .iter()
             .filter(|(_, entry)| entry.next_attempt <= Instant::now())
@@ -213,70 +231,127 @@ pub async fn run(executor: CommandExecutor) {
             } else {
                 Ok(false)
             };
-            let reconcile_result = executor.reconcile_app_thread(&app_id).await;
-            if reconcile_result.is_ok() && runtime_result.is_ok() {
+            let now = Instant::now();
+            let terminal_transition = signal.as_ref().is_some_and(|signal| {
+                signal.state != RolloutRuntimeState::Active
+            });
+            let reconcile_due = terminal_transition
+                || last_reconciled
+                    .get(&app_id)
+                    .is_none_or(|last| now.duration_since(*last) >= HISTORY_RECONCILE_INTERVAL);
+            if reconcile_due && !rollout_reconcile_tasks.contains_key(&app_id) {
+                last_reconciled.insert(app_id.clone(), now);
+                let executor = executor.clone();
+                let reconcile_app_id = app_id.clone();
+                rollout_reconcile_tasks.insert(
+                    app_id.clone(),
+                    tokio::spawn(async move {
+                        if let Err(error) = executor.reconcile_app_thread(&reconcile_app_id).await {
+                            tracing::warn!(app_id=%reconcile_app_id,error=?error,"changed Codex rollout reconciliation failed; later file changes will retry");
+                        }
+                    }),
+                );
+            }
+            if runtime_result.is_ok() {
                 retry.remove(&app_id);
-                continue;
-            }
-            if let Err(error) = reconcile_result {
-                tracing::warn!(%app_id,error=?error,"changed Codex rollout reconciliation failed; will retry");
-            }
-            if let Err(error) = runtime_result {
-                tracing::warn!(%app_id,error=?error,"cannot apply Codex rollout runtime state; will retry");
-            }
-            if let Some(entry) = retry.get_mut(&app_id) {
-                entry.back_off();
-            }
-        }
-
-        // The state DB is a second source of truth and catches sources whose
-        // rollout location differs from the conventional CODEX_HOME layout.
-        if ticks == 1 || ticks.is_multiple_of(40) {
-            match executor.reconcile_recent(false).await {
-                Ok(count) if count > 0 => {
-                    tracing::info!(count, "recent Codex sessions reconciled")
+            } else {
+                if let Err(error) = runtime_result {
+                    tracing::warn!(%app_id,error=?error,"cannot apply Codex rollout runtime state; will retry");
                 }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(error=?error,"recent Codex reconciliation failed"),
+                if let Some(entry) = retry.get_mut(&app_id) {
+                    entry.back_off();
+                }
             }
-        }
-        if ticks.is_multiple_of(80)
-            && let Err(error) = executor.reconcile_recent(true).await
-        {
-            tracing::warn!(error=?error,"recent archived Codex reconciliation failed");
         }
 
-        // Kimi keeps its durable history behind the local web service rather
-        // than rollout files, so poll its session inventory at a lower rate.
-        // This also picks up work started from another Kimi CLI on the device.
+        // Full provider inventories can take minutes on large histories. Run
+        // each provider single-flight outside this 750 ms rollout tailer so a
+        // slow App Server/Kimi/Pi call cannot hide a terminal-started turn.
+        if ticks == 1 || ticks.is_multiple_of(40) {
+            schedule_provider_reconcile(
+                &mut codex_reconcile_task,
+                &executor,
+                AgentProvider::Codex,
+                ticks.is_multiple_of(80),
+            );
+        }
         if ticks == 1 || ticks.is_multiple_of(8) {
-            match executor.reconcile_provider_recent(AgentProvider::Kimi, false).await {
-                Ok(count) if count > 0 => tracing::info!(count, "recent Kimi sessions reconciled"),
-                Ok(_) => {}
-                Err(error) => tracing::warn!(error=?error,"recent Kimi reconciliation failed"),
+            schedule_provider_reconcile(
+                &mut kimi_reconcile_task,
+                &executor,
+                AgentProvider::Kimi,
+                ticks.is_multiple_of(160),
+            );
+            schedule_provider_reconcile(
+                &mut pi_reconcile_task,
+                &executor,
+                AgentProvider::Pi,
+                false,
+            );
+        }
+        if ticks == 1 || ticks.is_multiple_of(80) {
+            if stalled_task
+                .as_ref()
+                .is_some_and(tokio::task::JoinHandle::is_finished)
+            {
+                stalled_task = None;
             }
-        }
-        if ticks.is_multiple_of(160)
-            && let Err(error) = executor.reconcile_provider_recent(AgentProvider::Kimi, true).await
-        {
-            tracing::warn!(error=?error,"recent archived Kimi reconciliation failed");
-        }
-
-        // Pi's durable history lives in `~/.pi/agent/sessions`; poll it at the
-        // same rate to pick up sessions from external `pi` CLI processes.
-        if ticks == 1 || ticks.is_multiple_of(8) {
-            match executor.reconcile_provider_recent(AgentProvider::Pi, false).await {
-                Ok(count) if count > 0 => tracing::info!(count, "recent Pi sessions reconciled"),
-                Ok(_) => {}
-                Err(error) => tracing::warn!(error=?error,"recent Pi reconciliation failed"),
+            if stalled_task.is_none() {
+                let executor = executor.clone();
+                stalled_task = Some(tokio::spawn(async move {
+                    if let Err(error) = mark_stalled_rollouts(&executor).await {
+                        tracing::warn!(error=?error, "cannot mark stale Codex turns as stalled");
+                    }
+                }));
             }
-        }
-        if (ticks == 1 || ticks.is_multiple_of(80))
-            && let Err(error) = mark_stalled_rollouts(&executor).await
-        {
-            tracing::warn!(error=?error, "cannot mark stale Codex turns as stalled");
         }
     }
+}
+
+fn schedule_provider_reconcile(
+    task: &mut Option<tokio::task::JoinHandle<()>>,
+    executor: &CommandExecutor,
+    provider: AgentProvider,
+    include_archived: bool,
+) {
+    if task
+        .as_ref()
+        .is_some_and(tokio::task::JoinHandle::is_finished)
+    {
+        *task = None;
+    }
+    if task.is_some() {
+        return;
+    }
+    let executor = executor.clone();
+    *task = Some(tokio::spawn(async move {
+        let active = match provider {
+            AgentProvider::Codex => executor.reconcile_recent(false).await,
+            AgentProvider::Kimi | AgentProvider::Pi => {
+                executor.reconcile_provider_recent(provider, false).await
+            }
+        };
+        match active {
+            Ok(count) if count > 0 => {
+                tracing::info!(count, provider=provider.as_str(), "recent provider sessions reconciled")
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(provider=provider.as_str(),error=?error,"recent provider reconciliation failed")
+            }
+        }
+        if include_archived {
+            let archived = match provider {
+                AgentProvider::Codex => executor.reconcile_recent(true).await,
+                AgentProvider::Kimi | AgentProvider::Pi => {
+                    executor.reconcile_provider_recent(provider, true).await
+                }
+            };
+            if let Err(error) = archived {
+                tracing::warn!(provider=provider.as_str(),error=?error,"recent archived provider reconciliation failed");
+            }
+        }
+    }));
 }
 
 fn stamp_is_recent(stamp: &RolloutStamp, max_age: Duration) -> bool {
@@ -490,7 +565,6 @@ async fn apply_rollout_runtime(
 }
 
 async fn publish_thread(executor: &CommandExecutor, thread_id: &str) -> Result<()> {
-    executor.sync_thread(thread_id).await?;
     let thread = executor
         .store
         .thread(thread_id, &executor.device_id)
@@ -522,6 +596,9 @@ async fn publish_thread(executor: &CommandExecutor, thread_id: &str) -> Result<(
             )
             .await?;
     }
+    // Transcript hydration runs independently in the reconciler. Keeping it
+    // out of this path guarantees a large session cannot delay the durable
+    // running/terminal summary above.
     Ok(())
 }
 

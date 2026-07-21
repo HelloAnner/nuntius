@@ -57,7 +57,7 @@ impl ServerStore {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Full)
             .foreign_keys(true)
-            .busy_timeout(std::time::Duration::from_secs(5))
+            .busy_timeout(std::time::Duration::from_secs(30))
             .disable_statement_logging();
         // Migrations can rewrite sqlite_schema (for example when widening an
         // existing CHECK constraint). Never let the connection that performed
@@ -124,7 +124,7 @@ impl ServerStore {
         let now_unix = OffsetDateTime::now_utc().unix_timestamp();
         let event_cutoff = (OffsetDateTime::now_utc() - Duration::hours(event_retention_hours))
             .format(&time::format_description::well_known::Rfc3339)?;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("DELETE FROM web_sessions WHERE expires_at<=? OR revoked_at IS NOT NULL")
             .bind(now_unix)
             .execute(&mut *tx)
@@ -146,7 +146,10 @@ impl ServerStore {
         let expired = sqlx::query("UPDATE commands SET status='expired',completed_at=? WHERE status IN ('accepted','waiting_device') AND expires_at<=? RETURNING payload")
             .bind(now()).bind(now_unix).fetch_all(&mut *tx).await?;
         expire_approval_payloads(&mut tx, expired).await?;
-        sqlx::query("DELETE FROM event_journal WHERE created_at<?")
+        // Retention must not monopolize SQLite's single writer. The journal can
+        // be very large after a disconnected device replays durable summaries;
+        // delete one indexed page at a time on each maintenance tick.
+        sqlx::query("DELETE FROM event_journal WHERE cursor IN (SELECT cursor FROM event_journal WHERE created_at<? ORDER BY created_at,cursor LIMIT 5000)")
             .bind(event_cutoff)
             .execute(&mut *tx)
             .await?;
@@ -181,7 +184,7 @@ impl ServerStore {
     }
 
     pub async fn create_owner(&self, login_name: &str, password_hash: &str) -> Result<UserRecord> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE status='active'")
             .fetch_one(&mut *tx)
             .await?;
@@ -222,7 +225,7 @@ impl ServerStore {
         let id = new_id("ses");
         let created = now();
         let expires_at = (OffsetDateTime::now_utc() + Duration::hours(ttl_hours)).unix_timestamp();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query("INSERT INTO web_sessions(id,user_id,token_hash,csrf_token_hash,created_at,last_seen_at,expires_at,user_agent_summary) VALUES(?,?,?,?,?,?,?,?)")
             .bind(&id).bind(&user.id).bind(token_hash).bind(csrf_hash).bind(&created).bind(&created).bind(expires_at).bind(user_agent)
             .execute(&mut *tx).await?;
@@ -259,7 +262,7 @@ impl ServerStore {
     }
 
     pub async fn rotate_csrf(&self, session_id: &str, csrf_hash: &str) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let stamp = now();
         sqlx::query("UPDATE web_sessions SET csrf_token_hash=?,last_seen_at=? WHERE id=?")
             .bind(csrf_hash)
@@ -321,7 +324,7 @@ impl ServerStore {
         request: &PairDeviceRequest,
         code_hash: &str,
     ) -> Result<String> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let now_unix = OffsetDateTime::now_utc().unix_timestamp();
         let row = sqlx::query("SELECT id,user_id FROM pairing_codes WHERE code_hash=? AND consumed_at IS NULL AND cancelled_at IS NULL AND expires_at>?")
             .bind(code_hash).bind(now_unix).fetch_optional(&mut *tx).await?
@@ -346,7 +349,7 @@ impl ServerStore {
     }
 
     pub async fn create_challenge(&self, device_id: &str, nonce: &str) -> Result<(String, i64)> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let active: Option<i64> =
             sqlx::query_scalar("SELECT 1 FROM devices WHERE id=? AND status='active'")
                 .bind(device_id)
@@ -409,7 +412,7 @@ impl ServerStore {
         token_hash: &str,
         ttl_minutes: i64,
     ) -> Result<i64> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let updated = sqlx::query("UPDATE device_auth_challenges SET consumed_at=? WHERE id=? AND device_id=? AND consumed_at IS NULL AND expires_at>?")
             .bind(now()).bind(challenge_id).bind(&device.device_id).bind(OffsetDateTime::now_utc().unix_timestamp()).execute(&mut *tx).await?.rows_affected();
         if updated != 1 {
@@ -572,7 +575,7 @@ impl ServerStore {
 
     pub async fn revoke_device(&self, user_id: &str, device_id: &str) -> Result<bool> {
         let timestamp = now();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let changed = sqlx::query("UPDATE devices SET status='revoked',revoked_at=?,key_version=key_version+1 WHERE id=? AND user_id=? AND status='active'")
             .bind(&timestamp).bind(device_id).bind(user_id).execute(&mut *tx).await?.rows_affected();
         sqlx::query(
@@ -602,7 +605,7 @@ impl ServerStore {
         device_id: &str,
         project_id: &str,
     ) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let project = sqlx::query(
             "SELECT kind,removed_at FROM projects WHERE id=? AND device_id=? AND user_id=?",
         )
@@ -796,7 +799,7 @@ impl ServerStore {
         user_id: &str,
         attachment_id: &str,
     ) -> Result<Option<AttachmentRef>> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query("SELECT * FROM attachments a WHERE a.id=? AND a.user_id=? AND a.status='ready' AND NOT EXISTS(SELECT 1 FROM command_attachments c WHERE c.attachment_id=a.id) AND NOT EXISTS(SELECT 1 FROM item_attachments i WHERE i.attachment_id=a.id)")
             .bind(attachment_id).bind(user_id).fetch_optional(&mut *tx).await?;
         let Some(row) = row else {
@@ -890,7 +893,7 @@ impl ServerStore {
     ) -> Result<StoredCommand> {
         let payload = serde_json::to_string(command)?;
         let kind = command.command.name();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(row) = sqlx::query("SELECT queue_epoch,server_sequence,payload,status,request_fingerprint FROM commands WHERE user_id=? AND device_id=? AND idempotency_key=?")
             .bind(user_id).bind(&command.device_id).bind(idempotency_key).fetch_optional(&mut *tx).await? {
             let existing_fingerprint: String = row.get("request_fingerprint");
@@ -972,7 +975,7 @@ impl ServerStore {
         limit: i64,
     ) -> Result<Vec<StoredCommand>> {
         let now_unix = OffsetDateTime::now_utc().unix_timestamp();
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let expired = sqlx::query("UPDATE commands SET status='expired',completed_at=? WHERE device_id=? AND status IN ('accepted','waiting_device') AND expires_at<=? RETURNING payload")
             .bind(now()).bind(device_id).bind(now_unix).fetch_all(&mut *tx).await?;
         expire_approval_payloads(&mut tx, expired).await?;
@@ -1021,7 +1024,7 @@ impl ServerStore {
             "expired" => CommandStatus::Expired,
             _ => bail!("invalid command ACK stage"),
         };
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query("SELECT status,payload FROM commands WHERE id=? AND device_id=?")
             .bind(command_id)
             .bind(device_id)
@@ -1255,7 +1258,11 @@ impl ServerStore {
         if encoded_records.len() > 768 * 1024 {
             bail!("history batch payload exceeds 768 KiB");
         }
-        let mut tx = self.pool.begin().await?;
+        // Reserve the single SQLite writer before reading validation state.
+        // A deferred transaction can otherwise deadlock with another writer
+        // when both readers later try to upgrade, producing immediate BUSY
+        // errors despite the configured busy timeout.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(row) =
             sqlx::query("SELECT to_cursor,device_id,thread_id,inventory_revision FROM history_sync_batches WHERE batch_id=?")
                 .bind(&batch.batch_id)
@@ -1555,7 +1562,7 @@ impl ServerStore {
         project: &ProjectSummary,
         summary_version: i64,
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let device_owner: Option<String> =
             sqlx::query_scalar("SELECT user_id FROM devices WHERE id=? AND status='active'")
                 .bind(&project.device_id)

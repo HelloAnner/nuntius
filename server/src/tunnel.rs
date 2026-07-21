@@ -13,6 +13,8 @@ use std::{
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 
+const HISTORY_INGEST_CAPACITY: usize = 2;
+
 struct Connection {
     epoch: i64,
     sender: mpsc::Sender<TunnelFrame>,
@@ -357,6 +359,14 @@ async fn run_socket(
         }
         Result::<()>::Ok(())
     });
+    let (history_tx, history_rx) = mpsc::channel(HISTORY_INGEST_CAPACITY);
+    let history_worker = tokio::spawn(ingest_history_frames(
+        state.clone(),
+        user_id.to_owned(),
+        device_id.clone(),
+        history_rx,
+        out_tx.clone(),
+    ));
 
     let session_result = async {
         state
@@ -440,7 +450,7 @@ async fn run_socket(
                 message = ws_rx.next() => match message {
                     Some(Ok(Message::Text(text))) => {
                         let frame: TunnelFrame = serde_json::from_str(&text)?;
-                        handle_frame(&state, user_id, &device_id, &agent_version, frame, &out_tx).await?;
+                        handle_frame(&state, user_id, &device_id, &agent_version, frame, &out_tx, &history_tx).await?;
                     }
                     Some(Ok(Message::Ping(_))) => {}
                     Some(Ok(Message::Close(_))) | None => break,
@@ -459,6 +469,7 @@ async fn run_socket(
     }
     .await;
     let was_current = state.tunnels.unregister(&device_id, epoch).await;
+    history_worker.abort();
     writer.abort();
     if was_current {
         let _ = publish_device_event(
@@ -473,6 +484,61 @@ async fn run_socket(
     session_result
 }
 
+async fn ingest_history_frames(
+    state: AppState,
+    user_id: String,
+    device_id: String,
+    mut batches: mpsc::Receiver<HistoryBatch>,
+    out: mpsc::Sender<TunnelFrame>,
+) {
+    while let Some(batch) = batches.recv().await {
+        let cursor = match state.store.ingest_history_batch(&user_id, &batch).await {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                // History is durable application data. Leave a rejected batch
+                // unacknowledged so transient contention or a later compatible
+                // release can accept the retry without affecting the socket.
+                tracing::warn!(
+                    device_id,
+                    batch_id = %batch.batch_id,
+                    thread_id = %batch.thread_id,
+                    error = ?error,
+                    "history batch rejected without closing device tunnel"
+                );
+                continue;
+            }
+        };
+        let thread_id = batch.thread_id.clone();
+        let complete = batch.complete;
+        if out
+            .send(TunnelFrame::HistoryAck {
+                batch_id: batch.batch_id,
+                thread_id: thread_id.clone(),
+                acked_cursor: cursor.clone(),
+            })
+            .await
+            .is_err()
+        {
+            break;
+        }
+        // Intermediate chunks already have a protocol ACK. Publishing durable
+        // progress for every chunk doubles SQLite writes during backfill; one
+        // final event is sufficient for browser cache invalidation.
+        if complete
+            && let Err(error) = publish_device_event(
+                &state,
+                &user_id,
+                &device_id,
+                "history.sync_progress",
+                json!({"threadId":thread_id,"cursor":cursor}),
+            )
+            .await
+        {
+            tracing::warn!(%device_id,error=?error,"cannot publish history progress event");
+        }
+    }
+}
+
 async fn handle_frame(
     state: &AppState,
     user_id: &str,
@@ -480,6 +546,7 @@ async fn handle_frame(
     agent_version: &str,
     frame: TunnelFrame,
     out: &mpsc::Sender<TunnelFrame>,
+    history: &mpsc::Sender<HistoryBatch>,
 ) -> Result<()> {
     if !state
         .store
@@ -624,38 +691,23 @@ async fn handle_frame(
             if batch.device_id != device_id {
                 return Err(anyhow!("history batch device mismatch"));
             }
-            let cursor = match state.store.ingest_history_batch(user_id, &batch).await {
-                Ok(cursor) => cursor,
-                Err(error) => {
-                    // History is application data carried by the tunnel. A
-                    // malformed or temporarily uncommittable batch must not
-                    // tear down heartbeats and command delivery for the whole
-                    // device. Leave it unacknowledged so a later release or
-                    // transient database recovery can accept the retry.
+            match history.try_send(batch) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(batch)) => {
+                    // Do not let transcript backfill queue behind itself and
+                    // starve heartbeats or current thread summaries. The
+                    // durable client outbox retries an unacknowledged batch.
                     tracing::warn!(
                         device_id,
                         batch_id = %batch.batch_id,
                         thread_id = %batch.thread_id,
-                        error = ?error,
-                        "history batch rejected without closing device tunnel"
+                        "history ingest queue full; batch left unacknowledged"
                     );
-                    return Ok(());
                 }
-            };
-            out.send(TunnelFrame::HistoryAck {
-                batch_id: batch.batch_id,
-                thread_id: batch.thread_id.clone(),
-                acked_cursor: cursor.clone(),
-            })
-            .await?;
-            publish_device_event(
-                state,
-                user_id,
-                device_id,
-                "history.sync_progress",
-                json!({"threadId":batch.thread_id,"cursor":cursor}),
-            )
-            .await?;
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(anyhow!("history ingest worker stopped"));
+                }
+            }
         }
         TunnelFrame::QueryResponse {
             correlation_id,
@@ -668,7 +720,12 @@ async fn handle_frame(
                 .await
         }
         TunnelFrame::Heartbeat { health, .. } => {
-            state
+            // Liveness acknowledgement must not wait behind SQLite history
+            // ingestion. Health is a replaceable snapshot and can be retried
+            // on the next heartbeat if its write is temporarily contended.
+            out.send(TunnelFrame::HeartbeatAck { received_at: now() })
+                .await?;
+            if let Err(error) = state
                 .store
                 .mark_device_seen(
                     device_id,
@@ -680,9 +737,10 @@ async fn handle_frame(
                     },
                     Some(&health),
                 )
-                .await?;
-            out.send(TunnelFrame::HeartbeatAck { received_at: now() })
-                .await?;
+                .await
+            {
+                tracing::warn!(%device_id,error=?error,"device health snapshot deferred");
+            }
         }
         TunnelFrame::Hello { .. }
         | TunnelFrame::Welcome { .. }

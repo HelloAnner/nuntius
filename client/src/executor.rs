@@ -779,10 +779,11 @@ impl CommandExecutor {
         let revision = self.store.next_history_revision(thread_id).await?;
         let chunk_count = chunks.len();
         let mut previous_cursor = None;
+        let mut batches = Vec::with_capacity(chunk_count);
         for (index, records) in chunks.into_iter().enumerate() {
             let cursor = new_id("hist");
             let chunk_hash = hex::encode(Sha256::digest(serde_json::to_vec(&records)?));
-            let batch = HistoryBatch {
+            batches.push(HistoryBatch {
                 batch_id: new_id("hbatch"),
                 device_id: self.device_id.clone(),
                 thread_id: thread_id.into(),
@@ -792,11 +793,12 @@ impl CommandExecutor {
                 payload_hash: chunk_hash,
                 complete: index + 1 == chunk_count,
                 records,
-            };
-            self.store.enqueue_history(&batch).await?;
+            });
             previous_cursor = Some(cursor);
         }
-        self.store.state_set(&hash_key, &payload_hash).await?;
+        self.store
+            .replace_history(thread_id, revision, &batches, &payload_hash)
+            .await?;
         Ok(())
     }
     pub async fn refresh_thread_history(&self, thread_id: &str) -> Result<()> {

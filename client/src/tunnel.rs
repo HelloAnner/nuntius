@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -18,7 +18,8 @@ use tokio_tungstenite::{
 };
 
 const EVENT_IN_FLIGHT_LIMIT: usize = 64;
-const HISTORY_IN_FLIGHT_LIMIT: usize = 16;
+const HISTORY_IN_FLIGHT_LIMIT: usize = 2;
+const OUTBOX_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 const TUNNEL_WRITER_CAPACITY: usize = 512;
 
 #[derive(Clone)]
@@ -29,23 +30,29 @@ enum OutboxAck {
 
 #[derive(Default)]
 struct PendingWindow {
-    event_ids: HashSet<String>,
-    history_ids: HashSet<String>,
+    event_ids: HashMap<String, std::time::Instant>,
+    history_ids: HashMap<String, std::time::Instant>,
 }
 
 impl PendingWindow {
     fn track_event(&mut self, event_id: &str) -> bool {
-        if self.event_ids.len() >= EVENT_IN_FLIGHT_LIMIT {
+        if self.event_ids.len() >= EVENT_IN_FLIGHT_LIMIT || self.event_ids.contains_key(event_id) {
             return false;
         }
-        self.event_ids.insert(event_id.into())
+        self.event_ids
+            .insert(event_id.into(), std::time::Instant::now());
+        true
     }
 
     fn track_history(&mut self, batch_id: &str) -> bool {
-        if self.history_ids.len() >= HISTORY_IN_FLIGHT_LIMIT {
+        if self.history_ids.len() >= HISTORY_IN_FLIGHT_LIMIT
+            || self.history_ids.contains_key(batch_id)
+        {
             return false;
         }
-        self.history_ids.insert(batch_id.into())
+        self.history_ids
+            .insert(batch_id.into(), std::time::Instant::now());
+        true
     }
 
     fn acknowledge(&mut self, acknowledgement: &OutboxAck) {
@@ -57,6 +64,13 @@ impl PendingWindow {
                 self.history_ids.remove(batch_id);
             }
         }
+    }
+
+    fn expire_stale(&mut self, now: std::time::Instant) {
+        self.event_ids
+            .retain(|_, sent_at| now.duration_since(*sent_at) < OUTBOX_ACK_TIMEOUT);
+        self.history_ids
+            .retain(|_, sent_at| now.duration_since(*sent_at) < OUTBOX_ACK_TIMEOUT);
     }
 }
 
@@ -493,6 +507,10 @@ async fn run_outbox(
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             _=flush.tick()=>{
+                // The server intentionally leaves rejected durable data
+                // unacknowledged. Release timed-out slots so transient SQLite
+                // contention cannot freeze replay until the next reconnect.
+                pending_window.expire_stale(std::time::Instant::now());
                 if let Err(error) = queue_pending(&executor, &out, &mut pending_window).await {
                     tracing::warn!(error=?error, "durable tunnel outbox flush failed; will retry");
                 }
@@ -712,6 +730,20 @@ mod tests {
         assert!(!window.track_history("hbatch_test"));
         window.acknowledge(&OutboxAck::History("hbatch_test".into()));
         assert!(window.track_history("hbatch_test"));
+    }
+
+    #[test]
+    fn pending_window_retries_unacknowledged_data_after_timeout() {
+        let mut window = PendingWindow::default();
+        let now = std::time::Instant::now();
+        let expired = now.checked_sub(OUTBOX_ACK_TIMEOUT).unwrap();
+        window.event_ids.insert("evt_retry".into(), expired);
+        window.history_ids.insert("hbatch_retry".into(), expired);
+
+        window.expire_stale(now);
+
+        assert!(window.track_event("evt_retry"));
+        assert!(window.track_history("hbatch_retry"));
     }
 
     #[test]
