@@ -59,11 +59,20 @@ impl ServerStore {
             .foreign_keys(true)
             .busy_timeout(std::time::Duration::from_secs(5))
             .disable_statement_logging();
+        // Migrations can rewrite sqlite_schema (for example when widening an
+        // existing CHECK constraint). Never let the connection that performed
+        // a migration enter the runtime pool with a stale parsed schema.
+        let migration_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await?;
+        sqlx::migrate!("./migrations").run(&migration_pool).await?;
+        migration_pool.close().await;
+
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
             .connect_with(options)
             .await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
         let queue_epoch = match sqlx::query_scalar::<_, String>(
             "SELECT value FROM server_runtime_state WHERE key='command_queue_epoch'",
         )

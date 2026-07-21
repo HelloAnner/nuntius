@@ -56,6 +56,10 @@ Reader 和 Writer 任一结束都取消整个 TunnelSession。
 TunnelSession；修复数据、数据库约束或升级 Server 后由 Client 重试。设备身份不匹配、超限等
 协议级违规仍关闭连接。
 
+Server 启动迁移使用独立的单连接 SQLite pool；迁移完成后关闭它，再创建运行期 pool。这样
+`sqlite_schema` 被迁移改写时，运行期连接一定重新解析最新约束，不会继续使用迁移前的 schema
+缓存。
+
 ## 4. Agent 连接组件
 
 - `CredentialProvider`：challenge 和短期 Token。
