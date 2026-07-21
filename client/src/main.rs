@@ -14,6 +14,7 @@ mod history_monitor;
 mod kimi;
 mod pairing;
 mod pi;
+mod probe;
 mod protocol;
 mod runtime_reconciler;
 mod service;

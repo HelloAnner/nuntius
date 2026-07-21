@@ -46,6 +46,7 @@ pub struct PiRuntime {
     sessions: Arc<Mutex<HashMap<String, PiProcess>>>,
     events: broadcast::Sender<Value>,
     model_catalog: Arc<Mutex<Option<CachedCatalog>>>,
+    catalog_probe_failed_at: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 struct CachedCatalog {
@@ -56,6 +57,9 @@ struct CachedCatalog {
 /// How long a probed `/model` catalog is reused before another short-lived
 /// `pi --mode rpc --no-session` probe refreshes it.
 const CATALOG_TTL: Duration = Duration::from_secs(60);
+/// After a failed catalog probe, wait this long before spawning another
+/// short-lived probe process; throttled spawns are expensive.
+const CATALOG_FAILURE_TTL: Duration = Duration::from_secs(120);
 
 struct PiProcess {
     child: Child,
@@ -90,6 +94,7 @@ impl PiRuntime {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             events,
             model_catalog: Arc::new(Mutex::new(None)),
+            catalog_probe_failed_at: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -102,19 +107,7 @@ impl PiRuntime {
         let version = if live.is_some() {
             None
         } else {
-            tokio::time::timeout(
-                Duration::from_secs(3),
-                Command::new(&self.config.pi_command)
-                    .arg("--version")
-                    .output(),
-            )
-            .await
-            .ok()
-            .and_then(|result| result.ok())
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
+            crate::probe::command_version(&self.config.pi_command, &["--version"]).await
         };
         let available = live.is_some() || version.is_some();
         let models = if let Some(handle) = &live {
@@ -177,14 +170,32 @@ impl PiRuntime {
                 return Some(cache.models.clone());
             }
         }
+        {
+            let failed_at = self.catalog_probe_failed_at.lock().await;
+            if let Some(failed_at) = *failed_at
+                && failed_at.elapsed() < CATALOG_FAILURE_TTL
+            {
+                return None;
+            }
+        }
         let cwd = std::env::current_dir().ok()?;
-        let mut process = self.spawn(&cwd, &["--no-session"]).await.ok()?;
+        let mut process = match self.spawn(&cwd, &["--no-session"]).await {
+            Ok(process) => process,
+            Err(_) => {
+                *self.catalog_probe_failed_at.lock().await = Some(std::time::Instant::now());
+                return None;
+            }
+        };
         let handle = process.handle.clone();
         let models =
             tokio::time::timeout(Duration::from_secs(15), self.catalog_from(&handle)).await;
         let _ = process.child.kill().await;
         let _ = process.child.wait().await;
-        let models = models.ok()??;
+        let Some(models) = models.ok().flatten() else {
+            *self.catalog_probe_failed_at.lock().await = Some(std::time::Instant::now());
+            return None;
+        };
+        *self.catalog_probe_failed_at.lock().await = None;
         *self.model_catalog.lock().await = Some(CachedCatalog {
             fetched_at: std::time::Instant::now(),
             models: models.clone(),

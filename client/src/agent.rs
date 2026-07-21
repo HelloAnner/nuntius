@@ -8,7 +8,6 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
-use tokio::process::Command;
 
 #[derive(Clone)]
 pub struct AgentRuntimes {
@@ -53,19 +52,7 @@ impl AgentRuntimes {
         let codex_version = if codex_was_running {
             None
         } else {
-            tokio::time::timeout(
-                Duration::from_secs(3),
-                Command::new(&self.config.codex_command)
-                    .arg("--version")
-                    .output(),
-            )
-            .await
-            .ok()
-            .and_then(|result| result.ok())
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
+            crate::probe::command_version(&self.config.codex_command, &["--version"]).await
         };
         let codex_available = codex_was_running || codex_version.is_some();
         let codex_models = if codex_was_running {

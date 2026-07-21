@@ -112,19 +112,8 @@ impl KimiRuntime {
                 models,
             };
         }
-        let version = tokio::time::timeout(
-            Duration::from_secs(3),
-            Command::new(&self.config.kimi_command)
-                .arg("--version")
-                .output(),
-        )
-        .await
-        .ok()
-        .and_then(|result| result.ok())
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
+        let version =
+            crate::probe::command_version(&self.config.kimi_command, &["--version"]).await;
         AgentProviderStatus {
             provider: AgentProvider::Kimi,
             label: "Kimi".into(),
