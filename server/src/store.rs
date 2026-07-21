@@ -1134,6 +1134,23 @@ impl ServerStore {
         Ok(())
     }
 
+    pub async fn expire_thread_approvals(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        thread_id: &str,
+        decided_at: &str,
+    ) -> Result<u64> {
+        Ok(sqlx::query("UPDATE approvals SET status='expired',decided_at=COALESCE(decided_at,?),decision=COALESCE(decision,'cancel'),last_error=COALESCE(last_error,'provider_turn_terminal') WHERE user_id=? AND device_id=? AND thread_id=? AND status IN ('pending','responding')")
+            .bind(decided_at)
+            .bind(user_id)
+            .bind(device_id)
+            .bind(thread_id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+
     pub async fn list_approvals(
         &self,
         user_id: &str,
@@ -2501,7 +2518,7 @@ mod tests {
             user_id: Some(user.id.clone()),
             device_id: device_id.clone(),
             project_id: None,
-            thread_id: None,
+            thread_id: Some("thr_approval".into()),
             turn_id: None,
             stream_id: format!("device:{device_id}"),
             seq: 1,
@@ -2517,7 +2534,26 @@ mod tests {
         assert_eq!(store.list_approvals(&user.id, true).await.unwrap().len(), 1);
         assert_eq!(
             store.approval_device(&user.id, "apr_test").await.unwrap(),
-            Some(device_id)
+            Some(device_id.clone())
+        );
+        assert_eq!(
+            store
+                .expire_thread_approvals(
+                    &user.id,
+                    &device_id,
+                    "thr_approval",
+                    "2026-07-21T12:00:00Z",
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            store
+                .list_approvals(&user.id, true)
+                .await
+                .unwrap()
+                .is_empty()
         );
         let backup = temp.path().join("backup.db");
         store.backup(&backup).await.unwrap();

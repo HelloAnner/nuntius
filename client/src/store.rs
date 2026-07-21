@@ -771,6 +771,7 @@ impl ClientStore {
         app_turn_id: Option<&str>,
         text: &str,
         attachments: &[AttachmentView],
+        access_mode: ConversationAccessMode,
     ) -> Result<String> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let stamp = now();
@@ -797,8 +798,8 @@ impl ClientStore {
         sqlx::query("UPDATE turns SET status='unknown',completed_at=COALESCE(completed_at,?) WHERE thread_id=? AND id<>? AND status IN ('active','running','inProgress')")
             .bind(&stamp).bind(thread_id).bind(&turn_id).execute(&mut *tx).await?;
         if existing.is_some() {
-            sqlx::query("UPDATE turns SET app_server_turn_id=COALESCE(app_server_turn_id,?),status='inProgress',started_at=COALESCE(started_at,?),completed_at=NULL WHERE id=?")
-                .bind(app_turn_id).bind(&stamp).bind(&turn_id).execute(&mut *tx).await?;
+            sqlx::query("UPDATE turns SET app_server_turn_id=COALESCE(app_server_turn_id,?),status='inProgress',started_at=COALESCE(started_at,?),completed_at=NULL,access_mode=? WHERE id=?")
+                .bind(app_turn_id).bind(&stamp).bind(access_mode.as_str()).bind(&turn_id).execute(&mut *tx).await?;
         } else {
             let ordinal: i64 = sqlx::query_scalar(
                 "SELECT COALESCE(MAX(ordinal),0)+1 FROM turns WHERE thread_id=?",
@@ -806,8 +807,8 @@ impl ClientStore {
             .bind(thread_id)
             .fetch_one(&mut *tx)
             .await?;
-            sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at) VALUES(?,?,?,?,'inProgress',?)")
-                .bind(&turn_id).bind(thread_id).bind(app_turn_id).bind(ordinal).bind(&stamp)
+            sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at,access_mode) VALUES(?,?,?,?,'inProgress',?,?)")
+                .bind(&turn_id).bind(thread_id).bind(app_turn_id).bind(ordinal).bind(&stamp).bind(access_mode.as_str())
                 .execute(&mut *tx).await?;
         }
         let item_id = if let Some(item_id) = sqlx::query_scalar::<_, String>(
@@ -852,6 +853,31 @@ impl ClientStore {
         .await?;
         tx.commit().await?;
         Ok(turn_id)
+    }
+
+    pub async fn app_turn_approval_context(
+        &self,
+        thread_id: &str,
+        app_turn_id: &str,
+    ) -> Result<Option<(String, ConversationAccessMode)>> {
+        let row = sqlx::query(
+            "SELECT status,access_mode FROM turns WHERE thread_id=? AND app_server_turn_id=?",
+        )
+        .bind(thread_id)
+        .bind(app_turn_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| {
+            let mode = row.get::<String, _>("access_mode");
+            (
+                row.get("status"),
+                if mode == "full" {
+                    ConversationAccessMode::Full
+                } else {
+                    ConversationAccessMode::Ask
+                },
+            )
+        }))
     }
 
     pub async fn mark_app_turn_started(
@@ -1837,7 +1863,7 @@ impl ClientStore {
         params: &Value,
         project_id: Option<&str>,
         thread_id: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.save_provider_request(
             AgentProvider::Codex,
             approval_id,
@@ -1858,8 +1884,9 @@ impl ClientStore {
         params: &Value,
         project_id: Option<&str>,
         thread_id: Option<&str>,
-    ) -> Result<()> {
-        sqlx::query("INSERT OR IGNORE INTO pending_app_requests(approval_id,app_request_id,method,params,project_id,thread_id,status,created_at,provider) VALUES(?,?,?,?,?,?,'pending',?,?)")
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let inserted = sqlx::query("INSERT OR IGNORE INTO pending_app_requests(approval_id,app_request_id,method,params,project_id,thread_id,status,created_at,provider) VALUES(?,?,?,?,?,?,'pending',?,?)")
             .bind(approval_id)
             .bind(request_id.to_string())
             .bind(method)
@@ -1868,9 +1895,26 @@ impl ClientStore {
             .bind(thread_id)
             .bind(now())
             .bind(provider.as_str())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1;
+        if !inserted {
+            // App Server replays unanswered server requests after reconnecting.
+            // Keep the stable approval identity while refreshing the transport-
+            // scoped JSON-RPC id that a later decision must answer.
+            sqlx::query("UPDATE pending_app_requests SET app_request_id=?,method=?,params=?,project_id=COALESCE(?,project_id),thread_id=COALESCE(?,thread_id) WHERE approval_id=? AND status='pending'")
+                .bind(request_id.to_string())
+                .bind(method)
+                .bind(serde_json::to_string(params)?)
+                .bind(project_id)
+                .bind(thread_id)
+                .bind(approval_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(inserted)
     }
     pub async fn claim_app_request(&self, approval_id: &str) -> Result<Option<(Value, String)>> {
         Ok(self
@@ -3218,9 +3262,22 @@ mod tests {
             Some("app_thread_rebound")
         );
         store
-            .record_user_turn("thr_test", Some("app_turn"), "hello", &[])
+            .record_user_turn(
+                "thr_test",
+                Some("app_turn"),
+                "hello",
+                &[],
+                ConversationAccessMode::Full,
+            )
             .await
             .unwrap();
+        assert_eq!(
+            store
+                .app_turn_approval_context("thr_test", "app_turn")
+                .await
+                .unwrap(),
+            Some(("inProgress".into(), ConversationAccessMode::Full))
+        );
         store
             .record_agent_message(
                 "thr_test",
@@ -3414,18 +3471,34 @@ mod tests {
             "accepted"
         );
 
-        store
-            .save_app_request(
-                "apr_test",
-                &json!(42),
-                "item/commandExecution/requestApproval",
-                &json!({}),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(store.claim_app_request("apr_test").await.unwrap().is_some());
+        assert!(
+            store
+                .save_app_request(
+                    "apr_test",
+                    &json!(42),
+                    "item/commandExecution/requestApproval",
+                    &json!({}),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .save_app_request(
+                    "apr_test",
+                    &json!(43),
+                    "item/commandExecution/requestApproval",
+                    &json!({"replayed":true}),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+        );
+        let (request_id, _) = store.claim_app_request("apr_test").await.unwrap().unwrap();
+        assert_eq!(request_id, json!(43));
         assert!(store.claim_app_request("apr_test").await.unwrap().is_none());
         store
             .finish_app_request("apr_test", "decided", Some("accept"), None)

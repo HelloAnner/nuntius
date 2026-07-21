@@ -654,6 +654,14 @@ async fn handle_frame(
                 if event.event_type == "approval.requested" {
                     state.store.upsert_approval_event(user_id, &event).await?;
                 }
+                if event_closes_thread_approvals(&event)
+                    && let Some(thread_id) = event.thread_id.as_deref()
+                {
+                    state
+                        .store
+                        .expire_thread_approvals(user_id, device_id, thread_id, &event.occurred_at)
+                        .await?;
+                }
                 if event.event_type == "history.inventory_complete" {
                     state
                         .store
@@ -756,6 +764,26 @@ async fn handle_frame(
     Ok(())
 }
 
+fn event_closes_thread_approvals(event: &NuntiusEvent) -> bool {
+    match event.event_type.as_str() {
+        "app_server.turn.completed"
+        | "app_server.turn.failed"
+        | "app_server.turn.error"
+        | "agent.turn.ended" => true,
+        event_type if event_type.starts_with("app_server.turn.interrupt") => true,
+        "app_server.thread.status.changed" => event
+            .payload
+            .pointer("/status/type")
+            .or_else(|| event.payload.get("status"))
+            .and_then(Value::as_str)
+            .is_some_and(|status| status != "active"),
+        "agent.event.session.work_changed" => {
+            event.payload.get("busy").and_then(Value::as_bool) == Some(false)
+        }
+        _ => false,
+    }
+}
+
 pub async fn publish_device_event(
     state: &AppState,
     user_id: &str,
@@ -789,6 +817,30 @@ pub async fn publish_device_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_terminal_provider_events_close_thread_approvals() {
+        let mut event = NuntiusEvent {
+            event_id: "evt_test".into(),
+            user_id: None,
+            device_id: "dev_test".into(),
+            project_id: None,
+            thread_id: Some("thr_test".into()),
+            turn_id: None,
+            stream_id: "device:dev_test".into(),
+            seq: 1,
+            event_type: "app_server.turn.completed".into(),
+            durability: "durable".into(),
+            occurred_at: now(),
+            payload: json!({}),
+        };
+        assert!(event_closes_thread_approvals(&event));
+        event.event_type = "app_server.turn.started".into();
+        assert!(!event_closes_thread_approvals(&event));
+        event.event_type = "agent.event.session.work_changed".into();
+        event.payload = json!({"busy":false});
+        assert!(event_closes_thread_approvals(&event));
+    }
 
     #[tokio::test]
     async fn rename_during_handshake_replaces_the_initial_snapshot() {

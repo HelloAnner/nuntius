@@ -647,6 +647,7 @@ impl CommandExecutor {
                 provider_turn.as_deref(),
                 &request.text,
                 attachments,
+                request.access_mode,
             )
             .await?;
         self.sync_thread(&thread.id).await?;
@@ -1466,8 +1467,47 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
         .get("id")
         .filter(|_| message.get("method").is_some())
     {
-        let approval_id = new_id("apr");
-        executor
+        let approval_id = codex_approval_id(method, &params);
+        let approval_context = if let (Some(local_thread), Some(app_turn)) = (
+            thread_id.as_deref(),
+            find_string(&event_params, &["turnId", "turn/id"]),
+        ) {
+            executor
+                .store
+                .app_turn_approval_context(local_thread, &app_turn)
+                .await?
+        } else {
+            None
+        };
+        let automatic = match approval_context {
+            Some((status, _)) if !provider_turn_status_is_active(&status) => {
+                codex_approval_response(method, &params, false)
+            }
+            Some((_, ConversationAccessMode::Full)) => {
+                codex_approval_response(method, &params, true)
+            }
+            _ => None,
+        };
+        if let Some((decision, response)) = automatic {
+            executor
+                .agents
+                .resolve_approval(
+                    AgentProvider::Codex,
+                    None,
+                    request_id.clone(),
+                    decision,
+                    Some(response),
+                )
+                .await?;
+            tracing::info!(
+                method,
+                approval_id,
+                decision,
+                "automatically resolved Codex approval request"
+            );
+            return Ok(());
+        }
+        let inserted = executor
             .store
             .save_provider_request(
                 AgentProvider::Codex,
@@ -1479,16 +1519,18 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
                 thread_id.as_deref(),
             )
             .await?;
-        executor
-            .emit(
-                "approval.requested",
-                project_id.as_deref(),
-                thread_id.as_deref(),
-                None,
-                json!({"approvalId":approval_id,"method":method,"params":event_params}),
-                true,
-            )
-            .await?;
+        if inserted {
+            executor
+                .emit(
+                    "approval.requested",
+                    project_id.as_deref(),
+                    thread_id.as_deref(),
+                    None,
+                    json!({"approvalId":approval_id,"method":method,"params":event_params}),
+                    true,
+                )
+                .await?;
+        }
         return Ok(());
     }
     if let Some(local_thread) = thread_id.as_deref() {
@@ -1648,7 +1690,7 @@ async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Resul
             .and_then(Value::as_str)
             .context("Kimi approval event has no approval_id")?;
         let approval_id = format!("apr_kimi_{provider_approval_id}");
-        executor
+        let inserted = executor
             .store
             .save_provider_request(
                 AgentProvider::Kimi,
@@ -1660,16 +1702,18 @@ async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Resul
                 Some(&thread_id),
             )
             .await?;
-        executor
-            .emit(
-                "approval.requested",
-                Some(&thread.project_id),
-                Some(&thread_id),
-                turn_id.as_deref(),
-                json!({"approvalId":approval_id,"method":"kimi/approval","params":payload}),
-                true,
-            )
-            .await?;
+        if inserted {
+            executor
+                .emit(
+                    "approval.requested",
+                    Some(&thread.project_id),
+                    Some(&thread_id),
+                    turn_id.as_deref(),
+                    json!({"approvalId":approval_id,"method":"kimi/approval","params":payload}),
+                    true,
+                )
+                .await?;
+        }
         return Ok(());
     }
 
@@ -1786,7 +1830,7 @@ async fn process_pi_event(executor: &CommandExecutor, message: Value) -> Result<
             .and_then(Value::as_str)
             .context("Pi extension UI request has no id")?;
         let approval_id = format!("apr_pi_{request_id}");
-        executor
+        let inserted = executor
             .store
             .save_provider_request(
                 AgentProvider::Pi,
@@ -1798,16 +1842,18 @@ async fn process_pi_event(executor: &CommandExecutor, message: Value) -> Result<
                 Some(&thread_id),
             )
             .await?;
-        executor
-            .emit(
-                "approval.requested",
-                Some(&thread.project_id),
-                Some(&thread_id),
-                None,
-                json!({"approvalId":approval_id,"method":"pi/extension_ui","params":event}),
-                true,
-            )
-            .await?;
+        if inserted {
+            executor
+                .emit(
+                    "approval.requested",
+                    Some(&thread.project_id),
+                    Some(&thread_id),
+                    None,
+                    json!({"approvalId":approval_id,"method":"pi/extension_ui","params":event}),
+                    true,
+                )
+                .await?;
+        }
         return Ok(());
     }
 
@@ -2056,6 +2102,76 @@ fn find_string(value: &Value, paths: &[&str]) -> Option<String> {
     }
     None
 }
+
+fn codex_approval_id(method: &str, params: &Value) -> String {
+    let stable_request_id = find_string(
+        params,
+        &[
+            "itemId",
+            "callId",
+            "requestId",
+            "item/id",
+            "call/id",
+            "request/id",
+        ],
+    );
+    let Some(stable_request_id) = stable_request_id else {
+        return new_id("apr");
+    };
+    let identity = json!({
+        "method": method,
+        "threadId": find_string(params, &["threadId", "thread/id", "conversationId"]),
+        "turnId": find_string(params, &["turnId", "turn/id"]),
+        "requestId": stable_request_id,
+    });
+    let digest = hex::encode(Sha256::digest(
+        serde_json::to_vec(&identity).expect("approval identity is JSON serializable"),
+    ));
+    format!("apr_codex_{}", &digest[..32])
+}
+
+fn provider_turn_status_is_active(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "active" | "running" | "inprogress" | "recovering" | "stalled"
+    )
+}
+
+fn codex_approval_response(
+    method: &str,
+    params: &Value,
+    approve: bool,
+) -> Option<(&'static str, Value)> {
+    match method {
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+            let decision = if approve { "accept" } else { "cancel" };
+            Some((decision, json!({"decision":decision})))
+        }
+        "item/permissions/requestApproval" => {
+            let permissions = if approve {
+                params
+                    .get("permissions")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}))
+            } else {
+                json!({})
+            };
+            Some((
+                if approve { "accept" } else { "cancel" },
+                json!({"permissions":permissions,"scope":"turn"}),
+            ))
+        }
+        // These server requests require actual user-provided content or a
+        // client-side tool implementation. Full filesystem access must not
+        // fabricate an answer for them.
+        "item/tool/requestUserInput"
+        | "mcpServer/elicitation/request"
+        | "item/tool/call"
+        | "account/chatgptAuthTokens/refresh"
+        | "attestation/generate" => None,
+        _ => None,
+    }
+}
 fn extract_text(item: &Value) -> Option<String> {
     if let Some(text) = item.get("text").and_then(Value::as_str) {
         return Some(text.into());
@@ -2204,6 +2320,38 @@ mod tests {
     use super::*;
     use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
     use tempfile::TempDir;
+
+    #[test]
+    fn codex_approval_identity_is_stable_across_transport_requests() {
+        let params = json!({
+            "threadId":"app_thread",
+            "turnId":"app_turn",
+            "itemId":"exec_stable",
+        });
+        let first = codex_approval_id("item/commandExecution/requestApproval", &params);
+        let second = codex_approval_id("item/commandExecution/requestApproval", &params);
+        assert_eq!(first, second);
+        assert_ne!(
+            first,
+            codex_approval_id("item/fileChange/requestApproval", &params)
+        );
+    }
+
+    #[test]
+    fn codex_full_access_only_auto_answers_permission_approvals() {
+        assert_eq!(
+            codex_approval_response("item/commandExecution/requestApproval", &json!({}), true,),
+            Some(("accept", json!({"decision":"accept"})))
+        );
+        assert_eq!(
+            codex_approval_response("item/tool/requestUserInput", &json!({}), true),
+            None
+        );
+        assert_eq!(
+            codex_approval_response("item/commandExecution/requestApproval", &json!({}), false,),
+            Some(("cancel", json!({"decision":"cancel"})))
+        );
+    }
 
     fn fake_app_server(temp: &TempDir) -> (PathBuf, PathBuf) {
         let script = temp.path().join("fake-app-server.sh");
