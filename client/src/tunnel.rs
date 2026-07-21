@@ -63,6 +63,7 @@ impl PendingWindow {
 pub async fn run_forever(
     executor: CommandExecutor,
     desired_release: watch::Sender<Option<nuntius_updater::ClientRelease>>,
+    connectivity: watch::Sender<bool>,
 ) {
     let mut backoff = 1_u64;
     let inventory_replay_started = Arc::new(AtomicBool::new(false));
@@ -71,6 +72,7 @@ pub async fn run_forever(
         match run_connection(
             executor.clone(),
             &desired_release,
+            &connectivity,
             inventory_replay_started.clone(),
         )
         .await
@@ -78,6 +80,7 @@ pub async fn run_forever(
             Ok(()) => tracing::warn!("device tunnel disconnected"),
             Err(error) => tracing::warn!(error=?error,"device tunnel connection failed"),
         };
+        connectivity.send_replace(false);
         if attempt_started.elapsed() >= Duration::from_secs(60) {
             backoff = 1;
         }
@@ -90,6 +93,7 @@ pub async fn run_forever(
 async fn run_connection(
     executor: CommandExecutor,
     desired_release: &watch::Sender<Option<nuntius_updater::ClientRelease>>,
+    connectivity: &watch::Sender<bool>,
     inventory_replay_started: Arc<AtomicBool>,
 ) -> Result<()> {
     let token = pairing::access_token(&executor.config).await?;
@@ -248,7 +252,9 @@ async fn run_connection(
                                 window_ack_tx.send(acknowledgement.clone()).map_err(|_| anyhow!("outbox sender closed"))?;
                                 persist_ack_tx.send(acknowledgement).map_err(|_| anyhow!("acknowledgement sender closed"))?;
                             }
-                            TunnelFrame::HeartbeatAck { .. } => {}
+                            TunnelFrame::HeartbeatAck { .. } => {
+                                connectivity.send_replace(true);
+                            }
                             frame => {
                                 server_frame_tx.send(frame).map_err(|_| anyhow!("server frame handler closed"))?;
                             }

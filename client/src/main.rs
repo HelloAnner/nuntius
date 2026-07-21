@@ -344,10 +344,18 @@ async fn run() -> Result<()> {
     // database. The tunnel heartbeat is intentionally independent from the
     // recovery work, while command execution waits for recovery to complete.
     let (desired_release_tx, desired_release_rx) = tokio::sync::watch::channel(None);
+    let (control_online_tx, control_online_rx) =
+        tokio::sync::watch::channel(cfg.device_id.is_none());
     let tunnel_task = cfg
         .device_id
         .as_ref()
-        .map(|_| tokio::spawn(tunnel::run_forever(executor.clone(), desired_release_tx)));
+        .map(|_| {
+            tokio::spawn(tunnel::run_forever(
+                executor.clone(),
+                desired_release_tx,
+                control_online_tx,
+            ))
+        });
     // Subscribe before `thread/resume`: resumed threads may begin streaming
     // notifications as soon as the App Server accepts the request.
     let app_event_receiver = agents.codex.subscribe();
@@ -362,10 +370,10 @@ async fn run() -> Result<()> {
     let (startup_recovered_tx, startup_recovered_rx) = tokio::sync::watch::channel(false);
     let recovery_executor = executor.clone();
     let startup_recovery_task = tokio::spawn(async move {
-        // Give the listener and tunnel a deterministic head start. SQLite WAL
-        // recovery and projection repair can then take as long as necessary
-        // without making the device disappear from the control plane.
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // Wait until welcome/state synchronization is complete and the
+        // independent heartbeat worker is running. A genuinely unreachable
+        // public server must not postpone local recovery forever.
+        wait_for_control_plane(control_online_rx).await;
         let recovery_candidates = loop {
             match recovery_executor.store.recover_process_state().await {
                 Ok(candidates) => break candidates,
@@ -583,6 +591,27 @@ async fn run() -> Result<()> {
 async fn wait_for_startup_recovery(mut recovered: tokio::sync::watch::Receiver<bool>) {
     if !*recovered.borrow() {
         let _ = recovered.changed().await;
+    }
+}
+
+async fn wait_for_control_plane(mut online: tokio::sync::watch::Receiver<bool>) {
+    if *online.borrow() {
+        return;
+    }
+    let wait = async {
+        loop {
+            if online.changed().await.is_err() || *online.borrow() {
+                break;
+            }
+        }
+    };
+    if tokio::time::timeout(Duration::from_secs(20), wait)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "public control plane did not become ready before startup recovery deadline"
+        );
     }
 }
 
