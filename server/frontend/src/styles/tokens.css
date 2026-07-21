@@ -41,6 +41,9 @@
   --font-ui: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
   --font-display: var(--font-ui);
   --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  /* Compact console type scale: primary copy matches recent-session tree leaves. */
+  --text-body: 12.5px;
+  --text-meta: 11px;
   --r-lg: 14px;
   --r-md: 10px;
   --r-sm: 8px;

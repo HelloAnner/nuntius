@@ -1,0 +1,133 @@
+/*
+ * Compact console typography
+ *
+ * Recent-session tree leaves are the density reference for the whole remote
+ * console: 12.5px for primary copy and 11px for supporting metadata. Visual
+ * hierarchy comes from weight and color instead of unrelated font sizes.
+ * Only brand marks and status microcopy keep specialized sizes.
+ */
+
+body {
+  font-size: var(--text-body);
+}
+
+/* Primary page, control and list copy. */
+.btn,
+.btn.sm,
+.rename-device-intro,
+.topbar-title .t,
+.console-search input,
+.filter-select .select-menu-trigger,
+.rail-label,
+.rail-user-name,
+.sheet .sheet-head strong,
+.list-row .title,
+.device-card-title strong,
+.device-stats strong,
+.diagnostics-panel > header strong,
+.mobile-pair-card strong,
+.project-group-head strong,
+.scope-picker > p,
+.scope-option strong,
+.status-filters button,
+.settings-user-name,
+.pairing-intro,
+.paired-device-name,
+.new-thread-title strong,
+.switcher-empty,
+.confirm-title,
+.confirm-body,
+.segmented button,
+.select-menu-trigger,
+.select-menu-option,
+.field label,
+.field input,
+.field textarea,
+.empty .headline,
+.empty .hint,
+.toast,
+.notice-banner,
+.hero .name,
+.fact .v,
+.directory-search input,
+.directory-row-name,
+.directory-state,
+.directory-current strong,
+.directory-back,
+.directory-confirm-title,
+.directory-confirm-copy,
+.access-settings-title,
+.switcher-search input,
+.pane-placeholder,
+.project-danger-copy strong,
+.quick-new-thread strong,
+.thread-list-title,
+.thread-actions-menu button,
+.thread-switcher-head strong,
+.thread-tree-device-row .thread-tree-name,
+.thread-tree-project-row .thread-tree-name,
+.thread-sidebar-context strong,
+.detail-main > .topbar .topbar-title .t,
+.thread-page > .topbar .topbar-title .t,
+.msg-user .bubble,
+.msg-agent .body,
+.md,
+.md table,
+.composer textarea,
+.approval-card .ap-head,
+.provider-copy strong,
+.agent-model-field .select-menu-trigger {
+  font-size: var(--text-body);
+}
+
+/* Supporting context uses one consistent, quieter size. */
+.rename-device-meta,
+.topbar-title .s,
+.console-connection,
+.provider-badge,
+.list-row .sub,
+.device-card-title span,
+.device-card-foot,
+.mobile-project-status,
+.device-stats small,
+.diagnostics-panel > header span,
+.diagnostics-panel th,
+.status-pill,
+.compact-status,
+.group-count,
+.branch-badge,
+.project-count,
+.project-time,
+.scope-option small,
+.session-group-label,
+.thread-meta,
+.list-footnote,
+.pairing-expiry,
+.new-thread-title small,
+.select-menu-option-copy small,
+.thread-list-meta,
+.thread-switcher-head > span,
+.thread-switcher-label,
+.thread-sidebar-label,
+.thread-tree-count,
+.thread-sidebar-context span,
+.thread-page .thread-runtime,
+.turn-meta,
+.msg-user .send-state,
+.directory-row-meta,
+.directory-current span,
+.access-settings-sub,
+.switch-group-label,
+.provider-copy small {
+  font-size: var(--text-meta);
+}
+
+/* Conversation headings and inline code use weight, not size, for emphasis. */
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md code {
+  font-size: 1em;
+}
