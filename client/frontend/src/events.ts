@@ -1,7 +1,12 @@
 /* Local SSE manager: streams CLI events into caches and the live store. */
 import { create } from "zustand";
 import type { QueryClient } from "@tanstack/react-query";
-import type { ApprovalRequestedPayload, NuntiusEvent, SyncSnapshot } from "@nuntius/shared";
+import type {
+  ApprovalRequestedPayload,
+  ApprovalResolvedPayload,
+  NuntiusEvent,
+  SyncSnapshot,
+} from "@nuntius/shared";
 import { api } from "./api";
 import { liveStore, useApprovals } from "./stores";
 
@@ -76,6 +81,14 @@ export function startEvents(qc: QueryClient): () => void {
         threadId: event.threadId,
         deviceId: event.deviceId,
       });
+      return;
+    }
+    if (type === "approval.resolved") {
+      const p = event.payload as ApprovalResolvedPayload;
+      const state = p.status === "decided"
+        ? p.decision === "decline" || p.decision === "cancel" ? "denied" : "approved"
+        : p.status === "expired" ? "expired" : "unknown";
+      useApprovals.getState().setState(p.approvalId, state, p.decision ?? undefined);
       return;
     }
     if (type === "project.summary") {

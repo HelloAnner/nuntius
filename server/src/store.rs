@@ -1151,6 +1151,39 @@ impl ServerStore {
             .rows_affected())
     }
 
+    pub async fn resolve_approval_event(&self, user_id: &str, event: &NuntiusEvent) -> Result<u64> {
+        let approval_id = event
+            .payload
+            .get("approvalId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("approval resolution event has no approvalId"))?;
+        let status = event
+            .payload
+            .get("status")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("approval resolution event has no status"))?;
+        if !matches!(status, "decided" | "unknown" | "expired" | "failed") {
+            bail!("invalid approval resolution status")
+        }
+        let decision = event.payload.get("decision").and_then(Value::as_str);
+        let last_error = if status == "decided" {
+            None
+        } else {
+            Some("device_approval_resolution")
+        };
+        Ok(sqlx::query("UPDATE approvals SET status=?,decided_at=COALESCE(decided_at,?),decision=COALESCE(?,decision),last_error=? WHERE id=? AND user_id=? AND device_id=? AND status IN ('pending','responding')")
+            .bind(status)
+            .bind(&event.occurred_at)
+            .bind(decision)
+            .bind(last_error)
+            .bind(approval_id)
+            .bind(user_id)
+            .bind(&event.device_id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected())
+    }
+
     pub async fn list_approvals(
         &self,
         user_id: &str,
@@ -2536,6 +2569,39 @@ mod tests {
             store.approval_device(&user.id, "apr_test").await.unwrap(),
             Some(device_id.clone())
         );
+        let mut resolved = approval.clone();
+        resolved.event_id = "evt_approval_resolved".into();
+        resolved.event_type = "approval.resolved".into();
+        resolved.payload = serde_json::json!({
+            "approvalId":"apr_test",
+            "status":"decided",
+            "decision":"accept"
+        });
+        assert_eq!(
+            store
+                .resolve_approval_event(&user.id, &resolved)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            store
+                .list_approvals(&user.id, true)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let mut expiring = approval.clone();
+        expiring.event_id = "evt_approval_expiring".into();
+        expiring.payload = serde_json::json!({
+            "approvalId":"apr_expiring",
+            "method":"item/commandExecution/requestApproval",
+            "params":{"command":"echo test"}
+        });
+        store
+            .upsert_approval_event(&user.id, &expiring)
+            .await
+            .unwrap();
         assert_eq!(
             store
                 .expire_thread_approvals(

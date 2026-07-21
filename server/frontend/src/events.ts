@@ -4,6 +4,7 @@ import { create } from "zustand";
 import type { QueryClient } from "@tanstack/react-query";
 import {
   type ApprovalRequestedPayload,
+  type ApprovalResolvedPayload,
   type CommandStatusPayload,
   type DeviceSummary,
   type HistoryProgressPayload,
@@ -231,6 +232,15 @@ export function startEvents(qc: QueryClient): () => void {
         threadId: event.threadId,
         deviceId: event.deviceId,
       });
+      void qc.invalidateQueries({ queryKey: ["devices"] });
+      return;
+    }
+    if (type === "approval.resolved") {
+      const p = event.payload as ApprovalResolvedPayload;
+      const state = p.status === "decided"
+        ? p.decision === "decline" || p.decision === "cancel" ? "denied" : "approved"
+        : p.status === "expired" ? "expired" : "unknown";
+      useApprovals.getState().setState(p.approvalId, state, p.decision ?? undefined);
       void qc.invalidateQueries({ queryKey: ["devices"] });
       return;
     }

@@ -421,6 +421,12 @@ export class ThreadLiveStore {
       this.bump();
       return;
     }
+    if (type === "approval.resolved") {
+      const turn = this.currentTurn(threadId, event.turnId);
+      if (turn?.status === "waiting_approval") turn.status = "running";
+      this.bump();
+      return;
+    }
     if (type.startsWith("agent.")) {
       const method = type.slice("agent.".length).toLowerCase();
       const handled = method === "turn.started"

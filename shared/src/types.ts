@@ -283,6 +283,11 @@ export interface ApprovalRequestedPayload {
   method: string;
   params: unknown;
 }
+export interface ApprovalResolvedPayload {
+  approvalId: string;
+  status: "decided" | "unknown" | "expired" | "failed";
+  decision?: string | null;
+}
 export interface CommandStatusPayload {
   commandId: string;
   status: CommandStatus;

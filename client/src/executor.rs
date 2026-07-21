@@ -188,12 +188,15 @@ impl CommandExecutor {
                     .claim_provider_request(approval_id)
                     .await?
                     .context("approval is missing or already decided")?;
-                let provider_session_id =
+                let approval_thread =
                     if let Some(thread_id) = self.store.approval_thread(approval_id).await? {
-                        self.thread(&thread_id).await?.app_server_thread_id
+                        Some(self.thread(&thread_id).await?)
                     } else {
                         None
                     };
+                let provider_session_id = approval_thread
+                    .as_ref()
+                    .and_then(|thread| thread.app_server_thread_id.clone());
                 if let Err(error) = self
                     .agents
                     .resolve_approval(
@@ -213,11 +216,25 @@ impl CommandExecutor {
                             Some("app_server_response_outcome_unknown"),
                         )
                         .await?;
+                    self.emit_approval_resolved(
+                        approval_id,
+                        approval_thread.as_ref(),
+                        "unknown",
+                        Some(&request.decision),
+                    )
+                    .await;
                     return Err(error).context("approval outcome is unknown");
                 }
                 self.store
                     .finish_app_request(approval_id, "decided", Some(&request.decision), None)
                     .await?;
+                self.emit_approval_resolved(
+                    approval_id,
+                    approval_thread.as_ref(),
+                    "decided",
+                    Some(&request.decision),
+                )
+                .await;
                 Ok(json!({"approvalId":approval_id,"decision":request.decision}))
             }
             DeviceCommandKind::HistorySync { thread_id } => {
@@ -487,6 +504,12 @@ impl CommandExecutor {
         request: &StartTurnRequest,
         attachments: &[AttachmentRef],
     ) -> Result<Value> {
+        // This is the user's current authorization choice for the conversation.
+        // Codex cannot change an active turn's approval policy through turn/steer,
+        // so approval callbacks must also consult this persisted bridge state.
+        self.store
+            .set_thread_access_mode(thread_id, request.access_mode)
+            .await?;
         let (input, attachment_views) = self
             .prepare_user_input(thread_id, &request.text, attachments)
             .await?;
@@ -741,6 +764,27 @@ impl CommandExecutor {
         )
         .await?;
         Ok(())
+    }
+    async fn emit_approval_resolved(
+        &self,
+        approval_id: &str,
+        thread: Option<&ThreadSummary>,
+        status: &str,
+        decision: Option<&str>,
+    ) {
+        if let Err(error) = self
+            .emit(
+                "approval.resolved",
+                thread.map(|value| value.project_id.as_str()),
+                thread.map(|value| value.id.as_str()),
+                None,
+                json!({"approvalId":approval_id,"status":status,"decision":decision}),
+                true,
+            )
+            .await
+        {
+            tracing::warn!(approval_id, status, error=?error, "approval resolution event could not be queued");
+        }
     }
     async fn command_thread(&self, id: &str) -> Result<ThreadSummary> {
         self.store
@@ -1479,15 +1523,17 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
         } else {
             None
         };
-        let automatic = match approval_context {
-            Some((status, _)) if !provider_turn_status_is_active(&status) => {
-                codex_approval_response(method, &params, false)
-            }
-            Some((_, ConversationAccessMode::Full)) => {
-                codex_approval_response(method, &params, true)
-            }
-            _ => None,
+        let thread_access_mode = if let Some(local_thread) = thread_id.as_deref() {
+            Some(executor.store.thread_access_mode(local_thread).await?)
+        } else {
+            None
         };
+        let automatic = codex_automatic_approval_response(
+            method,
+            &params,
+            approval_context.as_ref().map(|(status, _)| status.as_str()),
+            thread_access_mode,
+        );
         if let Some((decision, response)) = automatic {
             executor
                 .agents
@@ -1499,6 +1545,26 @@ async fn process_app_event(executor: &CommandExecutor, message: Value) -> Result
                     Some(response),
                 )
                 .await?;
+            executor
+                .store
+                .finish_app_request(&approval_id, "decided", Some(decision), None)
+                .await?;
+            let approval_thread = if let Some(local_thread) = thread_id.as_deref() {
+                executor
+                    .store
+                    .thread(local_thread, &executor.device_id)
+                    .await?
+            } else {
+                None
+            };
+            executor
+                .emit_approval_resolved(
+                    &approval_id,
+                    approval_thread.as_ref(),
+                    "decided",
+                    Some(decision),
+                )
+                .await;
             tracing::info!(
                 method,
                 approval_id,
@@ -2172,6 +2238,21 @@ fn codex_approval_response(
         _ => None,
     }
 }
+
+fn codex_automatic_approval_response(
+    method: &str,
+    params: &Value,
+    turn_status: Option<&str>,
+    thread_access_mode: Option<ConversationAccessMode>,
+) -> Option<(&'static str, Value)> {
+    if turn_status.is_some_and(|status| !provider_turn_status_is_active(status)) {
+        return codex_approval_response(method, params, false);
+    }
+    if thread_access_mode == Some(ConversationAccessMode::Full) {
+        return codex_approval_response(method, params, true);
+    }
+    None
+}
 fn extract_text(item: &Value) -> Option<String> {
     if let Some(text) = item.get("text").and_then(Value::as_str) {
         return Some(text.into());
@@ -2578,6 +2659,45 @@ done
                 "thinking": "high",
                 "plan_mode": true
             })
+        );
+    }
+
+    #[test]
+    fn current_full_access_bridges_an_active_ask_turn() {
+        let params = json!({"permissions":{"network":true}});
+        assert_eq!(
+            codex_automatic_approval_response(
+                "item/permissions/requestApproval",
+                &params,
+                Some("inProgress"),
+                Some(ConversationAccessMode::Full),
+            ),
+            Some((
+                "accept",
+                json!({"permissions":{"network":true},"scope":"turn"})
+            ))
+        );
+        assert!(
+            codex_automatic_approval_response(
+                "item/permissions/requestApproval",
+                &params,
+                Some("inProgress"),
+                Some(ConversationAccessMode::Ask),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn terminal_turn_is_cancelled_even_when_the_thread_is_full_access() {
+        assert_eq!(
+            codex_automatic_approval_response(
+                "item/commandExecution/requestApproval",
+                &json!({}),
+                Some("completed"),
+                Some(ConversationAccessMode::Full),
+            ),
+            Some(("cancel", json!({"decision":"cancel"})))
         );
     }
 }

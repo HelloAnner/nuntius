@@ -654,6 +654,9 @@ async fn handle_frame(
                 if event.event_type == "approval.requested" {
                     state.store.upsert_approval_event(user_id, &event).await?;
                 }
+                if event.event_type == "approval.resolved" {
+                    state.store.resolve_approval_event(user_id, &event).await?;
+                }
                 if event_closes_thread_approvals(&event)
                     && let Some(thread_id) = event.thread_id.as_deref()
                 {

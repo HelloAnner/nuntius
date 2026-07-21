@@ -481,6 +481,19 @@ impl ClientStore {
             ConversationAccessMode::Full
         })
     }
+    pub async fn set_thread_access_mode(
+        &self,
+        id: &str,
+        access_mode: ConversationAccessMode,
+    ) -> Result<()> {
+        sqlx::query("UPDATE threads SET access_mode=?,updated_at=? WHERE id=?")
+            .bind(access_mode.as_str())
+            .bind(now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
     pub async fn rebind_app_server_thread(&self, id: &str, app_id: &str) -> Result<()> {
         sqlx::query(
             "UPDATE threads SET app_server_thread_id=?,status='idle',updated_at=? WHERE id=?",
@@ -1968,7 +1981,7 @@ impl ClientStore {
         if !matches!(status, "decided" | "unknown") {
             anyhow::bail!("invalid approval status")
         }
-        sqlx::query("UPDATE pending_app_requests SET status=?,decided_at=?,decision=COALESCE(?,decision),error_message=? WHERE approval_id=? AND status='responding'")
+        sqlx::query("UPDATE pending_app_requests SET status=?,decided_at=?,decision=COALESCE(?,decision),error_message=? WHERE approval_id=? AND status IN ('pending','responding')")
             .bind(status)
             .bind(now())
             .bind(decision)
@@ -3247,6 +3260,18 @@ mod tests {
             store.app_server_options("thr_test").await.unwrap(),
             json!({"sandbox":"danger-full-access"})
         );
+        store
+            .set_thread_access_mode("thr_test", ConversationAccessMode::Ask)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.thread_access_mode("thr_test").await.unwrap(),
+            ConversationAccessMode::Ask
+        );
+        store
+            .set_thread_access_mode("thr_test", ConversationAccessMode::Full)
+            .await
+            .unwrap();
         store
             .rebind_app_server_thread("thr_test", "app_thread_rebound")
             .await
