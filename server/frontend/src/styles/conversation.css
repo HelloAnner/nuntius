@@ -180,6 +180,11 @@
 }
 .thread-tree-project-row .thread-tree-name { color: var(--ink-2); font-size: 12px; font-weight: 560; }
 .thread-tree-threads { display: flex; flex-direction: column; gap: 2px; margin: 1px 0 4px; }
+/* tree leaf rows sit one level deeper than project rows: keep them compact */
+.thread-tree-threads .thread-list-item { min-height: 0; gap: 8px; padding: 6px 8px; }
+.thread-tree-threads .thread-list-item .status-orbit { width: 12px; height: 12px; }
+.thread-tree-threads .thread-list-title { font-size: 12.5px; }
+.thread-tree-threads .thread-list-meta { font-size: 11px; }
 
 @media (min-width: 900px) {
   .thread-page .detail-side { position: relative; }
