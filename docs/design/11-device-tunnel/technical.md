@@ -128,6 +128,10 @@ Client 进程重启时先绑定本地 API、建立 Tunnel 并启动独立 heartb
 projection 修复和运行中 Thread 恢复。命令可以先持久化，但 CommandExecutor 必须等启动恢复
 事务完成后再消费；数据库体积增长不能线性拉长设备离线窗口。
 
+本地 Axum server 的轮询不能承载数据库或 Agent Host RPC。周期性的 Agent Host 升级检查在独立
+后台任务执行，并分别限制数据库检查与 RPC 的等待时间；SQLite pool 饱和时只跳过本轮检查，
+不得让 `/healthz` 和本地控制台停止响应。
+
 ## 7. 重连分类
 
 | 错误 | 策略 |

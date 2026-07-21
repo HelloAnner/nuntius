@@ -43,6 +43,9 @@ const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const RUNTIME_HEALTH_INTERVAL: Duration = Duration::from_secs(5);
+const HOST_UPGRADE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+const HOST_UPGRADE_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const HOST_UPGRADE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const UPDATE_STARTUP_PROBATION: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy)]
@@ -445,8 +448,51 @@ async fn run() -> Result<()> {
             }
         }
     });
-    let runtime_store = executor.store.clone();
-    let runtime_agents = agents.clone();
+    let host_upgrade_store = executor.store.clone();
+    let host_upgrade_agents = agents.clone();
+    let host_upgrade_check_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now()
+                + UPDATE_STARTUP_PROBATION
+                + RUNTIME_HEALTH_INTERVAL,
+            HOST_UPGRADE_CHECK_INTERVAL,
+        );
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match tokio::time::timeout(
+                HOST_UPGRADE_CHECK_TIMEOUT,
+                host_upgrade_blocker(&host_upgrade_store),
+            )
+            .await
+            {
+                Ok(Ok(None)) => {
+                    match tokio::time::timeout(
+                        HOST_UPGRADE_REQUEST_TIMEOUT,
+                        host_upgrade_agents.request_host_upgrade_if_idle(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(true)) => {
+                            tracing::info!("rotating idle Agent Host to the current Client release")
+                        }
+                        Ok(Ok(false)) => {}
+                        Ok(Err(error)) => {
+                            tracing::warn!(error=?error, "Agent Host release check failed")
+                        }
+                        Err(_) => tracing::warn!("Agent Host release check timed out"),
+                    }
+                }
+                Ok(Ok(Some(_))) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(error=?error, "cannot inspect Agent Host upgrade window")
+                }
+                Err(_) => tracing::warn!(
+                    "Agent Host upgrade window check timed out; local API remains independent"
+                ),
+            }
+        }
+    });
     let router = api::router(executor)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(CatchPanicLayer::new())
@@ -481,7 +527,6 @@ async fn run() -> Result<()> {
     let mut update_rx_open = update_task.is_some();
     let mut runtime_health = tokio::time::interval(RUNTIME_HEALTH_INTERVAL);
     runtime_health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut next_host_upgrade_check = tokio::time::Instant::now();
     let stop_reason = loop {
         tokio::select! {
             result = &mut server => {
@@ -529,20 +574,6 @@ async fn run() -> Result<()> {
                 if client_update_ready(prepared_update.is_some(), update_probation_pending) {
                     break RunStopReason::Update;
                 }
-                if !update_probation_pending
-                    && tokio::time::Instant::now() >= next_host_upgrade_check
-                {
-                    next_host_upgrade_check = tokio::time::Instant::now() + Duration::from_secs(60);
-                    match host_upgrade_blocker(&runtime_store).await {
-                        Ok(None) => match runtime_agents.request_host_upgrade_if_idle().await {
-                            Ok(true) => tracing::info!("rotating idle Agent Host to the current Client release"),
-                            Ok(false) => {}
-                            Err(error) => tracing::warn!(error=?error, "Agent Host release check failed"),
-                        },
-                        Ok(Some(_)) => {}
-                        Err(error) => tracing::warn!(error=?error, "cannot inspect Agent Host upgrade window"),
-                    }
-                }
             }
         }
     };
@@ -570,6 +601,7 @@ async fn run() -> Result<()> {
     discovery_task.abort();
     history_monitor_task.abort();
     runtime_reconciler_task.abort();
+    host_upgrade_check_task.abort();
     codex_event_stream_task.abort();
     app_events_task.abort();
     kimi_event_stream_task.abort();
