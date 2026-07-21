@@ -296,6 +296,12 @@ export function liveTurnHasTranscript(turn: LiveTurn): boolean {
   );
 }
 
+/** Do not stack a loading skeleton above an optimistic/live message. The
+ * skeleton disappearing underneath existing content causes a visible jump. */
+export function shouldRenderThreadLoading(loading: boolean, transcriptCount: number): boolean {
+  return loading && transcriptCount === 0;
+}
+
 export function ThreadView({
   history,
   loading,
@@ -583,7 +589,7 @@ export function ThreadView({
       <div className="thread-scroll" ref={scrollRef} onScroll={onScroll}>
         <div className="thread-col" ref={contentRef}>
           {headerOverlay}
-          {loading ? (
+          {shouldRenderThreadLoading(Boolean(loading), transcript.length) ? (
             <div className="thread-loading" role="status" aria-label="正在加载会话记录">
               <div className="skeleton thread-loading-user" />
               <div className="skeleton thread-loading-agent" />

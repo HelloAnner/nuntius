@@ -9,6 +9,7 @@ import {
   orderedHistory,
   liveTurnHasTranscript,
   optimisticEchoIsInHistory,
+  shouldRenderThreadLoading,
   visibleHistoryItems,
   visibleLiveItems,
 } from "./ThreadView";
@@ -23,6 +24,14 @@ describe("ThreadView bottom following", () => {
     expect(isThreadNearBottom(500, 0, 600)).toBe(true);
     expect(isThreadNearBottom(1_000, 410, 600)).toBe(true);
     expect(isThreadNearBottom(1_000, -20, 600)).toBe(false);
+  });
+});
+
+describe("ThreadView initial loading", () => {
+  test("hides the skeleton as soon as an optimistic or live turn is rendered", () => {
+    expect(shouldRenderThreadLoading(true, 0)).toBe(true);
+    expect(shouldRenderThreadLoading(true, 1)).toBe(false);
+    expect(shouldRenderThreadLoading(false, 0)).toBe(false);
   });
 });
 

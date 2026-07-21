@@ -163,7 +163,9 @@ export const api = {
       { idemKey },
     ),
 
-  allThreads: (limit = 200) => req<ThreadSummary[]>("GET", `/threads?limit=${limit}`),
+  // Keep this aligned with /sync's 500-thread snapshot. Replacing that cache
+  // with a smaller refetch makes the recents tree visibly collapse and reorder.
+  allThreads: (limit = 500) => req<ThreadSummary[]>("GET", `/threads?limit=${limit}`),
   historyTurns: (threadId: string, limit = 200) =>
     req<HistoryTurnView[]>("GET", `/threads/${threadId}/turns?limit=${limit}`),
   historyItems: (turnId: string, limit = 500) =>

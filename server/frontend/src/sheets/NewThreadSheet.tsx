@@ -98,6 +98,7 @@ export function NewThreadSheet({
     defaultAgentSelection("codex"),
   );
   const [busy, setBusy] = useState(false);
+  const createPending = useRef(false);
   const providerStatuses = devices.data?.find((device) => device.id === effectiveDeviceId)?.providers ?? [];
   const scopeDevice = devices.data?.find((device) => device.id === effectiveDeviceId);
   const scopeProject = projects.data?.find((project) => project.id === effectiveProjectId);
@@ -167,7 +168,11 @@ export function NewThreadSheet({
 
   const create = async () => {
     const text = firstMessage.trim();
-    if (busy || !effectiveDeviceId || !effectiveProjectId) return;
+    // State updates do not disable the button until React commits the next
+    // render. Claim the request synchronously so a fast double click cannot
+    // create two threads with two different idempotency keys.
+    if (createPending.current || busy || !effectiveDeviceId || !effectiveProjectId) return;
+    createPending.current = true;
     setBusy(true);
     const idemKey = newIdemKey();
     try {
@@ -232,6 +237,7 @@ export function NewThreadSheet({
         { error: true },
       );
     } finally {
+      createPending.current = false;
       setBusy(false);
     }
   };
