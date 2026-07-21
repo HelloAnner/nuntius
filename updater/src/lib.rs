@@ -72,7 +72,8 @@ pub async fn prepare_local_update(
     let executable_path = std::env::current_exe().context("resolve current executable")?;
     let directory = executable_path
         .parent()
-        .context("current executable has no parent directory")?;
+        .context("current executable has no parent directory")?
+        .to_path_buf();
     let staged_path = directory.join(format!(".{binary_name}.update-{commit_sha}"));
     copy_synced(candidate, &staged_path)?;
     verify_macos_update_identity(&executable_path, &staged_path, signing_identifier)

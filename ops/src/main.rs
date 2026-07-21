@@ -417,7 +417,7 @@ async fn ensure_ops_current(config: &OpsConfig, sha: &str) -> Result<()> {
         return Ok(());
     }
     validate_sha(current).context(
-        "running Ops has no release build identity; install one signed cloud artifact before enabling self-update",
+        "running Ops has no release build identity; install one locally built and signed bootstrap binary before enabling self-update",
     )?;
     if nuntius_updater::update_build_is_rejected(&config.state_dir, sha)? {
         bail!("Ops release {sha} previously failed startup probation; waiting for a newer commit");
@@ -887,7 +887,7 @@ async fn sign_macos_binary(
         .args(["--force", "--sign"])
         .arg(&identity.sha1)
         .args(["--identifier", identifier, "--requirements"])
-        .arg(format!("={requirement}"))
+        .arg(embedded_requirements_argument(&requirement))
         .args(["--options", "runtime", "--timestamp=none"])
         .arg(path)
         .stdin(Stdio::null());
@@ -1489,8 +1489,12 @@ fn signing_identity_matches(output: &str, expected: &str) -> Vec<String> {
 fn explicit_designated_requirement(identifier: &str, certificate_sha1: &str) -> String {
     format!(
         "identifier \"{identifier}\" and certificate leaf = H\"{}\"",
-        certificate_sha1.to_ascii_uppercase()
+        certificate_sha1.to_ascii_lowercase()
     )
+}
+
+fn embedded_requirements_argument(requirement: &str) -> String {
+    format!("=designated => {requirement}")
 }
 
 fn certificate_leaf_sha1(requirement: &str) -> Result<String> {
@@ -1662,6 +1666,10 @@ mod tests {
         assert_eq!(
             parse_designated_requirement(output.as_bytes()).unwrap(),
             expected
+        );
+        assert_eq!(
+            embedded_requirements_argument(&expected),
+            format!("=designated => {expected}")
         );
         assert_eq!(certificate_leaf_sha1(&expected).unwrap(), sha1);
     }

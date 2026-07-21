@@ -168,10 +168,10 @@ requirement 验证下一版是否为同一身份。
 授权一次。此后只要使用同一签名证书和 identifier，二进制可以继续自动更新并保持
 稳定身份。更换或遗失证书会形成新的身份，需要重新授权。
 
-GitHub Actions 生成的 macOS Client 与 Ops 是未配置私人证书的构建检查/首次自举
-产物；正式自动更新通道只使用 Ops 在持有私钥的 Mac 上生成的签名包。首次安装 Ops
-时需在签名机上校验云端 artifact 的 build-info 后本地签名并原子安装；后续由签名后的
-Ops 自更新，不能从 ad-hoc Ops 直接进入自动更新链。
+GitHub Actions 生成的 macOS 二进制仅用于构建检查，不进入正式发布通道。正式的
+Client、Server 与 Ops 更新全部由持有私钥的 Ops Mac 从干净 checkout 本地构建；首次
+启用时需在该机器上本地构建、签名并原子安装一次 Ops，后续由签名后的 Ops 自更新，
+不能从 ad-hoc Ops 直接进入自动更新链。
 
 远程控制页（`server/frontend`）面向手机、平板和桌面，相关设计系统、
 协议类型、SSE 归并器和消息组件全部收在该项目内部。Client 本地页将按
