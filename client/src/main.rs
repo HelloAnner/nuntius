@@ -358,16 +358,22 @@ async fn run() -> Result<()> {
             "recovering running threads after restart"
         );
     }
-    // This is the startup synchronization barrier. The public tunnel must not
-    // project the old process state until every candidate received one resume
-    // attempt and was either resolved or explicitly left as `recovering`.
+    // Give every durable runtime one synchronous resume attempt before exposing
+    // the new process. A provider outage must not keep the local API and device
+    // heartbeat offline indefinitely: unresolved runtimes are already marked
+    // `recovering`, so subsequent attempts can safely continue in background.
     let pending_recovery = executor.recover_threads_once(&recovery_candidates).await;
     if !pending_recovery.is_empty() {
-        // The Agent Host keeps provider work alive across the Client process
-        // replacement. Finish reattaching every durable runtime projection
-        // before commands, HTTP and the public device tunnel can expose the new
-        // process as ready.
-        executor.retry_thread_recovery(pending_recovery).await;
+        tracing::warn!(
+            count = pending_recovery.len(),
+            "starting while thread recovery remains pending; retries will continue in background"
+        );
+        let recovery_executor = executor.clone();
+        tokio::spawn(async move {
+            recovery_executor
+                .retry_thread_recovery(pending_recovery)
+                .await;
+        });
     }
     let command_queue_task = tokio::spawn(command_queue::run(executor.clone()));
     let maintenance_store = executor.store.clone();

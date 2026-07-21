@@ -151,8 +151,9 @@ startup_timeout_seconds = 20
 - 更新过程中保留上一二进制和配置备份以便回滚。
 - Client 与 Agent Host 分进程运行；Client 更新立即激活，Agent Host 和 provider 继续承载
   活跃 Turn，并缓存 Client 短暂离线期间的事件。
-- 新 Client 必须恢复全部运行态投影后才能开放命令入口和设备 Tunnel；Agent Host 的代码
-  轮换才需要等待 provider 空闲。
+- 新 Client 对每个运行态投影至少执行一次同步恢复；仍失败的投影保持 `recovering` 并转入
+  后台重试，不能阻塞本地 HTTP 或设备 Tunnel。Agent Host 的代码轮换需要等待 provider
+  空闲，provider 关闭超过 10 秒时 Host 必须退出并由 launchd 拉起，避免卡在半轮换状态。
 
 ## 11. 健康状态
 

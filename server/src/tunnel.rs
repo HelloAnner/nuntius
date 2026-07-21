@@ -603,7 +603,24 @@ async fn handle_frame(
             if batch.device_id != device_id {
                 return Err(anyhow!("history batch device mismatch"));
             }
-            let cursor = state.store.ingest_history_batch(user_id, &batch).await?;
+            let cursor = match state.store.ingest_history_batch(user_id, &batch).await {
+                Ok(cursor) => cursor,
+                Err(error) => {
+                    // History is application data carried by the tunnel. A
+                    // malformed or temporarily uncommittable batch must not
+                    // tear down heartbeats and command delivery for the whole
+                    // device. Leave it unacknowledged so a later release or
+                    // transient database recovery can accept the retry.
+                    tracing::warn!(
+                        device_id,
+                        batch_id = %batch.batch_id,
+                        thread_id = %batch.thread_id,
+                        error = ?error,
+                        "history batch rejected without closing device tunnel"
+                    );
+                    return Ok(());
+                }
+            };
             out.send(TunnelFrame::HistoryAck {
                 batch_id: batch.batch_id,
                 thread_id: batch.thread_id.clone(),

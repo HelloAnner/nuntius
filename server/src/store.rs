@@ -1362,6 +1362,26 @@ impl ServerStore {
                     bail!("history turn ownership conflict");
                 }
                 if !stale {
+                    // A provider can rebuild durable IDs while preserving the
+                    // chronological slot. The incoming inventory revision is
+                    // authoritative, so replace the stale row occupying that
+                    // slot instead of letting the secondary UNIQUE constraint
+                    // poison every reconnect with the same batch.
+                    if let Some(conflicting_id) = sqlx::query_scalar::<_, String>(
+                        "SELECT id FROM turns WHERE thread_id=? AND ordinal=? AND id<>?",
+                    )
+                    .bind(&turn.thread_id)
+                    .bind(turn.ordinal)
+                    .bind(&turn.id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    {
+                        sqlx::query("DELETE FROM turns WHERE id=? AND thread_id=?")
+                            .bind(conflicting_id)
+                            .bind(&turn.thread_id)
+                            .execute(&mut *tx)
+                            .await?;
+                    }
                     sqlx::query("INSERT INTO turns(id,thread_id,ordinal,status,started_at,completed_at,snapshot_revision) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET ordinal=excluded.ordinal,status=excluded.status,started_at=COALESCE(excluded.started_at,turns.started_at),completed_at=COALESCE(excluded.completed_at,turns.completed_at),snapshot_revision=excluded.snapshot_revision,revision=turns.revision+1")
                         .bind(&turn.id).bind(&turn.thread_id).bind(turn.ordinal).bind(&turn.status).bind(&turn.started_at).bind(&turn.completed_at).bind(batch.inventory_revision).execute(&mut *tx).await?;
                 }
@@ -1403,6 +1423,21 @@ impl ServerStore {
                         "detail": &item.structured_detail,
                         "attachments": &item.attachments,
                     }))?));
+                if let Some(conflicting_id) = sqlx::query_scalar::<_, String>(
+                    "SELECT id FROM items WHERE turn_id=? AND ordinal=? AND id<>?",
+                )
+                .bind(&item.turn_id)
+                .bind(item.ordinal)
+                .bind(&item.id)
+                .fetch_optional(&mut *tx)
+                .await?
+                {
+                    sqlx::query("DELETE FROM items WHERE id=? AND turn_id=?")
+                        .bind(conflicting_id)
+                        .bind(&item.turn_id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
                 let current: Option<(i64,)> =
                     sqlx::query_as("SELECT revision FROM items WHERE id=?")
                         .bind(&item.id)
@@ -2225,6 +2260,50 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(stored_messages, vec!["question"]);
+
+        let mut replaced_records = pruned_batch.records.clone();
+        for record in &mut replaced_records {
+            if let Some(turn) = &mut record.turn {
+                turn.id = "trn_history_replaced".into();
+            }
+            if let Some(item) = &mut record.item {
+                item.id = "itm_history_replaced".into();
+                item.turn_id = "trn_history_replaced".into();
+                item.content_text = Some("replacement question".into());
+            }
+        }
+        let replaced_batch = HistoryBatch {
+            batch_id: "hbatch_replaced_ids".into(),
+            device_id: device_id.clone(),
+            thread_id: "thr_history".into(),
+            from_cursor: None,
+            to_cursor: "cursor_replaced_ids".into(),
+            inventory_revision: 3,
+            payload_hash: hex::encode(Sha256::digest(
+                serde_json::to_vec(&replaced_records).unwrap(),
+            )),
+            complete: true,
+            records: replaced_records,
+        };
+        store
+            .ingest_history_batch(&user.id, &replaced_batch)
+            .await
+            .unwrap();
+        let replaced_identity = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT t.id,i.id,i.content_text FROM turns t JOIN items i ON i.turn_id=t.id WHERE t.thread_id=? ORDER BY i.ordinal LIMIT 1",
+        )
+        .bind("thr_history")
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            replaced_identity,
+            (
+                "trn_history_replaced".into(),
+                "itm_history_replaced".into(),
+                "replacement question".into()
+            )
+        );
 
         store
             .create_pairing_code(&user.id, "pair-hash-second", 10)

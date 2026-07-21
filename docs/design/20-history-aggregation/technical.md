@@ -192,6 +192,11 @@ Server 响应：
 - Server 必须在 Server SQLite commit 后 ACK。
 - 相同 batch/payload hash 重放返回原 ACK。
 - 相同 batch ID 不同 hash 是协议冲突并拒绝。
+- 新 inventory revision 中若稳定 ID 改变但 `(thread_id, ordinal)` 或
+  `(turn_id, ordinal)` 不变，以设备快照为权威替换旧 Turn/Item，不能让次级唯一约束形成
+  永久无法 ACK 的毒批次。
+- 单个 history batch 校验或写入失败时只保留为未 ACK 并记录诊断，不关闭承载心跳与命令的
+  Device Tunnel；后续重试可在数据修复或新版 Server 上继续处理。
 
 ## 6. 实时同步
 

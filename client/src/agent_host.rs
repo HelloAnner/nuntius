@@ -29,6 +29,7 @@ use tokio::{
 
 const EVENT_JOURNAL_CAPACITY: usize = 32_768;
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+const PROVIDER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct HostState {
@@ -110,7 +111,13 @@ pub async fn run(config: Arc<ClientConfig>) -> Result<()> {
 
     kimi_supervisor.abort();
     collector_task.abort();
-    state.codex.shutdown().await?;
+    match tokio::time::timeout(PROVIDER_SHUTDOWN_TIMEOUT, state.codex.shutdown()).await {
+        Ok(result) => result?,
+        Err(_) => tracing::warn!(
+            timeout_seconds = PROVIDER_SHUTDOWN_TIMEOUT.as_secs(),
+            "forcing Agent Host exit after provider shutdown timed out"
+        ),
+    }
     tracing::info!("Nuntius Agent Host stopped");
     Ok(())
 }

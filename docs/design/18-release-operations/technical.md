@@ -56,8 +56,9 @@ Manifest 包含：
    要求其代码签名满足当前已安装 Client 的 designated requirement。
 11. Client 原子安装并保留 previous，立即 `exec` 新二进制；独立 Agent Host 不退出，
    provider turn 和本机事件日志继续运行。
-12. 新 Client 在启动屏障中恢复全部运行中会话和待审批状态，消费 Agent Host 游标之后的
-    事件，再启动命令入口、本地 HTTP 和公网 Tunnel。
+12. 新 Client 对全部运行中会话执行一次同步恢复；失败项标记为 `recovering` 后转后台重试，
+    本地 HTTP 和公网 Tunnel 不得因此无限等待。Agent Host 轮换时 provider 关闭有 10 秒
+    上限，超时由 launchd 拉起新 Host。
 13. 启动 self-check 失败时回滚 Client；Agent Host 仅在 provider 空闲后独立轮换代码。
 
 滚动通道采用 latest-wins desired state，而不是逐 commit FIFO 部署：
