@@ -19,7 +19,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, Command},
+    process::Child,
     sync::{Mutex, broadcast, mpsc, oneshot},
 };
 
@@ -47,11 +47,20 @@ pub struct PiRuntime {
     events: broadcast::Sender<Value>,
     model_catalog: Arc<Mutex<Option<CachedCatalog>>>,
     catalog_probe_failed_at: Arc<Mutex<Option<std::time::Instant>>>,
+    catalog_refresh_running: Arc<AtomicBool>,
 }
 
 struct CachedCatalog {
     fetched_at: std::time::Instant,
     models: Vec<AgentModelOption>,
+}
+
+struct CatalogRefreshGuard(Arc<AtomicBool>);
+
+impl Drop for CatalogRefreshGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 /// How long a probed `/model` catalog is reused before another short-lived
@@ -95,6 +104,7 @@ impl PiRuntime {
             events,
             model_catalog: Arc::new(Mutex::new(None)),
             catalog_probe_failed_at: Arc::new(Mutex::new(None)),
+            catalog_refresh_running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -104,29 +114,19 @@ impl PiRuntime {
 
     pub async fn provider_status(&self) -> AgentProviderStatus {
         let live = self.any_live_handle().await;
-        let version = if live.is_some() {
-            None
-        } else {
+        let installed = crate::probe::command_available(&self.config.pi_command);
+        let available = live.is_some() || installed;
+        let version = if live.is_none() && installed {
             crate::probe::command_version(&self.config.pi_command, &["--version"]).await
+        } else {
+            None
         };
-        let available = live.is_some() || version.is_some();
-        let models = if let Some(handle) = &live {
-            match tokio::time::timeout(Duration::from_secs(5), self.catalog_from(handle)).await {
-                Ok(Some(models)) => {
-                    *self.model_catalog.lock().await = Some(CachedCatalog {
-                        fetched_at: std::time::Instant::now(),
-                        models: models.clone(),
-                    });
-                    models
-                }
-                Ok(None) => self.cached_or_fallback_models().await,
-                Err(_) => self.cached_or_fallback_models().await,
+        let models = if available {
+            let (models, refresh_due) = self.catalog_snapshot(live.is_some()).await;
+            if refresh_due {
+                self.schedule_catalog_refresh(live.clone());
             }
-        } else if available {
-            match self.probe_model_catalog().await {
-                Some(models) => models,
-                None => self.cached_or_fallback_models().await,
-            }
+            models
         } else {
             Vec::new()
         };
@@ -147,14 +147,70 @@ impl PiRuntime {
         }
     }
 
-    async fn cached_or_fallback_models(&self) -> Vec<AgentModelOption> {
-        self.model_catalog
+    /// Provider health must not wait for Pi's model catalog. Extensions may
+    /// perform network I/O while serving `get_available_models`, and the
+    /// complete device heartbeat has a shorter deadline than that operation.
+    /// Return cache/fallback immediately and refresh it in one detached task.
+    async fn catalog_snapshot(&self, has_live_process: bool) -> (Vec<AgentModelOption>, bool) {
+        let (models, cache_fresh) = self
+            .model_catalog
             .lock()
             .await
             .as_ref()
-            .map(|cache| cache.models.clone())
-            .filter(|models| !models.is_empty())
-            .unwrap_or_else(fallback_pi_models)
+            .map(|cache| {
+                (
+                    cache.models.clone(),
+                    cache.fetched_at.elapsed() < CATALOG_TTL && !cache.models.is_empty(),
+                )
+            })
+            .unwrap_or_default();
+        let failure_is_fresh = self
+            .catalog_probe_failed_at
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|failed_at| failed_at.elapsed() < CATALOG_FAILURE_TTL);
+        let refresh_due = !cache_fresh && (has_live_process || !failure_is_fresh);
+        (
+            (!models.is_empty())
+                .then_some(models)
+                .unwrap_or_else(fallback_pi_models),
+            refresh_due,
+        )
+    }
+
+    fn schedule_catalog_refresh(&self, live: Option<PiHandle>) {
+        if self.catalog_refresh_running.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let _guard = CatalogRefreshGuard(runtime.catalog_refresh_running.clone());
+            if let Some(handle) = live {
+                let models = tokio::time::timeout(
+                    Duration::from_secs(15),
+                    runtime.catalog_from(&handle),
+                )
+                .await
+                .ok()
+                .flatten();
+                runtime.store_catalog_result(models).await;
+            } else {
+                let _ = runtime.probe_model_catalog().await;
+            }
+        });
+    }
+
+    async fn store_catalog_result(&self, models: Option<Vec<AgentModelOption>>) {
+        if let Some(models) = models.filter(|models| !models.is_empty()) {
+            *self.catalog_probe_failed_at.lock().await = None;
+            *self.model_catalog.lock().await = Some(CachedCatalog {
+                fetched_at: std::time::Instant::now(),
+                models,
+            });
+        } else {
+            *self.catalog_probe_failed_at.lock().await = Some(std::time::Instant::now());
+        }
     }
 
     /// Fetch the real `/model` catalog from a short-lived probe process.
@@ -553,7 +609,7 @@ impl PiRuntime {
     }
 
     async fn spawn(&self, cwd: &Path, extra_args: &[&str]) -> Result<PiProcess> {
-        let mut command = Command::new(&self.config.pi_command);
+        let mut command = crate::probe::provider_command(&self.config.pi_command);
         command
             .args(&self.config.pi_args)
             .args(extra_args)

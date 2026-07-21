@@ -15,7 +15,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, Command},
+    process::Child,
     sync::{Mutex, broadcast, mpsc, oneshot},
 };
 
@@ -588,7 +588,7 @@ impl AppServerProcess {
 
 impl AppSession {
     async fn spawn(config: &ClientConfig, notifications: broadcast::Sender<Value>) -> Result<Self> {
-        let mut command = Command::new(&config.codex_command);
+        let mut command = crate::probe::provider_command(&config.codex_command);
         command
             .args(&config.codex_args)
             .stdin(Stdio::piped())

@@ -49,12 +49,13 @@ impl AgentRuntimes {
 
     pub async fn statuses(&self) -> Vec<AgentProviderStatus> {
         let codex_was_running = self.codex.is_running().await;
-        let codex_version = if codex_was_running {
+        let codex_installed = crate::probe::command_available(&self.config.codex_command);
+        let codex_version = if codex_was_running || !codex_installed {
             None
         } else {
             crate::probe::command_version(&self.config.codex_command, &["--version"]).await
         };
-        let codex_available = codex_was_running || codex_version.is_some();
+        let codex_available = codex_was_running || codex_installed;
         let codex_models = if codex_was_running {
             match self.codex_model_catalog().await {
                 Ok(models) if !models.is_empty() => models,

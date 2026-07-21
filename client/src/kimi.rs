@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    process::{Child, Command},
+    process::Child,
     sync::{Mutex, Notify, broadcast},
 };
 use tokio_tungstenite::{
@@ -112,20 +112,23 @@ impl KimiRuntime {
                 models,
             };
         }
-        let version =
-            crate::probe::command_version(&self.config.kimi_command, &["--version"]).await;
+        let available = crate::probe::command_available(&self.config.kimi_command);
+        let version = if available {
+            crate::probe::command_version(&self.config.kimi_command, &["--version"]).await
+        } else {
+            None
+        };
         AgentProviderStatus {
             provider: AgentProvider::Kimi,
             label: "Kimi".into(),
-            available: version.is_some(),
-            status: if version.is_some() {
-                "stopped"
-            } else {
-                "unavailable"
-            }
-            .into(),
+            available,
+            status: if available { "stopped" } else { "unavailable" }.into(),
             version,
-            models: fallback_kimi_models(),
+            models: if available {
+                fallback_kimi_models()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -167,7 +170,7 @@ impl KimiRuntime {
             };
             if must_start {
                 let _ = process.take();
-                let mut command = Command::new(&self.config.kimi_command);
+                let mut command = crate::probe::provider_command(&self.config.kimi_command);
                 command
                     .args(&self.config.kimi_args)
                     .stdin(Stdio::null())
