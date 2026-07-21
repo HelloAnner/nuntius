@@ -53,7 +53,10 @@ impl ClientStore {
             .busy_timeout(std::time::Duration::from_secs(15))
             .disable_statement_logging();
         let pool = SqlitePoolOptions::new()
-            .max_connections(4)
+            // History discovery and durable replay can legitimately perform
+            // several concurrent reads while command execution is writing.
+            // Keep capacity for health/readiness and acknowledgement traffic.
+            .max_connections(8)
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
@@ -1708,11 +1711,42 @@ impl ClientStore {
             })
             .collect()
     }
+    pub async fn pending_history_count(&self) -> Result<i64> {
+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM history_outbox")
+            .fetch_one(&self.pool)
+            .await?)
+    }
     pub async fn ack_history(&self, batch_id: &str) -> Result<()> {
         sqlx::query("DELETE FROM history_outbox WHERE batch_id=?")
             .bind(batch_id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+    pub async fn ack_outbox_batch(
+        &self,
+        event_ids: &[String],
+        history_ids: &[String],
+    ) -> Result<()> {
+        if event_ids.is_empty() && history_ids.is_empty() {
+            return Ok(());
+        }
+        // Acknowledgements are individually idempotent. Committing them as one
+        // transaction avoids one FULL-synchronous fsync per WebSocket frame.
+        let mut tx = self.pool.begin().await?;
+        for event_id in event_ids {
+            sqlx::query("DELETE FROM event_outbox WHERE event_id=?")
+                .bind(event_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for batch_id in history_ids {
+            sqlx::query("DELETE FROM history_outbox WHERE batch_id=?")
+                .bind(batch_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 

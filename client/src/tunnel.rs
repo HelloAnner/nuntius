@@ -19,6 +19,13 @@ use tokio_tungstenite::{
 
 const EVENT_IN_FLIGHT_LIMIT: usize = 64;
 const HISTORY_IN_FLIGHT_LIMIT: usize = 16;
+const TUNNEL_WRITER_CAPACITY: usize = 512;
+
+#[derive(Clone)]
+enum OutboxAck {
+    Event(String),
+    History(String),
+}
 
 #[derive(Default)]
 struct PendingWindow {
@@ -41,15 +48,14 @@ impl PendingWindow {
         self.history_ids.insert(batch_id.into())
     }
 
-    fn acknowledge(&mut self, frame: &TunnelFrame) {
-        match frame {
-            TunnelFrame::EventAck { event_id } => {
+    fn acknowledge(&mut self, acknowledgement: &OutboxAck) {
+        match acknowledgement {
+            OutboxAck::Event(event_id) => {
                 self.event_ids.remove(event_id);
             }
-            TunnelFrame::HistoryAck { batch_id, .. } => {
+            OutboxAck::History(batch_id) => {
                 self.history_ids.remove(batch_id);
             }
-            _ => {}
         }
     }
 }
@@ -185,44 +191,95 @@ async fn run_connection(
         .state_set("active_command_queue_epoch", &server_queue_epoch)
         .await?;
     tracing::info!(device_id=%executor.device_id,security=?executor.config.transport_security(),"device tunnel connected");
-    let (out_tx, mut out_rx) = mpsc::channel::<TunnelFrame>(512);
-    let mut events = executor.events.subscribe();
-    let mut command_acks = executor.command_acks.subscribe();
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // History is already durable in the local outbox. Flush it quickly so a
-    // browser watching the public server sees external terminal activity with
-    // sub-second-to-low-second latency, without coupling delivery to browser state.
-    let mut flush = tokio::time::interval(Duration::from_secs(1));
-    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut last_server_activity = tokio::time::Instant::now();
-    let mut pending_window = PendingWindow::default();
-    spawn_inventory_replay(executor.clone(), inventory_replay_started);
-    loop {
-        let watchdog_deadline = last_server_activity + Duration::from_secs(45);
-        tokio::select! {
-            incoming=socket.next()=>match incoming{Some(Ok(Message::Text(text)))=>{last_server_activity=tokio::time::Instant::now();let frame: TunnelFrame=serde_json::from_str(&text)?;pending_window.acknowledge(&frame);handle_server_frame(&executor,&out_tx,frame,desired_release).await?},Some(Ok(Message::Ping(payload)))=>{last_server_activity=tokio::time::Instant::now();socket.send(Message::Pong(payload)).await?;},Some(Ok(Message::Close(_)))|None=>break,Some(Err(error))=>return Err(error.into()),_=>{}},
-            Some(frame)=out_rx.recv()=>send(&mut socket,&frame).await?,
-            event=events.recv()=>match event{Ok(event)=>{if pending_window.track_event(&event.event_id){send(&mut socket,&TunnelFrame::Event{event}).await?}},Err(broadcast::error::RecvError::Lagged(_))=>send_pending(&executor,&mut socket,&mut pending_window).await?,Err(broadcast::error::RecvError::Closed)=>break},
-            ack=command_acks.recv()=>match ack{
-                Ok(frame) => {
-                    let command_id = match &frame {
-                        TunnelFrame::CommandAck { command_id, .. } => command_id,
-                        _ => continue,
-                    };
-                    if executor.store.inbox(command_id).await?.is_some_and(|record| record.queue_epoch != "local") {
-                        send(&mut socket,&frame).await?;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => break,
-            },
-            _=heartbeat.tick()=>{let(project_count,inbox_depth,outbox_depth,active)=executor.store.counts().await?;let providers=executor.agents.statuses().await;let codex=providers.iter().find(|status|status.provider==AgentProvider::Codex);let health=DeviceHealth{app_server_status:codex.map(|status|status.status.clone()).unwrap_or_else(||"unavailable".into()),storage_status:"ok".into(),inbox_depth,outbox_depth,history_backfill_depth:executor.store.pending_history(1000).await?.len() as i64,active_turn_count:active,pending_approval_count:executor.store.pending_approval_count().await?,project_count,codex_version:codex.and_then(|status|status.version.clone()),providers};send(&mut socket,&TunnelFrame::Heartbeat{sent_at:now(),health}).await?;},
-            _=flush.tick()=>send_pending(&executor,&mut socket,&mut pending_window).await?,
-            _=tokio::time::sleep_until(watchdog_deadline)=>return Err(anyhow!("server heartbeat acknowledgement timed out")),
+    let (mut socket_sink, mut socket_stream) = socket.split();
+    let (out_tx, mut out_rx) = mpsc::channel::<Message>(TUNNEL_WRITER_CAPACITY);
+    let (urgent_tx, mut urgent_rx) = mpsc::channel::<Message>(16);
+    let mut writer = tokio::spawn(async move {
+        loop {
+            let message = tokio::select! {
+                biased;
+                message=urgent_rx.recv()=>message,
+                message=out_rx.recv()=>message,
+            };
+            let Some(message) = message else {
+                break;
+            };
+            tokio::time::timeout(Duration::from_secs(10), socket_sink.send(message))
+                .await
+                .context("device tunnel send timed out")??;
         }
+        Ok::<(), anyhow::Error>(())
+    });
+    let (window_ack_tx, window_ack_rx) = mpsc::unbounded_channel();
+    let (persist_ack_tx, persist_ack_rx) = mpsc::unbounded_channel();
+    let outbox_task = tokio::spawn(run_outbox(executor.clone(), out_tx.clone(), window_ack_rx));
+    let acknowledgement_task =
+        tokio::spawn(persist_acknowledgements(executor.clone(), persist_ack_rx));
+    let heartbeat_task = tokio::spawn(send_heartbeats(executor.clone(), urgent_tx.clone()));
+    let command_ack_task = tokio::spawn(send_command_acknowledgements(
+        executor.clone(),
+        out_tx.clone(),
+    ));
+    let (server_frame_tx, server_frame_rx) = mpsc::unbounded_channel();
+    let server_frame_task = tokio::spawn(handle_server_frames(
+        executor.clone(),
+        out_tx.clone(),
+        server_frame_rx,
+        desired_release.clone(),
+    ));
+    let mut last_server_activity = tokio::time::Instant::now();
+    spawn_inventory_replay(executor.clone(), inventory_replay_started);
+    let connection_result = async {
+        loop {
+            let watchdog_deadline = last_server_activity + Duration::from_secs(45);
+            tokio::select! {
+                incoming=socket_stream.next()=>match incoming {
+                    Some(Ok(Message::Text(text))) => {
+                        last_server_activity = tokio::time::Instant::now();
+                        let frame: TunnelFrame = serde_json::from_str(&text)?;
+                        match frame {
+                            TunnelFrame::EventAck { event_id } => {
+                                let acknowledgement = OutboxAck::Event(event_id);
+                                window_ack_tx.send(acknowledgement.clone()).map_err(|_| anyhow!("outbox sender closed"))?;
+                                persist_ack_tx.send(acknowledgement).map_err(|_| anyhow!("acknowledgement sender closed"))?;
+                            }
+                            TunnelFrame::HistoryAck { batch_id, .. } => {
+                                let acknowledgement = OutboxAck::History(batch_id);
+                                window_ack_tx.send(acknowledgement.clone()).map_err(|_| anyhow!("outbox sender closed"))?;
+                                persist_ack_tx.send(acknowledgement).map_err(|_| anyhow!("acknowledgement sender closed"))?;
+                            }
+                            TunnelFrame::HeartbeatAck { .. } => {}
+                            frame => {
+                                server_frame_tx.send(frame).map_err(|_| anyhow!("server frame handler closed"))?;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        last_server_activity = tokio::time::Instant::now();
+                        urgent_tx.try_send(Message::Pong(payload)).map_err(|_| anyhow!("tunnel writer congested while replying to ping"))?;
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(error)) => return Err(error.into()),
+                    _ => {}
+                },
+                result=&mut writer=>match result {
+                    Ok(Ok(())) => return Err(anyhow!("device tunnel writer stopped")),
+                    Ok(Err(error)) => return Err(error),
+                    Err(error) => return Err(anyhow!("device tunnel writer task failed: {error}")),
+                },
+                _=tokio::time::sleep_until(watchdog_deadline)=>return Err(anyhow!("server heartbeat acknowledgement timed out")),
+            }
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+    outbox_task.abort();
+    acknowledgement_task.abort();
+    heartbeat_task.abort();
+    command_ack_task.abort();
+    server_frame_task.abort();
+    writer.abort();
+    connection_result
 }
 
 fn spawn_inventory_replay(executor: CommandExecutor, started: Arc<AtomicBool>) {
@@ -256,7 +313,7 @@ fn spawn_inventory_replay(executor: CommandExecutor, started: Arc<AtomicBool>) {
 
 async fn handle_server_frame(
     executor: &CommandExecutor,
-    out: &mpsc::Sender<TunnelFrame>,
+    out: &mpsc::Sender<Message>,
     frame: TunnelFrame,
     desired_release: &watch::Sender<Option<nuntius_updater::ClientRelease>>,
 ) -> Result<()> {
@@ -295,9 +352,7 @@ async fn handle_server_frame(
                     }
                 }
             };
-            out.send(acknowledgement)
-                .await
-                .map_err(|_| anyhow!("tunnel sender closed"))?;
+            queue_frame(out, &acknowledgement).await?;
         }
         TunnelFrame::Query {
             correlation_id,
@@ -311,19 +366,19 @@ async fn handle_server_frame(
                     Ok(value) => (Some(value), None),
                     Err(error) => (None, Some(error.to_string())),
                 };
-                let _ = out
-                    .send(TunnelFrame::QueryResponse {
+                let _ = queue_frame(
+                    &out,
+                    &TunnelFrame::QueryResponse {
                         correlation_id,
                         result,
                         error_code,
-                    })
-                    .await;
+                    },
+                )
+                .await;
             });
         }
-        TunnelFrame::EventAck { event_id } => executor.store.ack_event(&event_id).await?,
-        TunnelFrame::HistoryAck { batch_id, .. } => {
-            executor.store.ack_history(&batch_id).await?;
-            executor.maybe_emit_inventory_complete().await?;
+        TunnelFrame::EventAck { .. } | TunnelFrame::HistoryAck { .. } => {
+            bail!("outbox acknowledgement bypassed tunnel reader")
         }
         TunnelFrame::HeartbeatAck { .. } => {}
         TunnelFrame::DeviceConfig { display_name } => {
@@ -358,6 +413,206 @@ async fn handle_server_frame(
     }
     Ok(())
 }
+
+async fn handle_server_frames(
+    executor: CommandExecutor,
+    out: mpsc::Sender<Message>,
+    mut frames: mpsc::UnboundedReceiver<TunnelFrame>,
+    desired_release: watch::Sender<Option<nuntius_updater::ClientRelease>>,
+) {
+    while let Some(frame) = frames.recv().await {
+        if let Err(error) = handle_server_frame(&executor, &out, frame, &desired_release).await {
+            tracing::warn!(error=?error, "server frame handling failed");
+        }
+    }
+}
+
+async fn send_command_acknowledgements(executor: CommandExecutor, out: mpsc::Sender<Message>) {
+    let mut command_acks = executor.command_acks.subscribe();
+    loop {
+        match command_acks.recv().await {
+            Ok(frame) => {
+                let command_id = match &frame {
+                    TunnelFrame::CommandAck { command_id, .. } => command_id,
+                    _ => continue,
+                };
+                match executor.store.inbox(command_id).await {
+                    Ok(Some(record)) if record.queue_epoch != "local" => {
+                        if queue_frame(&out, &frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(error=?error, %command_id, "command acknowledgement lookup failed");
+                    }
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::warn!(skipped, "command acknowledgement sender lagged");
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+async fn run_outbox(
+    executor: CommandExecutor,
+    out: mpsc::Sender<Message>,
+    mut acknowledgements: mpsc::UnboundedReceiver<OutboxAck>,
+) {
+    let mut events = executor.events.subscribe();
+    let mut pending_window = PendingWindow::default();
+    // History is already durable in the local outbox. Flush it quickly so a
+    // browser watching the public server sees external terminal activity with
+    // sub-second-to-low-second latency, without coupling delivery to browser state.
+    let mut flush = tokio::time::interval(Duration::from_secs(1));
+    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            acknowledgement=acknowledgements.recv()=>match acknowledgement {
+                Some(acknowledgement) => pending_window.acknowledge(&acknowledgement),
+                None => break,
+            },
+            event=events.recv()=>match event {
+                Ok(event) => {
+                    if pending_window.track_event(&event.event_id)
+                        && queue_frame(&out, &TunnelFrame::Event { event }).await.is_err()
+                    {
+                        break;
+                    }
+                }
+                // The durable timer replay below recovers every lagged event.
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            _=flush.tick()=>{
+                if let Err(error) = queue_pending(&executor, &out, &mut pending_window).await {
+                    tracing::warn!(error=?error, "durable tunnel outbox flush failed; will retry");
+                }
+            },
+        }
+    }
+}
+
+async fn persist_acknowledgements(
+    executor: CommandExecutor,
+    mut acknowledgements: mpsc::UnboundedReceiver<OutboxAck>,
+) {
+    while let Some(first) = acknowledgements.recv().await {
+        let mut event_ids = Vec::new();
+        let mut history_ids = Vec::new();
+        push_acknowledgement(first, &mut event_ids, &mut history_ids);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        while event_ids.len() + history_ids.len() < 256 {
+            match acknowledgements.try_recv() {
+                Ok(acknowledgement) => {
+                    push_acknowledgement(acknowledgement, &mut event_ids, &mut history_ids)
+                }
+                Err(_) => break,
+            }
+        }
+        let history_changed = !history_ids.is_empty();
+        if let Err(error) = executor
+            .store
+            .ack_outbox_batch(&event_ids, &history_ids)
+            .await
+        {
+            // Leaving an acknowledged row durable is safe: the next flush sends
+            // it again and the idempotent server acknowledges it again.
+            tracing::warn!(error=?error,event_count=event_ids.len(),history_count=history_ids.len(),"durable tunnel acknowledgements failed; rows remain replayable");
+            continue;
+        }
+        if history_changed {
+            if let Err(error) = executor.maybe_emit_inventory_complete().await {
+                tracing::warn!(error=?error, "history inventory completion check failed");
+            }
+        }
+    }
+}
+
+fn push_acknowledgement(
+    acknowledgement: OutboxAck,
+    event_ids: &mut Vec<String>,
+    history_ids: &mut Vec<String>,
+) {
+    match acknowledgement {
+        OutboxAck::Event(event_id) => event_ids.push(event_id),
+        OutboxAck::History(batch_id) => history_ids.push(batch_id),
+    }
+}
+
+async fn send_heartbeats(executor: CommandExecutor, out: mpsc::Sender<Message>) {
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut health = unavailable_health();
+    loop {
+        heartbeat.tick().await;
+        if queue_frame(
+            &out,
+            &TunnelFrame::Heartbeat {
+                sent_at: now(),
+                health: health.clone(),
+            },
+        )
+        .await
+        .is_err()
+        {
+            break;
+        }
+        match tokio::time::timeout(Duration::from_secs(5), collect_health(&executor)).await {
+            Ok(Ok(current)) => health = current,
+            Ok(Err(error)) => {
+                health.storage_status = "degraded".into();
+                tracing::warn!(error=?error, "device health refresh failed; heartbeat remains independent");
+            }
+            Err(_) => {
+                health.storage_status = "busy".into();
+                tracing::warn!("device health refresh timed out; heartbeat remains independent");
+            }
+        }
+    }
+}
+
+fn unavailable_health() -> DeviceHealth {
+    DeviceHealth {
+        app_server_status: "unavailable".into(),
+        storage_status: "starting".into(),
+        inbox_depth: 0,
+        outbox_depth: 0,
+        history_backfill_depth: 0,
+        active_turn_count: 0,
+        pending_approval_count: 0,
+        project_count: 0,
+        codex_version: None,
+        providers: Vec::new(),
+    }
+}
+
+async fn collect_health(executor: &CommandExecutor) -> Result<DeviceHealth> {
+    let (project_count, inbox_depth, outbox_depth, active_turn_count) =
+        executor.store.counts().await?;
+    let history_backfill_depth = executor.store.pending_history_count().await?;
+    let pending_approval_count = executor.store.pending_approval_count().await?;
+    let providers = executor.agents.statuses().await;
+    let codex = providers
+        .iter()
+        .find(|status| status.provider == AgentProvider::Codex);
+    Ok(DeviceHealth {
+        app_server_status: codex
+            .map(|status| status.status.clone())
+            .unwrap_or_else(|| "unavailable".into()),
+        storage_status: "ok".into(),
+        inbox_depth,
+        outbox_depth,
+        history_backfill_depth,
+        active_turn_count,
+        pending_approval_count,
+        project_count,
+        codex_version: codex.and_then(|status| status.version.clone()),
+        providers,
+    })
+}
 fn terminal_ack(inbox: &crate::store::InboxRecord) -> TunnelFrame {
     TunnelFrame::CommandAck {
         command_id: inbox.command.command_id.clone(),
@@ -387,21 +642,18 @@ async fn execute_query(executor: &CommandExecutor, query: DeviceQuery) -> Result
         ),
     }
 }
-async fn send_pending<S>(
+async fn queue_pending(
     executor: &CommandExecutor,
-    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    out: &mpsc::Sender<Message>,
     pending_window: &mut PendingWindow,
-) -> Result<()>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
+) -> Result<()> {
     for event in executor
         .store
         .pending_events(EVENT_IN_FLIGHT_LIMIT as i64)
         .await?
     {
         if pending_window.track_event(&event.event_id) {
-            send(socket, &TunnelFrame::Event { event }).await?;
+            queue_frame(out, &TunnelFrame::Event { event }).await?;
         }
     }
     for batch in executor
@@ -410,11 +662,18 @@ where
         .await?
     {
         if pending_window.track_history(&batch.batch_id) {
-            send(socket, &TunnelFrame::HistoryBatch { batch }).await?;
+            queue_frame(out, &TunnelFrame::HistoryBatch { batch }).await?;
         }
     }
     Ok(())
 }
+
+async fn queue_frame(out: &mpsc::Sender<Message>, frame: &TunnelFrame) -> Result<()> {
+    out.send(Message::Text(serde_json::to_string(frame)?.into()))
+        .await
+        .map_err(|_| anyhow!("device tunnel writer closed"))
+}
+
 async fn send<S>(
     socket: &mut tokio_tungstenite::WebSocketStream<S>,
     frame: &TunnelFrame,
@@ -440,18 +699,12 @@ mod tests {
         let mut window = PendingWindow::default();
         assert!(window.track_event("evt_test"));
         assert!(!window.track_event("evt_test"));
-        window.acknowledge(&TunnelFrame::EventAck {
-            event_id: "evt_test".into(),
-        });
+        window.acknowledge(&OutboxAck::Event("evt_test".into()));
         assert!(window.track_event("evt_test"));
 
         assert!(window.track_history("hbatch_test"));
         assert!(!window.track_history("hbatch_test"));
-        window.acknowledge(&TunnelFrame::HistoryAck {
-            batch_id: "hbatch_test".into(),
-            thread_id: "thr_test".into(),
-            acked_cursor: "hist_test".into(),
-        });
+        window.acknowledge(&OutboxAck::History("hbatch_test".into()));
         assert!(window.track_history("hbatch_test"));
     }
 
