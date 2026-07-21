@@ -547,51 +547,72 @@ async fn handle_frame(
             {
                 return Err(anyhow!("event violates size or identity limits"));
             }
-            event.user_id = Some(user_id.into());
-            if event.event_type == "thread.summary" {
-                let thread = serde_json::from_value::<ThreadSummary>(event.payload.clone())?;
-                if thread.device_id != device_id
-                    || event.thread_id.as_deref() != Some(thread.id.as_str())
-                    || event.project_id.as_deref() != Some(thread.project_id.as_str())
-                {
-                    return Err(anyhow!("thread summary identity mismatch"));
-                }
-                state.store.upsert_created_thread(user_id, &thread).await?;
-            }
-            if event.event_type == "project.summary" {
-                let project = serde_json::from_value::<ProjectSummary>(event.payload.clone())?;
-                if project.device_id != device_id {
-                    return Err(anyhow!("project summary device mismatch"));
-                }
-                state
-                    .store
-                    .upsert_project_summary(user_id, &project, event.seq)
-                    .await?;
-            }
-            if event.event_type == "project.removed" {
-                let project_id = event
-                    .project_id
-                    .as_deref()
-                    .ok_or_else(|| anyhow!("project removal event has no project id"))?;
-                if event.payload.get("projectId").and_then(Value::as_str) != Some(project_id) {
-                    return Err(anyhow!("project removal payload mismatch"));
-                }
-                state
-                    .store
-                    .remove_project(user_id, device_id, project_id)
-                    .await?;
-            }
-            if event.event_type == "approval.requested" {
-                state.store.upsert_approval_event(user_id, &event).await?;
-            }
-            if event.event_type == "history.inventory_complete" {
-                state
-                    .store
-                    .mark_history_inventory_complete(device_id)
-                    .await?;
-            }
-            let cursor = state.store.append_event(user_id, &event).await?;
             let event_id = event.event_id.clone();
+            let event_type = event.event_type.clone();
+            let persisted = async {
+                event.user_id = Some(user_id.into());
+                if event.event_type == "thread.summary" {
+                    let thread = serde_json::from_value::<ThreadSummary>(event.payload.clone())?;
+                    if thread.device_id != device_id
+                        || event.thread_id.as_deref() != Some(thread.id.as_str())
+                        || event.project_id.as_deref() != Some(thread.project_id.as_str())
+                    {
+                        return Err(anyhow!("thread summary identity mismatch"));
+                    }
+                    state.store.upsert_created_thread(user_id, &thread).await?;
+                }
+                if event.event_type == "project.summary" {
+                    let project = serde_json::from_value::<ProjectSummary>(event.payload.clone())?;
+                    if project.device_id != device_id {
+                        return Err(anyhow!("project summary device mismatch"));
+                    }
+                    state
+                        .store
+                        .upsert_project_summary(user_id, &project, event.seq)
+                        .await?;
+                }
+                if event.event_type == "project.removed" {
+                    let project_id = event
+                        .project_id
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("project removal event has no project id"))?;
+                    if event.payload.get("projectId").and_then(Value::as_str) != Some(project_id) {
+                        return Err(anyhow!("project removal payload mismatch"));
+                    }
+                    state
+                        .store
+                        .remove_project(user_id, device_id, project_id)
+                        .await?;
+                }
+                if event.event_type == "approval.requested" {
+                    state.store.upsert_approval_event(user_id, &event).await?;
+                }
+                if event.event_type == "history.inventory_complete" {
+                    state
+                        .store
+                        .mark_history_inventory_complete(device_id)
+                        .await?;
+                }
+                let cursor = state.store.append_event(user_id, &event).await?;
+                Ok::<_, anyhow::Error>((cursor, event))
+            }
+            .await;
+            let (cursor, event) = match persisted {
+                Ok(persisted) => persisted,
+                Err(error) => {
+                    // Durable application data can be retried after a schema,
+                    // data, or transient storage repair. It must not take down
+                    // the control channel that carries heartbeats and commands.
+                    tracing::warn!(
+                        device_id,
+                        event_id,
+                        event_type,
+                        error = ?error,
+                        "device event rejected without closing device tunnel"
+                    );
+                    return Ok(());
+                }
+            };
             state.events.publish(PublishedEvent {
                 cursor,
                 user_id: user_id.into(),

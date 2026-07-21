@@ -51,6 +51,11 @@ Endpoint 在两种传输档位复用同一协议：
 
 Reader 和 Writer 任一结束都取消整个 TunnelSession。
 
+设备上传的 durable event 属于隧道承载的应用数据。单个事件解析、校验或落库失败时，Server
+记录带 `eventId` / `eventType` 的诊断并保持未 ACK，不能关闭承载心跳和命令的
+TunnelSession；修复数据、数据库约束或升级 Server 后由 Client 重试。设备身份不匹配、超限等
+协议级违规仍关闭连接。
+
 ## 4. Agent 连接组件
 
 - `CredentialProvider`：challenge 和短期 Token。

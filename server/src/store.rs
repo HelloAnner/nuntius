@@ -1851,6 +1851,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_migration_accepts_pi_threads() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ServerStore::open(temp.path()).await.unwrap();
+        let user = store.create_owner("owner", "test-hash").await.unwrap();
+        store
+            .create_pairing_code(&user.id, "pair-hash", 10)
+            .await
+            .unwrap();
+        let device_id = store
+            .pair_device(
+                &PairDeviceRequest {
+                    code: "unused".into(),
+                    display_name: "Device".into(),
+                    public_key: "key".into(),
+                    agent_version: "test".into(),
+                    os_family: "test".into(),
+                    architecture: "test".into(),
+                },
+                "pair-hash",
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_project_summary(
+                &user.id,
+                &ProjectSummary {
+                    id: "prj_pi".into(),
+                    device_id: device_id.clone(),
+                    kind: ProjectKind::Workspace,
+                    display_name: "Pi workspace".into(),
+                    path_hint: Some("workspace".into()),
+                    status: "active".into(),
+                    repo_name: None,
+                    branch: None,
+                    is_dirty: None,
+                    thread_count: 1,
+                    last_activity_at: Some(now()),
+                },
+                1,
+            )
+            .await
+            .unwrap();
+
+        store
+            .upsert_created_thread(
+                &user.id,
+                &ThreadSummary {
+                    id: "thr_pi".into(),
+                    device_id: device_id.clone(),
+                    project_id: "prj_pi".into(),
+                    provider: AgentProvider::Pi,
+                    app_server_thread_id: Some("app_pi".into()),
+                    title: "Pi thread".into(),
+                    status: "idle".into(),
+                    archived: false,
+                    history_completeness: HistoryCompleteness::Complete,
+                    created_at: Some(now()),
+                    last_synced_at: Some(now()),
+                    last_activity_at: Some(now()),
+                },
+            )
+            .await
+            .unwrap();
+
+        let threads = store
+            .list_threads(&user.id, Some(&device_id), Some("prj_pi"), 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].provider, AgentProvider::Pi);
+    }
+
+    #[tokio::test]
     async fn completed_project_delete_command_removes_server_records() {
         let temp = tempfile::tempdir().unwrap();
         let store = ServerStore::open(temp.path()).await.unwrap();
