@@ -1,10 +1,10 @@
-/* Project-scoped thread switcher matching the mobile conversation sheet. */
+/* Global thread switcher matching the mobile conversation sheet. */
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { IconPlus, Sheet, compareThreadCreation } from "@nuntius/shared";
 import { api } from "../api";
 import { projectNameFrom, useNavigate, useProjectNameMap } from "../hooks";
-import { StatusDot, ThreadListItem } from "../components";
+import { ThreadListItem } from "../components";
 import { useApprovals } from "../stores";
 
 export function ThreadSwitcher({
@@ -26,32 +26,21 @@ export function ThreadSwitcher({
   const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const projectNames = useProjectNameMap(
-    fromRecents ? (threads.data ?? []).map((thread) => thread.deviceId) : [],
+    (threads.data ?? []).map((thread) => thread.deviceId),
   );
-  const current = threads.data?.find((thread) => thread.id === currentThreadId);
-  const projects = useQuery({
-    queryKey: ["projects", current?.deviceId],
-    queryFn: () => api.projects(current!.deviceId),
-    enabled: Boolean(current?.deviceId),
-  });
-  const device = devices.data?.find((item) => item.id === current?.deviceId);
-  const project = projects.data?.find((item) => item.id === current?.projectId);
   const pendingIds = useMemo(
     () => new Set(Object.values(approvals).flatMap((approval) => approval.state === "pending" && approval.threadId ? [approval.threadId] : [])),
     [approvals],
   );
   const scoped = useMemo(
     () => [...(threads.data ?? [])]
-      .filter((thread) => fromRecents || !current || (thread.deviceId === current.deviceId && thread.projectId === current.projectId))
       .sort(compareThreadCreation),
-    [current, fromRecents, threads.data],
+    [threads.data],
   );
-  const contextFor = fromRecents
-    ? (thread: (typeof scoped)[number]) => ({
-        device: devices.data?.find((item) => item.id === thread.deviceId)?.displayName ?? "设备",
-        project: projectNameFrom(projectNames, thread.deviceId, thread.projectId),
-      })
-    : undefined;
+  const contextFor = (thread: (typeof scoped)[number]) => ({
+    device: devices.data?.find((item) => item.id === thread.deviceId)?.displayName ?? "设备",
+    project: projectNameFrom(projectNames, thread.deviceId, thread.projectId),
+  });
   const active = scoped.filter((thread) => thread.status === "active" || pendingIds.has(thread.id));
   const recent = scoped.filter((thread) => thread.status !== "active" && !pendingIds.has(thread.id));
 
@@ -69,16 +58,7 @@ export function ThreadSwitcher({
       <div className="thread-switcher-content">
         <header className="thread-switcher-head">
           <strong>切换会话</strong>
-          <span>
-            {fromRecents ? (
-              "最近会话 · 全部设备"
-            ) : (
-              <>
-                <StatusDot tone={device?.status === "online" ? "success" : "offline"} />
-                {device?.displayName ?? "设备"} · {project?.displayName ?? "项目"} · {device?.status === "online" ? "在线" : "离线"}
-              </>
-            )}
-          </span>
+          <span>全部设备 · 全部项目</span>
         </header>
         {onNewThread ? (
           <button
@@ -95,7 +75,7 @@ export function ThreadSwitcher({
         ) : null}
         {active.length ? <ThreadSwitcherGroup label="进行中" threads={active} currentThreadId={currentThreadId} pendingIds={pendingIds} contextFor={contextFor} onSelect={select} /> : null}
         {recent.length ? <ThreadSwitcherGroup label="最近" threads={recent} currentThreadId={currentThreadId} pendingIds={pendingIds} contextFor={contextFor} onSelect={select} /> : null}
-        {!active.length && !recent.length ? <div className="switcher-empty">{fromRecents ? "最近没有会话" : "当前项目还没有会话"}</div> : null}
+        {!active.length && !recent.length ? <div className="switcher-empty">还没有会话</div> : null}
       </div>
     </Sheet>
   );
