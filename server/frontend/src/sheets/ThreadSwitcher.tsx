@@ -47,8 +47,10 @@ export function ThreadSwitcher({
     [current, fromRecents, threads.data],
   );
   const contextFor = fromRecents
-    ? (thread: (typeof scoped)[number]) =>
-        `${devices.data?.find((item) => item.id === thread.deviceId)?.displayName ?? "设备"} / ${projectNameFrom(projectNames, thread.deviceId, thread.projectId)}`
+    ? (thread: (typeof scoped)[number]) => ({
+        device: devices.data?.find((item) => item.id === thread.deviceId)?.displayName ?? "设备",
+        project: projectNameFrom(projectNames, thread.deviceId, thread.projectId),
+      })
     : undefined;
   const active = scoped.filter((thread) => thread.status === "active" || pendingIds.has(thread.id));
   const recent = scoped.filter((thread) => thread.status !== "active" && !pendingIds.has(thread.id));
@@ -111,22 +113,26 @@ function ThreadSwitcherGroup({
   threads: Awaited<ReturnType<typeof api.allThreads>>;
   currentThreadId?: string;
   pendingIds: Set<string>;
-  contextFor?: (thread: Awaited<ReturnType<typeof api.allThreads>>[number]) => string;
+  contextFor?: (thread: Awaited<ReturnType<typeof api.allThreads>>[number]) => { device: string; project: string };
   onSelect: (thread: Awaited<ReturnType<typeof api.allThreads>>[number]) => void;
 }) {
   return (
     <section className="thread-switcher-group">
       <div className="thread-switcher-label">{label}</div>
-      {threads.map((thread) => (
-        <ThreadListItem
-          key={thread.id}
-          thread={thread}
-          pendingApproval={pendingIds.has(thread.id)}
-          selected={thread.id === currentThreadId}
-          contextLabel={contextFor?.(thread)}
-          onClick={() => onSelect(thread)}
-        />
-      ))}
+      {threads.map((thread) => {
+        const context = contextFor?.(thread);
+        return (
+          <ThreadListItem
+            key={thread.id}
+            thread={thread}
+            pendingApproval={pendingIds.has(thread.id)}
+            selected={thread.id === currentThreadId}
+            contextDevice={context?.device}
+            contextProject={context?.project}
+            onClick={() => onSelect(thread)}
+          />
+        );
+      })}
     </section>
   );
 }

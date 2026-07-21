@@ -418,6 +418,17 @@ export function ThreadPage({
       subtitle={device && project ? `${device.displayName} / ${project.displayName}` : undefined}
       trailing={
         <>
+          {project && !unassigned ? (
+            <button
+              className="icon-btn"
+              onClick={() => setCreating(true)}
+              disabled={!online}
+              aria-label="新建会话（同设备 · 同项目）"
+              title="新建会话（同设备 · 同项目）"
+            >
+              <IconPlus size={18} />
+            </button>
+          ) : null}
           {thread ? <ProviderBadge provider={thread.provider} /> : null}
           <span className={`status-pill ${currentTone}`}><span className="status-dot" />{currentStateLabel}</span>
           {!unassigned && !archived ? (
@@ -480,8 +491,10 @@ export function ThreadPage({
   const sidebarThreads = [...sidebarSource].sort(compareThreadCreation);
   const sidebarLoading = fromRecents ? allThreads.isLoading : projectThreads.isLoading;
   const sidebarContextFor = fromRecents
-    ? (item: ThreadSummary) =>
-        `${devices.data?.find((d) => d.id === item.deviceId)?.displayName ?? "设备"} / ${projectNameFrom(sidebarProjectNames, item.deviceId, item.projectId)}`
+    ? (item: ThreadSummary) => ({
+        device: devices.data?.find((d) => d.id === item.deviceId)?.displayName ?? "设备",
+        project: projectNameFrom(sidebarProjectNames, item.deviceId, item.projectId),
+      })
     : undefined;
   const pendingThreadIds = new Set(
     Object.values(approvals)
@@ -536,13 +549,6 @@ export function ThreadPage({
                 </>
               )}
             </button>
-            {project && !unassigned ? (
-              <button className="quick-new-thread" onClick={() => setCreating(true)} disabled={!online}>
-                <IconPlus size={15} />
-                <strong>新建会话</strong>
-                <small>同设备 · 同项目</small>
-              </button>
-            ) : null}
             {sidebarLoading ? (
               <div className="detail-list-state"><Spinner /></div>
             ) : sidebarThreads.length === 0 ? (
@@ -604,22 +610,26 @@ function ThreadSidebarGroup({
   threads: ThreadSummary[];
   pendingThreadIds: Set<string>;
   currentThreadId: string;
-  contextFor?: (thread: ThreadSummary) => string;
+  contextFor?: (thread: ThreadSummary) => { device: string; project: string };
   onSelect: (thread: ThreadSummary) => void;
 }) {
   return (
     <section className="thread-sidebar-group">
       <div className="thread-sidebar-label">{label} · {threads.length}</div>
-      {threads.map((thread) => (
-        <ThreadListItem
-          key={thread.id}
-          thread={thread}
-          pendingApproval={pendingThreadIds.has(thread.id)}
-          selected={thread.id === currentThreadId}
-          contextLabel={contextFor?.(thread)}
-          onClick={() => onSelect(thread)}
-        />
-      ))}
+      {threads.map((thread) => {
+        const context = contextFor?.(thread);
+        return (
+          <ThreadListItem
+            key={thread.id}
+            thread={thread}
+            pendingApproval={pendingThreadIds.has(thread.id)}
+            selected={thread.id === currentThreadId}
+            contextDevice={context?.device}
+            contextProject={context?.project}
+            onClick={() => onSelect(thread)}
+          />
+        );
+      })}
     </section>
   );
 }

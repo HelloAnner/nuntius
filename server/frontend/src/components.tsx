@@ -328,13 +328,15 @@ export function ThreadListItem({
   thread,
   pendingApproval = false,
   selected = false,
-  contextLabel,
+  contextDevice,
+  contextProject,
   onClick,
 }: {
   thread: ThreadSummary;
   pendingApproval?: boolean;
   selected?: boolean;
-  contextLabel?: string;
+  contextDevice?: string;
+  contextProject?: string;
   onClick: () => void;
 }) {
   const tone = pendingApproval ? "warning" : threadTone(thread);
@@ -349,7 +351,13 @@ export function ThreadListItem({
       <span className="thread-list-copy">
         <span className="thread-list-title">{thread.title || "未命名会话"}</span>
         <span className="thread-list-meta">
-          {contextLabel ? <span className="thread-list-context">{contextLabel}</span> : null}
+          {contextDevice || contextProject ? (
+            <span className="thread-list-context">
+              {contextDevice ? <span className="ctx-device">{contextDevice}</span> : null}
+              {contextDevice && contextProject ? <span className="ctx-sep">/</span> : null}
+              {contextProject ? <span className="ctx-project">{contextProject}</span> : null}
+            </span>
+          ) : null}
           <span className="thread-list-state">{state} · {providerLabel(thread.provider)} · {relTime(thread.lastActivityAt ?? thread.createdAt)}</span>
         </span>
       </span>
