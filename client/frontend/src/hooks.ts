@@ -35,7 +35,7 @@ export function useArchiveThreadAction() {
   const busyIds = usePendingArchiveIds();
 
   const archive = useCallback(
-    async (threadId: string) => {
+    (threadId: string) => {
       if (busyIds.has(threadId)) return false;
       queueArchive(threadId);
       const cachedThread = [
@@ -54,7 +54,6 @@ export function useArchiveThreadAction() {
         old?.filter((thread) => thread.id !== threadId);
       qc.setQueriesData<ThreadSummary[]>({ queryKey: ["projectThreads"] }, removeArchived);
       qc.setQueryData<ThreadSummary[]>(["threads"], removeArchived);
-      toast("归档请求已保存；如果本地服务正在重启，恢复后会自动完成");
       void submitArchive(threadId, qc, toast);
       return true;
     },

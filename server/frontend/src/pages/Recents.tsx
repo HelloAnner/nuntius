@@ -86,6 +86,7 @@ export function RecentsPage() {
     const q = query.trim().toLocaleLowerCase();
     return [...(threads.data ?? [])]
       .sort(compareThreadCreation)
+      .filter((thread) => !busyIds.has(thread.id))
       .filter((thread) => deviceFilter === "all" || thread.deviceId === deviceFilter)
       .filter((thread) => projectFilter === "all" || `${thread.deviceId}:${thread.projectId}` === projectFilter)
       .filter((thread) => {
@@ -102,7 +103,7 @@ export function RecentsPage() {
         return Number.isFinite(time) && now - time <= days * 86_400_000;
       })
       .filter((thread) => !q || thread.title.toLocaleLowerCase().includes(q));
-  }, [deviceFilter, pendingThreadIds, projectFilter, query, statusFilter, threads.data, timeFilter]);
+  }, [busyIds, deviceFilter, pendingThreadIds, projectFilter, query, statusFilter, threads.data, timeFilter]);
 
   const groups = useMemo(() => groupSessions(list), [list]);
 

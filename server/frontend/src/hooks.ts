@@ -62,7 +62,7 @@ export function useArchiveThreadAction() {
   const busyIds = usePendingArchiveIds(userId);
 
   const archive = useCallback(
-    async (threadId: string) => {
+    (threadId: string) => {
       if (!userId || busyIds.has(threadId)) return false;
       queueArchive(userId, threadId);
       const cachedThread = [
@@ -81,7 +81,8 @@ export function useArchiveThreadAction() {
         old?.filter((thread) => thread.id !== threadId);
       qc.setQueriesData<ThreadSummary[]>({ queryKey: ["projectThreads"] }, removeArchived);
       qc.setQueryData<ThreadSummary[]>(["allThreads"], removeArchived);
-      return (await submitArchive(userId, threadId, qc, toast, true)) !== "failed";
+      void submitArchive(userId, threadId, qc, toast);
+      return true;
     },
     [busyIds, qc, toast, userId],
   );

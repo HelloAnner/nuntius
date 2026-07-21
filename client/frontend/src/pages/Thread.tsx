@@ -223,8 +223,8 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
       title: "归档这个会话？",
       body: "归档后会从所有会话页面隐藏，历史记录仍保留在本机和服务器数据库中。",
       confirmLabel: "归档",
-      action: async () => {
-        if (await archiveThread(threadId)) {
+      action: () => {
+        if (archiveThread(threadId)) {
           navigate({ name: "project", projectId }, { replace: true });
         }
       },
@@ -310,7 +310,9 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     );
   }
 
-  const sortedThreads = [...(projectThreads.data ?? [])].sort(compareThreadCreation);
+  const sortedThreads = [...(projectThreads.data ?? [])]
+    .filter((thread) => !busyIds.has(thread.id))
+    .sort(compareThreadCreation);
 
   return (
     <div className="page">

@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { newIdemKey, useToast } from "@nuntius/shared";
+import { newIdemKey, useToast, type ThreadSummary } from "@nuntius/shared";
 import { api, ApiError } from "./api";
 import { trackCommand } from "./events";
 import { useSession } from "./stores";
@@ -117,6 +117,22 @@ async function invalidateThreads(qc: QueryClient) {
   ]);
 }
 
+function restoreOptimisticArchive(qc: QueryClient, threadId: string) {
+  qc.setQueryData<ThreadSummary>(
+    ["threadSnapshot", threadId],
+    (thread) => thread ? { ...thread, archived: false } : thread,
+  );
+}
+
+function archiveFailureMessage(error: unknown) {
+  const detail = typeof error === "string"
+    ? error
+    : error instanceof Error
+      ? error.message
+      : "请重试";
+  return `归档失败：${detail}`;
+}
+
 function retryLater(key: string, intent: ArchiveIntent) {
   const attempts = intent.attempts + 1;
   const delay = Math.min(30_000, 1_000 * 2 ** Math.min(attempts - 1, 5));
@@ -140,13 +156,12 @@ export async function submitArchive(
   threadId: string,
   qc: QueryClient,
   toast: Toast,
-  announce = false,
 ): Promise<IntentResult> {
   const key = intentKey(userId, threadId);
   const intent = intents[key];
   if (!intent) return "completed";
   if (inFlight.has(key)) return "pending";
-  if (!announce && intent.nextAttemptAt > Date.now()) return "pending";
+  if (intent.nextAttemptAt > Date.now()) return "pending";
 
   inFlight.add(key);
   try {
@@ -155,13 +170,15 @@ export async function submitArchive(
       if (command.status === "completed") {
         removeIntent(key);
         await invalidateThreads(qc);
-        toast("会话已自动归档");
         return "completed";
       }
       if (TERMINAL.has(command.status)) {
         removeIntent(key);
+        restoreOptimisticArchive(qc, threadId);
         await invalidateThreads(qc);
-        toast(command.errorMessage || "归档未完成，请重试", { error: true });
+        toast(archiveFailureMessage(command.errorMessage), {
+          error: true,
+        });
         return "failed";
       }
       updateIntent(key, { attempts: 0, nextAttemptAt: Date.now() + 2_000 });
@@ -179,35 +196,21 @@ export async function submitArchive(
       nextAttemptAt: Date.now() + 1_000,
     });
     trackCommand(qc, receipt.commandId, intent.threadId, "thread.archive");
-    if (announce) {
-      toast(
-        receipt.status === "waiting_device"
-          ? "设备正在重启或离线，归档已排队；恢复连接后会自动完成"
-          : "归档请求已保存，完成后会自动更新",
-      );
-    }
     return "pending";
   } catch (error) {
     if (error instanceof ApiError && error.code === "not_found" && !intent.commandId) {
       removeIntent(key);
       await invalidateThreads(qc);
-      if (announce) toast("会话已不在当前列表中");
       return "completed";
     }
     if (isRecoverable(error)) {
       retryLater(key, intent);
-      if (announce) {
-        toast(
-          error instanceof ApiError && error.code === "device_offline"
-            ? "设备正在重启或离线，归档已保存；恢复连接后会自动完成"
-            : "暂时无法连接服务，归档已保存；恢复连接后会自动完成",
-        );
-      }
       return "pending";
     }
     removeIntent(key);
+    restoreOptimisticArchive(qc, threadId);
     await invalidateThreads(qc);
-    toast(error instanceof Error ? error.message : "归档失败，请重试", { error: true });
+    toast(archiveFailureMessage(error), { error: true });
     return "failed";
   } finally {
     inFlight.delete(key);

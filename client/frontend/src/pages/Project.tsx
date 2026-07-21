@@ -47,7 +47,9 @@ export function ProjectPage({ projectId }: { projectId: string }) {
   const unassigned = project?.kind === "system_unassigned";
   const providerStatuses = info.data?.providers ?? [];
   const canCreate = Boolean(!unassigned && providerStatuses.some((status) => status.available));
-  const sorted = [...(threads.data ?? [])].sort(compareThreadCreation);
+  const sorted = [...(threads.data ?? [])]
+    .filter((thread) => !busyIds.has(thread.id))
+    .sort(compareThreadCreation);
 
   const remove = () => {
     if (!project || unassigned || deleting) return;

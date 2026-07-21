@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { useToast } from "@nuntius/shared";
+import { useToast, type ThreadSummary } from "@nuntius/shared";
 import { api, ApiError } from "./api";
 
 interface ArchiveIntent {
@@ -102,6 +102,22 @@ async function invalidateThreads(qc: QueryClient) {
   ]);
 }
 
+function restoreOptimisticArchive(qc: QueryClient, threadId: string) {
+  qc.setQueryData<ThreadSummary>(
+    ["threadSnapshot", threadId],
+    (thread) => thread ? { ...thread, archived: false } : thread,
+  );
+}
+
+function archiveFailureMessage(error: unknown) {
+  const detail = typeof error === "string"
+    ? error
+    : error instanceof Error
+      ? error.message
+      : "请重试";
+  return `归档失败：${detail}`;
+}
+
 export async function submitArchive(
   threadId: string,
   qc: QueryClient,
@@ -114,7 +130,6 @@ export async function submitArchive(
     await api.archiveThread(threadId, true);
     remove(threadId);
     await invalidateThreads(qc);
-    toast("会话已自动归档");
   } catch (error) {
     if (error instanceof ApiError && error.code === "not_found") {
       remove(threadId);
@@ -126,8 +141,9 @@ export async function submitArchive(
       return;
     }
     remove(threadId);
+    restoreOptimisticArchive(qc, threadId);
     await invalidateThreads(qc);
-    toast(error instanceof Error ? error.message : "归档失败，请重试", { error: true });
+    toast(archiveFailureMessage(error), { error: true });
   } finally {
     inFlight.delete(threadId);
   }

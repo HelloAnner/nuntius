@@ -3,9 +3,10 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { IconPlus, Sheet, compareThreadCreation } from "@nuntius/shared";
 import { api } from "../api";
+import { usePendingArchiveIds } from "../archiveOutbox";
 import { projectNameFrom, useNavigate, useProjectNameMap } from "../hooks";
 import { ThreadListItem } from "../components";
-import { useApprovals } from "../stores";
+import { useApprovals, useSession } from "../stores";
 
 export function ThreadSwitcher({
   open,
@@ -22,6 +23,8 @@ export function ThreadSwitcher({
 }) {
   const navigate = useNavigate();
   const approvals = useApprovals((state) => state.items);
+  const userId = useSession((state) => state.session?.userId);
+  const archivingIds = usePendingArchiveIds(userId);
   const fromRecents = navigationContext === "recents";
   const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
@@ -34,8 +37,9 @@ export function ThreadSwitcher({
   );
   const scoped = useMemo(
     () => [...(threads.data ?? [])]
+      .filter((thread) => !archivingIds.has(thread.id))
       .sort(compareThreadCreation),
-    [threads.data],
+    [archivingIds, threads.data],
   );
   const contextFor = (thread: (typeof scoped)[number]) => ({
     device: devices.data?.find((item) => item.id === thread.deviceId)?.displayName ?? "设备",

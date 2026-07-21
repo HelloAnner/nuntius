@@ -56,7 +56,10 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
   const unassigned = project?.kind === "system_unassigned";
   const canCreate = device?.status === "online" && !unassigned;
   const canDelete = device?.status === "online" && !unassigned;
-  const sorted = [...(threads.data ?? [])].sort(compareThreadCreation);
+  const canArchive = !unassigned;
+  const sorted = [...(threads.data ?? [])]
+    .filter((thread) => !busyIds.has(thread.id))
+    .sort(compareThreadCreation);
 
   const remove = () => {
     if (!project || !canDelete || deleting) return;
@@ -141,7 +144,7 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
                   icon={<IconArchive size={18} />}
                   label="归档"
                   busy={busyIds.has(t.id)}
-                  disabled={!canDelete}
+                  disabled={!canArchive}
                   onAction={() => archive(t.id)}
                 >
                   <ThreadRow

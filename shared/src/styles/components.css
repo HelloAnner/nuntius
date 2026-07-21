@@ -646,6 +646,13 @@
   color: #fff;
 }
 
+@media (max-width: 899px) {
+  .toast-host {
+    top: calc(10px + var(--sat));
+    bottom: auto;
+  }
+}
+
 /* ---- connection pill ---- */
 .conn-pill {
   width: 30px;

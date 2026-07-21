@@ -20,8 +20,10 @@ export function ThreadsPage() {
 
   const projectName = (id: string) => projects.data?.find((p) => p.id === id)?.displayName ?? "";
   const list = useMemo(
-    () => [...(threads.data ?? [])].sort(compareThreadCreation),
-    [threads.data],
+    () => [...(threads.data ?? [])]
+      .filter((thread) => !busyIds.has(thread.id))
+      .sort(compareThreadCreation),
+    [busyIds, threads.data],
   );
 
   return (

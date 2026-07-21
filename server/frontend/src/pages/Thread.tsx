@@ -377,8 +377,14 @@ export function ThreadPage({
       title: "归档这个会话？",
       body: "归档后会从所有会话页面隐藏，历史记录仍保留在服务器数据库中。",
       confirmLabel: "归档",
-      action: async () => {
-        await archiveThread(threadId);
+      action: () => {
+        if (!archiveThread(threadId)) return;
+        navigate(
+          fromRecents
+            ? { name: "recents" }
+            : { name: "project", deviceId, projectId },
+          { replace: true },
+        );
       },
     });
 
@@ -412,7 +418,8 @@ export function ThreadPage({
   const currentTone = thread ? (pendingApproval ? "warning" : threadTone(thread)) : "offline";
   const currentStateLabel = pendingApproval ? "等待审批" : statusLabel(thread?.status ?? "offline");
 
-  const sidebarSource = fromRecents ? (allThreads.data ?? []) : (projectThreads.data ?? []);
+  const sidebarSource = (fromRecents ? (allThreads.data ?? []) : (projectThreads.data ?? []))
+    .filter((item) => !busyIds.has(item.id));
   const sidebarProjectNames = useProjectNameMap(
     fromRecents ? sidebarSource.map((item) => item.deviceId) : [],
   );
