@@ -1,12 +1,20 @@
 import { describe, expect, test } from "bun:test";
-import { ThreadLiveStore, orderedLiveItems, type LiveItem, type LiveTurn } from "../stream";
+import {
+  ThreadLiveStore,
+  compareChronology,
+  orderedLiveItems,
+  type LiveItem,
+  type LiveTurn,
+} from "../stream";
 import type { NuntiusEvent } from "../types";
 import type { HistoryGroup } from "./ThreadView";
 import {
   liveTurnIsInHistory,
   freshLiveTurnsForHistory,
+  historyGroupChronology,
   isThreadNearBottom,
   orderedHistory,
+  orderedTimeline,
   liveTurnHasTranscript,
   optimisticEchoIsInHistory,
   shouldRenderThreadLoading,
@@ -237,6 +245,60 @@ describe("ThreadView live/history reconciliation", () => {
     expect(ordered[0].items.map((entry) => entry.id)).toEqual(["actually-first", "itm_user"]);
   });
 
+  test("anchors a turn to its earliest recorded timestamp", () => {
+    const group = historyGroup("prompt", "2026-07-19T10:00:10.000Z");
+    group.items.push({
+      id: "replayed-earlier",
+      ordinal: 2,
+      kind: "agent_message",
+      text: "earlier",
+      status: "completed",
+      occurredAt: "2026-07-19T10:00:05.000Z",
+      attachments: [],
+    });
+
+    expect(historyGroupChronology(group).occurredAt).toBe("2026-07-19T10:00:05.000Z");
+  });
+
+  test("merges history, live messages, and approvals into one timestamp order", () => {
+    const ordered = orderedTimeline([
+      {
+        occurredAt: "2026-07-19T10:00:03.000Z",
+        sequence: 3,
+        sortId: "history",
+        label: "history",
+      },
+      {
+        occurredAt: "2026-07-19T10:00:02.000Z",
+        sequence: 8,
+        sortId: "live",
+        label: "live",
+      },
+      {
+        occurredAt: "2026-07-19T10:00:04.000Z",
+        sequence: 1,
+        sortId: "approval",
+        label: "approval",
+      },
+    ]);
+
+    expect(ordered.map((entry) => entry.label)).toEqual(["live", "history", "approval"]);
+  });
+
+  test("places valid timestamps before missing timestamps and uses stable fallbacks", () => {
+    expect(
+      compareChronology(
+        "2026-07-19T10:00:00.000Z",
+        2,
+        "valid",
+        null,
+        1,
+        "missing",
+      ),
+    ).toBeLessThan(0);
+    expect(compareChronology(null, 1, "a", null, 2, "b")).toBeLessThan(0);
+  });
+
   test("one persisted prompt reconciles only one of two identical optimistic sends", () => {
     const first = turn({ id: "local:first" });
     const second = turn({
@@ -431,5 +493,7 @@ describe("ThreadLiveStore chronology", () => {
     expect(live.turns[0].id.startsWith("local:")).toBe(false);
     expect(live.turns[0].items).toHaveLength(1);
     expect(live.turns[0].items[0].attachments).toEqual([attachment]);
+    expect(live.turns[0].items[0].occurredAt).toBe("2026-07-19T10:00:00.000Z");
+    expect(live.turns[0].items[0].sequence).toBe(1);
   });
 });

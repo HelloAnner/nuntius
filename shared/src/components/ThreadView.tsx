@@ -12,6 +12,7 @@ import type { AttachmentView, CommandStatus } from "../types";
 import {
   compareChronology,
   compareLiveTurns,
+  liveTurnChronology,
   orderedLiveItems,
   type LiveItem,
   type LiveTurn,
@@ -162,12 +163,55 @@ export function visibleHistoryItems(items: RenderItem[]): RenderItem[] {
     });
 }
 
+export function historyGroupChronology(group: HistoryGroup): {
+  occurredAt: string | null;
+  sequence: number;
+  id: string;
+} {
+  let anchor = {
+    occurredAt: group.turn.startedAt,
+    sequence: group.turn.ordinal,
+    id: group.turn.id,
+  };
+  if (
+    compareChronology(
+      group.turn.completedAt,
+      group.turn.ordinal,
+      `${group.turn.id}:completed`,
+      anchor.occurredAt,
+      anchor.sequence,
+      anchor.id,
+    ) < 0
+  ) {
+    anchor = {
+      occurredAt: group.turn.completedAt,
+      sequence: group.turn.ordinal,
+      id: `${group.turn.id}:completed`,
+    };
+  }
+  for (const item of group.items) {
+    if (
+      compareChronology(
+        item.occurredAt,
+        item.ordinal,
+        item.id,
+        anchor.occurredAt,
+        anchor.sequence,
+        anchor.id,
+      ) < 0
+    ) {
+      anchor = {
+        occurredAt: item.occurredAt,
+        sequence: item.ordinal,
+        id: item.id,
+      };
+    }
+  }
+  return anchor;
+}
+
 function historyGroupAt(group: HistoryGroup): string | null {
-  return (
-    group.turn.startedAt ??
-    visibleHistoryItems(group.items)[0]?.occurredAt ??
-    group.turn.completedAt
-  );
+  return historyGroupChronology(group).occurredAt;
 }
 
 export function orderedHistory(history: HistoryGroup[]): HistoryGroup[] {
@@ -179,17 +223,69 @@ export function orderedHistory(history: HistoryGroup[]): HistoryGroup[] {
       return true;
     })
     .map((group) => ({ ...group, items: visibleHistoryItems(group.items) }))
-    .sort((left, right) =>
-      compareChronology(
-        historyGroupAt(left),
-        left.turn.ordinal,
-        left.turn.id,
-        historyGroupAt(right),
-        right.turn.ordinal,
-        right.turn.id,
-      ),
-    );
+    .sort((left, right) => {
+      const leftAnchor = historyGroupChronology(left);
+      const rightAnchor = historyGroupChronology(right);
+      return compareChronology(
+        leftAnchor.occurredAt,
+        leftAnchor.sequence,
+        leftAnchor.id,
+        rightAnchor.occurredAt,
+        rightAnchor.sequence,
+        rightAnchor.id,
+      );
+    });
 }
+
+export interface TimelineSortKey {
+  occurredAt: string | null;
+  sequence: number;
+  sortId: string;
+}
+
+/** Canonical render order shared by history, SSE overlays, optimistic prompts,
+ * and approvals. Never rely on fetch or event arrival order. */
+export function orderedTimeline<T extends TimelineSortKey>(entries: T[]): T[] {
+  return [...entries].sort((left, right) =>
+    compareChronology(
+      left.occurredAt,
+      left.sequence,
+      left.sortId,
+      right.occurredAt,
+      right.sequence,
+      right.sortId,
+    ),
+  );
+}
+
+type TimelineEntry = TimelineSortKey & (
+  | {
+      kind: "turn";
+      key: string;
+      status: string;
+      ordinal?: number;
+    }
+  | {
+      kind: "history-item";
+      key: string;
+      item: RenderItem;
+    }
+  | {
+      kind: "live-prompt";
+      key: string;
+      turn: LiveTurn;
+    }
+  | {
+      kind: "live-item";
+      key: string;
+      item: LiveItem;
+    }
+  | {
+      kind: "approval";
+      key: string;
+      approval: ApprovalView;
+    }
+);
 
 /**
  * A reconnect snapshot can persist a reply before its replayed live event is
@@ -382,15 +478,20 @@ export function ThreadView({
     turnId: string,
     historyAgents: Map<string, number>,
     historyUsers: Map<string, number>,
-  ): LiveItem[] => {
+  ): Array<{ ownerId: string; item: LiveItem }> => {
     const turns = [
       live.byId[turnId],
       ...(latestActiveHistory?.turn.id === turnId ? activeOrphans : []),
     ].filter((turn): turn is LiveTurn => Boolean(turn));
     const seen = new Set<string>();
     return turns
-      .flatMap((turn) => visibleLiveItems(turn, historyAgents, historyUsers))
-      .filter((item) => {
+      .flatMap((turn) =>
+        visibleLiveItems(turn, historyAgents, historyUsers).map((item) => ({
+          ownerId: turn.id,
+          item,
+        })),
+      )
+      .filter(({ item }) => {
         const signature = `${item.kind}:${normalizedMessage(item.text)}:${item.key}`;
         if (seen.has(signature)) return false;
         seen.add(signature);
@@ -398,42 +499,106 @@ export function ThreadView({
       })
       .sort((left, right) =>
         compareChronology(
-          left.occurredAt,
-          left.sequence,
-          left.key,
-          right.occurredAt,
-          right.sequence,
-          right.key,
+          left.item.occurredAt,
+          left.item.sequence,
+          `${left.ownerId}:${left.item.key}`,
+          right.item.occurredAt,
+          right.item.sequence,
+          `${right.ownerId}:${right.item.key}`,
         ),
       );
   };
-  const transcript: Array<
-    | { source: "history"; group: HistoryGroup }
-    | { source: "live"; turn: LiveTurn }
-  > = [
-    ...durableHistory.map((group) => ({ source: "history" as const, group })),
-    ...freshLiveTurns.map((turn) => ({ source: "live" as const, turn })),
-  ];
-  transcript.sort((left, right) => {
-    const leftAt = left.source === "history" ? historyGroupAt(left.group) : left.turn.startedAt;
-    const rightAt = right.source === "history" ? historyGroupAt(right.group) : right.turn.startedAt;
-    const leftSequence = left.source === "history"
-      ? left.group.turn.ordinal
-      : left.turn.startedSequence;
-    const rightSequence = right.source === "history"
-      ? right.group.turn.ordinal
-      : right.turn.startedSequence;
-    const leftId = left.source === "history" ? left.group.turn.id : left.turn.id;
-    const rightId = right.source === "history" ? right.group.turn.id : right.turn.id;
-    return compareChronology(
-      leftAt,
-      leftSequence,
-      leftId,
-      rightAt,
-      rightSequence,
-      rightId,
-    );
-  });
+  const timelineEntries: TimelineEntry[] = [];
+  for (const group of durableHistory) {
+    const groupAt = historyGroupAt(group);
+    const renderKey = live.byId[group.turn.id]?.renderKey ?? group.turn.id;
+    timelineEntries.push({
+      kind: "turn",
+      key: `turn:${renderKey}`,
+      status: group.turn.status,
+      ordinal: group.turn.ordinal,
+      occurredAt: group.turn.startedAt ?? groupAt,
+      sequence: Number.MIN_SAFE_INTEGER,
+      sortId: `0:turn:${group.turn.id}`,
+    });
+
+    const groupAgents = new Map<string, number>();
+    const groupUsers = new Map<string, number>();
+    for (const item of group.items) {
+      if (item.kind === "agent_message") {
+        const signature = normalizedMessage(item.text);
+        if (signature) groupAgents.set(signature, (groupAgents.get(signature) ?? 0) + 1);
+      } else if (item.kind === "user_message") {
+        groupUsers.set(item.text, (groupUsers.get(item.text) ?? 0) + 1);
+      }
+      if (item.kind !== "user_message" && item.kind !== "agent_message") continue;
+      timelineEntries.push({
+        kind: "history-item",
+        key: `history:${group.turn.id}:${item.id}`,
+        item,
+        occurredAt: item.occurredAt,
+        sequence: item.ordinal,
+        sortId: `1:history:${group.turn.id}:${item.id}`,
+      });
+    }
+
+    for (const { ownerId, item } of liveExtrasFor(group.turn.id, groupAgents, groupUsers)) {
+      timelineEntries.push({
+        kind: "live-item",
+        key: `live:${renderKey}:${ownerId}:${item.key}`,
+        item,
+        occurredAt: item.occurredAt,
+        sequence: item.sequence,
+        sortId: `2:live:${group.turn.id}:${ownerId}:${item.key}`,
+      });
+    }
+  }
+
+  for (const turn of freshLiveTurns) {
+    const renderKey = turn.renderKey ?? turn.id;
+    const turnAnchor = liveTurnChronology(turn);
+    timelineEntries.push({
+      kind: "turn",
+      key: `turn:${renderKey}`,
+      status: turn.status,
+      occurredAt: turn.startedAt || turnAnchor.occurredAt,
+      sequence: Number.MIN_SAFE_INTEGER,
+      sortId: `0:turn:${turn.id}`,
+    });
+    if (turn.userText || turn.userAttachments.length > 0) {
+      timelineEntries.push({
+        kind: "live-prompt",
+        key: `prompt:${renderKey}`,
+        turn,
+        occurredAt: turn.startedAt || turnAnchor.occurredAt,
+        sequence: Number.MIN_SAFE_INTEGER,
+        sortId: `1:prompt:${turn.id}`,
+      });
+    }
+    for (const item of visibleLiveItems(turn)) {
+      timelineEntries.push({
+        kind: "live-item",
+        key: `live:${renderKey}:${item.key}`,
+        item,
+        occurredAt: item.occurredAt,
+        sequence: item.sequence,
+        sortId: `2:live:${turn.id}:${item.key}`,
+      });
+    }
+  }
+
+  for (const approval of approvals) {
+    timelineEntries.push({
+      kind: "approval",
+      key: `approval:${approval.id}`,
+      approval,
+      occurredAt: approval.occurredAt,
+      sequence: Number.MAX_SAFE_INTEGER,
+      sortId: `3:approval:${approval.id}`,
+    });
+  }
+  const timeline = orderedTimeline(timelineEntries);
+  const transcriptCount = timeline.filter((entry) => entry.kind !== "turn").length;
 
   /* ---- scroll management ---- */
   const scrollToBottom = useCallback(() => {
@@ -545,51 +710,12 @@ export function ThreadView({
     onSend(text, attachments, clientMessageId);
   }, [followLatest, onSend]);
 
-  const renderLiveTurn = (turn: LiveTurn) => {
-    const stateErr = turn.sendState && SEND_ERROR.includes(turn.sendState);
-    return (
-      <section key={turn.renderKey ?? turn.id}>
-        <TurnMeta status={turn.status} startedAt={turn.startedAt} />
-        {turn.userText || turn.userAttachments.length > 0 ? (
-          <UserBubble
-            text={turn.userText ?? ""}
-            attachments={turn.userAttachments}
-            state={turn.sendState}
-            stateLabel={
-              turn.sendState && turn.sendState !== "completed"
-                ? statusLabel(turn.sendState)
-                : null
-            }
-            stateError={Boolean(stateErr)}
-            errorMessage={stateErr ? turn.sendErrorMessage : null}
-            onRetry={
-              stateErr && onRetry
-                ? () => onRetry(turn.id, turn.userText ?? "", turn.userAttachments)
-                : undefined
-            }
-          />
-        ) : null}
-        {visibleLiveItems(turn).map((item) =>
-          item.kind === "agent" ? (
-            <AgentMessage
-              key={item.key}
-              text={item.text}
-              streaming={item.status === "running"}
-            />
-          ) : item.kind === "user" ? (
-            <UserBubble key={item.key} text={item.text} attachments={item.attachments} />
-          ) : null,
-        )}
-      </section>
-    );
-  };
-
   return (
     <div className="thread-view">
       <div className="thread-scroll" ref={scrollRef} onScroll={onScroll}>
         <div className="thread-col" ref={contentRef}>
           {headerOverlay}
-          {shouldRenderThreadLoading(Boolean(loading), transcript.length) ? (
+          {shouldRenderThreadLoading(Boolean(loading), transcriptCount) ? (
             <div className="thread-loading" role="status" aria-label="正在加载会话记录">
               <div className="skeleton thread-loading-user" />
               <div className="skeleton thread-loading-agent" />
@@ -609,62 +735,83 @@ export function ThreadView({
             </div>
           ) : null}
 
-          {transcript.map((entry) => {
-            if (entry.source === "live") return renderLiveTurn(entry.turn);
-            const { group } = entry;
-            const items = group.items;
-            const groupAgents = new Map<string, number>();
-            const groupUsers = new Map<string, number>();
-            for (const item of items) {
-              if (item.kind === "agent_message") {
-                const signature = normalizedMessage(item.text);
-                if (signature) groupAgents.set(signature, (groupAgents.get(signature) ?? 0) + 1);
-              } else if (item.kind === "user_message") {
-                groupUsers.set(item.text, (groupUsers.get(item.text) ?? 0) + 1);
-              }
-            }
-            const extras = liveExtrasFor(group.turn.id, groupAgents, groupUsers);
-            return (
-              <section key={live.byId[group.turn.id]?.renderKey ?? group.turn.id}>
+          {timeline.map((entry) => {
+            if (entry.kind === "turn") {
+              return (
                 <TurnMeta
-                  status={group.turn.status}
-                  startedAt={group.turn.startedAt ?? historyGroupAt(group)}
-                  ordinal={group.turn.ordinal}
+                  key={entry.key}
+                  status={entry.status}
+                  startedAt={entry.occurredAt}
+                  ordinal={entry.ordinal}
                 />
-                {items.map((item) => {
-                  if (item.kind === "user_message") {
-                    return <UserBubble key={item.id} text={item.text} attachments={item.attachments} />;
+              );
+            }
+            if (entry.kind === "history-item") {
+              return entry.item.kind === "user_message" ? (
+                <UserBubble
+                  key={entry.key}
+                  text={entry.item.text}
+                  attachments={entry.item.attachments}
+                />
+              ) : (
+                <AgentMessage key={entry.key} text={entry.item.text} />
+              );
+            }
+            if (entry.kind === "live-prompt") {
+              const stateErr = Boolean(
+                entry.turn.sendState && SEND_ERROR.includes(entry.turn.sendState),
+              );
+              return (
+                <UserBubble
+                  key={entry.key}
+                  text={entry.turn.userText ?? ""}
+                  attachments={entry.turn.userAttachments}
+                  state={entry.turn.sendState}
+                  stateLabel={
+                    entry.turn.sendState && entry.turn.sendState !== "completed"
+                      ? statusLabel(entry.turn.sendState)
+                      : null
                   }
-                  if (item.kind === "agent_message") {
-                    return <AgentMessage key={item.id} text={item.text} />;
+                  stateError={stateErr}
+                  errorMessage={stateErr ? entry.turn.sendErrorMessage : null}
+                  onRetry={
+                    stateErr && onRetry
+                      ? () => onRetry(
+                          entry.turn.id,
+                          entry.turn.userText ?? "",
+                          entry.turn.userAttachments,
+                        )
+                      : undefined
                   }
-                  return null;
-                })}
-                {extras.map((item) =>
-                  item.kind === "agent" ? (
-                    <AgentMessage
-                      key={item.key}
-                      text={item.text}
-                      streaming={item.status === "running"}
-                    />
-                  ) : item.kind === "user" ? (
-                    <UserBubble key={item.key} text={item.text} attachments={item.attachments} />
-                  ) : null,
-                )}
-              </section>
+                />
+              );
+            }
+            if (entry.kind === "live-item") {
+              return entry.item.kind === "agent" ? (
+                <AgentMessage
+                  key={entry.key}
+                  text={entry.item.text}
+                  streaming={entry.item.status === "running"}
+                />
+              ) : (
+                <UserBubble
+                  key={entry.key}
+                  text={entry.item.text}
+                  attachments={entry.item.attachments}
+                />
+              );
+            }
+            return (
+              <ApprovalCard
+                key={entry.key}
+                approval={entry.approval}
+                onDecide={(decision) => onDecide(entry.approval.id, decision)}
+                locked={approvalsLocked}
+              />
             );
           })}
 
-          {approvals.map((a) => (
-            <ApprovalCard
-              key={a.id}
-              approval={a}
-              onDecide={(d) => onDecide(a.id, d)}
-              locked={approvalsLocked}
-            />
-          ))}
-
-          {!loading && durableHistory.length === 0 && live.turns.length === 0 ? (
+          {!loading && timeline.length === 0 ? (
             <div
               style={{
                 textAlign: "center",

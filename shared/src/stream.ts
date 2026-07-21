@@ -237,12 +237,25 @@ export class ThreadLiveStore {
     text: string,
     attachments: AttachmentView[] = [],
     clientMessageId: string | null = null,
+    chronology?: { occurredAt: string; sequence: number; key: string },
   ) {
-    const occurredAt = new Date().toISOString();
+    const occurredAt = chronology?.occurredAt ?? new Date().toISOString();
     const turn =
-      this.currentTurn(threadId, null) ?? this.ensureTurn(threadId, null, occurredAt, 0);
-    const key = `steer:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
-    const item = this.ensureItem(turn, key, "user", occurredAt, Number.MAX_SAFE_INTEGER);
+      this.currentTurn(threadId, null)
+      ?? this.ensureTurn(
+        threadId,
+        null,
+        occurredAt,
+        chronology?.sequence ?? Number.MAX_SAFE_INTEGER,
+      );
+    const key = chronology?.key ?? `steer:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    const item = this.ensureItem(
+      turn,
+      key,
+      "user",
+      occurredAt,
+      chronology?.sequence ?? Number.MAX_SAFE_INTEGER,
+    );
     item.text = text;
     item.attachments = attachments;
     item.title = clientMessageId ?? "";
@@ -410,6 +423,11 @@ export class ThreadLiveStore {
           ? payload.attachments as AttachmentView[]
           : optimistic?.attachments ?? [],
         clientMessageId,
+        {
+          occurredAt: event.occurredAt,
+          sequence: event.seq,
+          key: `steer:${event.eventId}`,
+        },
       );
       return;
     }
@@ -740,21 +758,57 @@ export function compareChronology(
     return leftTime - rightTime;
   }
   if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) {
-    return Number.isFinite(leftTime) ? 1 : -1;
+    return Number.isFinite(leftTime) ? -1 : 1;
   }
   if (leftSequence !== rightSequence) return leftSequence - rightSequence;
   return leftId.localeCompare(rightId);
 }
 
 export function compareLiveTurns(left: LiveTurn, right: LiveTurn): number {
+  const leftAnchor = liveTurnChronology(left);
+  const rightAnchor = liveTurnChronology(right);
   return compareChronology(
-    left.startedAt,
-    left.startedSequence,
-    left.id,
-    right.startedAt,
-    right.startedSequence,
-    right.id,
+    leftAnchor.occurredAt,
+    leftAnchor.sequence,
+    leftAnchor.id,
+    rightAnchor.occurredAt,
+    rightAnchor.sequence,
+    rightAnchor.id,
   );
+}
+
+/** Earliest authoritative timestamp in a live turn. Item events can arrive
+ * before their turn-start event during replay, so arrival order is not a safe
+ * turn anchor. */
+export function liveTurnChronology(turn: LiveTurn): {
+  occurredAt: string;
+  sequence: number;
+  id: string;
+} {
+  let anchor = {
+    occurredAt: turn.startedAt,
+    sequence: turn.startedSequence,
+    id: turn.id,
+  };
+  for (const item of turn.items) {
+    if (
+      compareChronology(
+        item.occurredAt,
+        item.sequence,
+        item.key,
+        anchor.occurredAt,
+        anchor.sequence,
+        anchor.id,
+      ) < 0
+    ) {
+      anchor = {
+        occurredAt: item.occurredAt,
+        sequence: item.sequence,
+        id: item.key,
+      };
+    }
+  }
+  return anchor;
 }
 
 export function orderedLiveItems(turn: LiveTurn): LiveItem[] {
