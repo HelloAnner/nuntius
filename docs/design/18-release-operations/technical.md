@@ -40,7 +40,9 @@ Manifest 包含：
 2. Ops 先比较 `ops/`、`updater/`、workspace manifest/lockfile；自身输入变化时先构建、
    签名并原子更新 Ops。新进程通过 60 秒 probation 后才继续同一 commit 的发布，失败则
    由启动标记和 LaunchAgent 自动回滚。
-3. 前端生成后，并行构建 Linux AMD64 Server 与 macOS ARM Client；构建缓存位于 checkout 外。
+3. 前端生成后，以低优先级、有限 Cargo jobs 串行构建 Linux AMD64 Server 与 macOS ARM
+   Client；Linux builder 同时限制 CPU，构建缓存位于 checkout 外。构建资源不得影响同机
+   Client 的 Tunnel 心跳。
 4. Ops 使用登录 Keychain 中的长期私人代码签名身份签署 macOS Client，验证固定
    identifier、固定证书指纹和不依赖 `cdhash` 的显式 designated requirement。
 5. Ops 对包计算大小和 SHA-256，并生成严格单调的 `releaseSequence`。
@@ -48,6 +50,8 @@ Manifest 包含：
 7. Ops 备份旧 Server，原子替换并重启 systemd 服务。
 8. `/api/v1/info` 验证通过后，Server 持久加载 `desired-client.json`。
 9. Server 向在线 Client 广播目标版本，并在每次重连时补发。
+   Client 建立连接后立即进入消息循环；全量 inventory 异步且每个进程最多调度一次，若
+   durable outbox 已有积压则只续传，不得在每次重连重复制造全量事件。
 10. Client 下载自己的平台产物，校验来源、大小、checksum 和目标架构；执行候选程序前，
    要求其代码签名满足当前已安装 Client 的 designated requirement。
 11. Client 原子安装并保留 previous，立即 `exec` 新二进制；独立 Agent Host 不退出，

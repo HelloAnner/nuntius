@@ -536,7 +536,7 @@ async fn ops_inputs_changed(source_dir: &Path, current: &str, target: &str) -> R
 async fn build_ops_candidate(config: &OpsConfig, source_dir: &Path, sha: &str) -> Result<PathBuf> {
     let mac_target = config.state_dir.join("cache/macos-target");
     fs::create_dir_all(&mac_target)?;
-    let mut command = Command::new("rustup");
+    let mut command = low_priority_command("rustup");
     command
         .current_dir(source_dir)
         .args([
@@ -548,6 +548,8 @@ async fn build_ops_candidate(config: &OpsConfig, source_dir: &Path, sha: &str) -
             "--release",
             "--package",
             "nuntius-ops",
+            "--jobs",
+            "2",
         ])
         .env("NUNTIUS_BUILD_SHA", sha)
         .env("NUNTIUS_BUILD_TARGET", MACOS_TARGET)
@@ -682,7 +684,7 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
     checked(checkout, "checkout source commit", Duration::from_secs(30)).await?;
 
     update_state(config, |state| state.phase = "frontend".into())?;
-    let mut bun_install = Command::new("bun");
+    let mut bun_install = low_priority_command("bun");
     bun_install
         .current_dir(&source_dir)
         .args(["install", "--frozen-lockfile"]);
@@ -692,16 +694,14 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
         Duration::from_secs(600),
     )
     .await?;
-    let mut typecheck = Command::new("bun");
+    let mut typecheck = low_priority_command("bun");
     typecheck
         .current_dir(&source_dir)
         .args(["run", "typecheck"]);
-    let mut frontend = Command::new("bun");
+    let mut frontend = low_priority_command("bun");
     frontend.current_dir(&source_dir).args(["run", "build"]);
-    tokio::try_join!(
-        checked(typecheck, "typecheck frontends", Duration::from_secs(900)),
-        checked(frontend, "build frontends", Duration::from_secs(900)),
-    )?;
+    checked(typecheck, "typecheck frontends", Duration::from_secs(900)).await?;
+    checked(frontend, "build frontends", Duration::from_secs(900)).await?;
 
     update_state(config, |state| state.phase = "binaries".into())?;
     let mac_target = config.state_dir.join("cache/macos-target");
@@ -711,7 +711,7 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
     fs::create_dir_all(&linux_target)?;
     fs::create_dir_all(&linux_cargo)?;
 
-    let mut client = Command::new("rustup");
+    let mut client = low_priority_command("rustup");
     client
         .current_dir(&source_dir)
         .args([
@@ -723,6 +723,8 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
             "--release",
             "--package",
             "nuntius-client",
+            "--jobs",
+            "2",
         ])
         .env("NUNTIUS_BUILD_SHA", sha)
         .env("NUNTIUS_BUILD_SEQUENCE", sequence.to_string())
@@ -731,7 +733,7 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
 
     let mut server = Command::new("docker");
     server
-        .args(["run", "--rm", "--platform", "linux/amd64"])
+        .args(["run", "--rm", "--platform", "linux/amd64", "--cpus", "2.0"])
         .args(["-e", &format!("NUNTIUS_BUILD_SHA={sha}")])
         .args(["-e", &format!("NUNTIUS_BUILD_SEQUENCE={sequence}")])
         .args(["-e", &format!("NUNTIUS_BUILD_TARGET={LINUX_TARGET}")])
@@ -747,16 +749,17 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
             "--release",
             "--package",
             "nuntius-server",
+            "--jobs",
+            "2",
         ]);
 
-    tokio::try_join!(
-        checked(client, "build macOS ARM client", Duration::from_secs(3600)),
-        checked(
-            server,
-            "build Linux AMD64 server",
-            Duration::from_secs(3600)
-        ),
-    )?;
+    checked(
+        server,
+        "build Linux AMD64 server",
+        Duration::from_secs(3600),
+    )
+    .await?;
+    checked(client, "build macOS ARM client", Duration::from_secs(3600)).await?;
 
     let client_binary = mac_target.join("release/nuntius-client");
     let server_binary = linux_target.join("release/nuntius-server");
@@ -794,6 +797,12 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
         package_dir,
         release,
     })
+}
+
+fn low_priority_command(program: &str) -> Command {
+    let mut command = Command::new("/usr/bin/nice");
+    command.args(["-n", "10", program]);
+    command
 }
 
 async fn verify_client_binary(path: &Path, sha: &str, sequence: u64) -> Result<()> {

@@ -5,6 +5,10 @@ use rand::Rng;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashSet},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::{broadcast, mpsc, watch};
@@ -55,9 +59,16 @@ pub async fn run_forever(
     desired_release: watch::Sender<Option<nuntius_updater::ClientRelease>>,
 ) {
     let mut backoff = 1_u64;
+    let inventory_replay_started = Arc::new(AtomicBool::new(false));
     loop {
         let attempt_started = tokio::time::Instant::now();
-        match run_connection(executor.clone(), &desired_release).await {
+        match run_connection(
+            executor.clone(),
+            &desired_release,
+            inventory_replay_started.clone(),
+        )
+        .await
+        {
             Ok(()) => tracing::warn!("device tunnel disconnected"),
             Err(error) => tracing::warn!(error=?error,"device tunnel connection failed"),
         };
@@ -73,6 +84,7 @@ pub async fn run_forever(
 async fn run_connection(
     executor: CommandExecutor,
     desired_release: &watch::Sender<Option<nuntius_updater::ClientRelease>>,
+    inventory_replay_started: Arc<AtomicBool>,
 ) -> Result<()> {
     let token = pairing::access_token(&executor.config).await?;
     let mut url = pairing::endpoint(&executor.config, "api/v1/device-tunnel")?;
@@ -185,8 +197,7 @@ async fn run_connection(
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_server_activity = tokio::time::Instant::now();
     let mut pending_window = PendingWindow::default();
-    send_pending(&executor, &mut socket, &mut pending_window).await?;
-    executor.emit_inventory().await?;
+    spawn_inventory_replay(executor.clone(), inventory_replay_started);
     loop {
         let watchdog_deadline = last_server_activity + Duration::from_secs(45);
         tokio::select! {
@@ -212,6 +223,35 @@ async fn run_connection(
         }
     }
     Ok(())
+}
+
+fn spawn_inventory_replay(executor: CommandExecutor, started: Arc<AtomicBool>) {
+    if started.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tokio::spawn(async move {
+        let result = async {
+            // The durable outboxes are themselves the reconnect replay. Re-emitting
+            // every project/thread while they still contain work creates a feedback
+            // loop: each short reconnect grows the backlog and delays the next
+            // heartbeat. Only synthesize a full inventory for a clean process once.
+            if !executor.store.pending_events(1).await?.is_empty()
+                || !executor.store.pending_history(1).await?.is_empty()
+            {
+                tracing::info!("durable sync backlog present; using it as reconnect inventory");
+                return Ok::<(), anyhow::Error>(());
+            }
+            executor.emit_inventory().await
+        }
+        .await;
+        match result {
+            Ok(()) => tracing::info!("initial inventory replay completed without blocking tunnel"),
+            Err(error) => {
+                started.store(false, Ordering::Release);
+                tracing::warn!(error=?error,"initial inventory replay failed; will retry after reconnect");
+            }
+        }
+    });
 }
 
 async fn handle_server_frame(
