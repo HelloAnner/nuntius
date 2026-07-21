@@ -148,6 +148,39 @@
 .thread-sidebar-label { padding: 10px 4px 2px; color: var(--ink-3); font-size: 11px; font-weight: 620; }
 .thread-switcher-group { display: flex; flex-direction: column; }
 
+/* recents sidebar: device → project → threads tree */
+.thread-tree { display: flex; flex-direction: column; gap: 3px; }
+.thread-tree-device { display: flex; flex-direction: column; gap: 1px; }
+.thread-tree-project { display: flex; flex-direction: column; gap: 1px; }
+.thread-tree-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  border-radius: var(--r-sm);
+  text-align: left;
+  transition: background 140ms ease;
+}
+.thread-tree-row:hover { background: var(--surface-2); }
+.tree-chev { flex: none; color: var(--ink-3); transition: transform 150ms ease; }
+.tree-chev.collapsed { transform: rotate(-90deg); }
+.thread-tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-tree-count { flex: none; color: var(--ink-3); font-size: 10.5px; }
+.thread-tree-device-row .thread-tree-name { color: var(--ink); font-size: 12.5px; font-weight: 640; }
+.thread-tree-device-row .status-orbit { width: 10px; height: 10px; }
+.thread-tree-device-row .thread-tree-count { color: var(--ink-3); }
+.thread-tree-children {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-left: 11px;
+  padding-left: 8px;
+  border-left: 1px solid var(--hairline);
+}
+.thread-tree-project-row .thread-tree-name { color: var(--ink-2); font-size: 12px; font-weight: 560; }
+.thread-tree-threads { display: flex; flex-direction: column; gap: 2px; margin: 1px 0 4px; }
+
 @media (min-width: 900px) {
   .thread-page .detail-side { position: relative; }
   .thread-sidebar-resizer {

@@ -4,6 +4,7 @@ import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-quer
 import {
   Empty,
   IconArchive,
+  IconChevronDown,
   IconClock,
   IconList,
   IconMore,
@@ -82,6 +83,24 @@ export function ThreadPage({
   const interruptPendingRef = useRef(false);
   const [sidebarWidth, setSidebarWidth] = useState(loadThreadSidebarWidth);
   const sidebarWidthRef = useRef(sidebarWidth);
+  const [collapsedDevices, setCollapsedDevices] = useState<ReadonlySet<string>>(new Set());
+  const [expandedProjects, setExpandedProjects] = useState<ReadonlySet<string>>(
+    () => new Set([`${deviceId}:${projectId}`]),
+  );
+  const toggleSidebarDevice = (id: string) =>
+    setCollapsedDevices((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const toggleSidebarProject = (key: string) =>
+    setExpandedProjects((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   const startSidebarResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -180,6 +199,21 @@ export function ThreadPage({
     const timer = window.setTimeout(() => setRouteGraceElapsed(true), 10_000);
     return () => window.clearTimeout(timer);
   }, [threadId]);
+
+  // Recents sidebar tree: keep the current thread's device/project revealed.
+  useEffect(() => {
+    const projectKey = `${deviceId}:${projectId}`;
+    setExpandedProjects((current) => {
+      if (current.has(projectKey)) return current;
+      return new Set(current).add(projectKey);
+    });
+    setCollapsedDevices((current) => {
+      if (!current.has(deviceId)) return current;
+      const next = new Set(current);
+      next.delete(deviceId);
+      return next;
+    });
+  }, [deviceId, projectId]);
 
   useEffect(() => {
     const missingDevice = devices.isSuccess && !device;
@@ -382,6 +416,53 @@ export function ThreadPage({
   const sidebarProjectNames = useProjectNameMap(
     fromRecents ? sidebarSource.map((item) => item.deviceId) : [],
   );
+  const sidebarTree = useMemo<SidebarDeviceGroup[]>(() => {
+    if (!fromRecents) return [];
+    const activityOf = (item: ThreadSummary) =>
+      Date.parse(item.lastActivityAt ?? item.createdAt ?? "") || 0;
+    const byDevice = new Map<string, Map<string, ThreadSummary[]>>();
+    for (const item of sidebarSource) {
+      let projects = byDevice.get(item.deviceId);
+      if (!projects) byDevice.set(item.deviceId, (projects = new Map()));
+      const list = projects.get(item.projectId);
+      if (list) list.push(item);
+      else projects.set(item.projectId, [item]);
+    }
+    return [...byDevice.entries()]
+      .map(([groupDeviceId, projects]) => {
+        const projectGroups = [...projects.entries()]
+          .map(([groupProjectId, threads]) => {
+            const sorted = [...threads].sort(compareThreadCreation);
+            return {
+              key: `${groupDeviceId}:${groupProjectId}`,
+              projectName: projectNameFrom(sidebarProjectNames, groupDeviceId, groupProjectId),
+              threads: sorted,
+              lastActivity: Math.max(...sorted.map(activityOf)),
+            };
+          })
+          .sort(
+            (a, b) =>
+              b.lastActivity - a.lastActivity ||
+              a.projectName.localeCompare(b.projectName) ||
+              a.key.localeCompare(b.key),
+          );
+        const deviceInfo = devices.data?.find((item) => item.id === groupDeviceId);
+        return {
+          deviceId: groupDeviceId,
+          deviceName: deviceInfo?.displayName ?? "设备",
+          online: deviceInfo?.status === "online",
+          projects: projectGroups,
+          threadCount: projectGroups.reduce((sum, group) => sum + group.threads.length, 0),
+          lastActivity: Math.max(...projectGroups.map((group) => group.lastActivity)),
+        };
+      })
+      .sort(
+        (a, b) =>
+          b.lastActivity - a.lastActivity ||
+          a.deviceName.localeCompare(b.deviceName) ||
+          a.deviceId.localeCompare(b.deviceId),
+      );
+  }, [devices.data, fromRecents, sidebarProjectNames, sidebarSource]);
 
   const mobileTopbar = (
     <TopBar
@@ -490,12 +571,6 @@ export function ThreadPage({
 
   const sidebarThreads = [...sidebarSource].sort(compareThreadCreation);
   const sidebarLoading = fromRecents ? allThreads.isLoading : projectThreads.isLoading;
-  const sidebarContextFor = fromRecents
-    ? (item: ThreadSummary) => ({
-        device: devices.data?.find((d) => d.id === item.deviceId)?.displayName ?? "设备",
-        project: projectNameFrom(sidebarProjectNames, item.deviceId, item.projectId),
-      })
-    : undefined;
   const pendingThreadIds = new Set(
     Object.values(approvals)
       .flatMap((approval) => approval.state === "pending" && approval.threadId ? [approval.threadId] : []),
@@ -553,6 +628,17 @@ export function ThreadPage({
               <div className="detail-list-state"><Spinner /></div>
             ) : sidebarThreads.length === 0 ? (
               <Empty icon={<IconClock size={22} />} headline={fromRecents ? "最近没有会话" : "还没有会话"} />
+            ) : fromRecents ? (
+              <ThreadSidebarTree
+                groups={sidebarTree}
+                collapsedDevices={collapsedDevices}
+                expandedProjects={expandedProjects}
+                pendingThreadIds={pendingThreadIds}
+                currentThreadId={threadId}
+                onToggleDevice={toggleSidebarDevice}
+                onToggleProject={toggleSidebarProject}
+                onSelect={selectSidebarThread}
+              />
             ) : (
               <>
                 {ongoingThreads.length ? (
@@ -561,7 +647,6 @@ export function ThreadPage({
                     threads={ongoingThreads}
                     pendingThreadIds={pendingThreadIds}
                     currentThreadId={threadId}
-                    contextFor={sidebarContextFor}
                     onSelect={selectSidebarThread}
                   />
                 ) : null}
@@ -571,7 +656,6 @@ export function ThreadPage({
                     threads={recentThreads}
                     pendingThreadIds={pendingThreadIds}
                     currentThreadId={threadId}
-                    contextFor={sidebarContextFor}
                     onSelect={selectSidebarThread}
                   />
                 ) : null}
@@ -603,33 +687,117 @@ function ThreadSidebarGroup({
   threads,
   pendingThreadIds,
   currentThreadId,
-  contextFor,
   onSelect,
 }: {
   label: string;
   threads: ThreadSummary[];
   pendingThreadIds: Set<string>;
   currentThreadId: string;
-  contextFor?: (thread: ThreadSummary) => { device: string; project: string };
   onSelect: (thread: ThreadSummary) => void;
 }) {
   return (
     <section className="thread-sidebar-group">
       <div className="thread-sidebar-label">{label} · {threads.length}</div>
-      {threads.map((thread) => {
-        const context = contextFor?.(thread);
+      {threads.map((thread) => (
+        <ThreadListItem
+          key={thread.id}
+          thread={thread}
+          pendingApproval={pendingThreadIds.has(thread.id)}
+          selected={thread.id === currentThreadId}
+          onClick={() => onSelect(thread)}
+        />
+      ))}
+    </section>
+  );
+}
+
+type SidebarProjectGroup = {
+  key: string;
+  projectName: string;
+  threads: ThreadSummary[];
+  lastActivity: number;
+};
+
+type SidebarDeviceGroup = {
+  deviceId: string;
+  deviceName: string;
+  online: boolean;
+  projects: SidebarProjectGroup[];
+  threadCount: number;
+  lastActivity: number;
+};
+
+function ThreadSidebarTree({
+  groups,
+  collapsedDevices,
+  expandedProjects,
+  pendingThreadIds,
+  currentThreadId,
+  onToggleDevice,
+  onToggleProject,
+  onSelect,
+}: {
+  groups: SidebarDeviceGroup[];
+  collapsedDevices: ReadonlySet<string>;
+  expandedProjects: ReadonlySet<string>;
+  pendingThreadIds: Set<string>;
+  currentThreadId: string;
+  onToggleDevice: (deviceId: string) => void;
+  onToggleProject: (projectKey: string) => void;
+  onSelect: (thread: ThreadSummary) => void;
+}) {
+  return (
+    <div className="thread-tree">
+      {groups.map((group) => {
+        const deviceCollapsed = collapsedDevices.has(group.deviceId);
         return (
-          <ThreadListItem
-            key={thread.id}
-            thread={thread}
-            pendingApproval={pendingThreadIds.has(thread.id)}
-            selected={thread.id === currentThreadId}
-            contextDevice={context?.device}
-            contextProject={context?.project}
-            onClick={() => onSelect(thread)}
-          />
+          <section className="thread-tree-device" key={group.deviceId}>
+            <button
+              className="thread-tree-row thread-tree-device-row"
+              onClick={() => onToggleDevice(group.deviceId)}
+              aria-expanded={!deviceCollapsed}
+            >
+              <IconChevronDown size={13} className={`tree-chev${deviceCollapsed ? " collapsed" : ""}`} />
+              <StatusDot tone={group.online ? "success" : "offline"} />
+              <span className="thread-tree-name">{group.deviceName}</span>
+              <span className="thread-tree-count num">{group.threadCount}</span>
+            </button>
+            {!deviceCollapsed ? (
+              <div className="thread-tree-children">
+                {group.projects.map((projectGroup) => {
+                  const projectOpen = expandedProjects.has(projectGroup.key);
+                  return (
+                    <section className="thread-tree-project" key={projectGroup.key}>
+                      <button
+                        className="thread-tree-row thread-tree-project-row"
+                        onClick={() => onToggleProject(projectGroup.key)}
+                        aria-expanded={projectOpen}
+                      >
+                        <IconChevronDown size={12} className={`tree-chev${projectOpen ? "" : " collapsed"}`} />
+                        <span className="thread-tree-name">{projectGroup.projectName}</span>
+                        <span className="thread-tree-count num">{projectGroup.threads.length}</span>
+                      </button>
+                      {projectOpen ? (
+                        <div className="thread-tree-threads">
+                          {projectGroup.threads.map((thread) => (
+                            <ThreadListItem
+                              key={thread.id}
+                              thread={thread}
+                              pendingApproval={pendingThreadIds.has(thread.id)}
+                              selected={thread.id === currentThreadId}
+                              onClick={() => onSelect(thread)}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+                    </section>
+                  );
+                })}
+              </div>
+            ) : null}
+          </section>
         );
       })}
-    </section>
+    </div>
   );
 }
