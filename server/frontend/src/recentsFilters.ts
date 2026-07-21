@@ -6,6 +6,11 @@ export interface RecentFilterPreferences {
   statusFilter: RecentStatusFilter;
 }
 
+export interface NewThreadScopeDefaults {
+  deviceId?: string;
+  projectId?: string;
+}
+
 type PreferenceStorage = Pick<Storage, "getItem" | "setItem">;
 
 const STORAGE_KEY = "nuntius:recents-filters:v1";
@@ -66,4 +71,22 @@ function normalizeSelection(value: unknown) {
 
 export function isRecentStatusFilter(value: unknown): value is RecentStatusFilter {
   return typeof value === "string" && STATUS_FILTERS.has(value as RecentStatusFilter);
+}
+
+export function newThreadScopeFromRecentFilters(
+  preferences: Pick<RecentFilterPreferences, "deviceFilter" | "projectFilter">,
+): NewThreadScopeDefaults {
+  if (preferences.projectFilter !== "all") {
+    const separator = preferences.projectFilter.indexOf(":");
+    if (separator > 0 && separator < preferences.projectFilter.length - 1) {
+      return {
+        deviceId: preferences.projectFilter.slice(0, separator),
+        projectId: preferences.projectFilter.slice(separator + 1),
+      };
+    }
+  }
+
+  return preferences.deviceFilter === "all"
+    ? {}
+    : { deviceId: preferences.deviceFilter };
 }

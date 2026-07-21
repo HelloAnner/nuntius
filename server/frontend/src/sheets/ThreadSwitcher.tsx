@@ -90,7 +90,7 @@ export function ThreadSwitcher({
           >
             <IconPlus size={15} />
             <strong>新建会话</strong>
-            <small>同设备 · 同项目</small>
+            <small>默认当前项目</small>
           </button>
         ) : null}
         {active.length ? <ThreadSwitcherGroup label="进行中" threads={active} currentThreadId={currentThreadId} pendingIds={pendingIds} contextFor={contextFor} onSelect={select} /> : null}

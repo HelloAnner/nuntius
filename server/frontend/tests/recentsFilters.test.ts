@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_RECENT_FILTER_PREFERENCES,
   loadRecentFilterPreferences,
+  newThreadScopeFromRecentFilters,
   saveRecentFilterPreferences,
   type RecentFilterPreferences,
 } from "../src/recentsFilters";
@@ -58,5 +59,26 @@ describe("recent filter preferences", () => {
 
     expect(loadRecentFilterPreferences(unavailable)).toEqual(DEFAULT_RECENT_FILTER_PREFERENCES);
     expect(() => saveRecentFilterPreferences(DEFAULT_RECENT_FILTER_PREFERENCES, unavailable)).not.toThrow();
+  });
+
+  test("uses the selected project as the new-thread device and project defaults", () => {
+    expect(newThreadScopeFromRecentFilters({
+      deviceFilter: "all",
+      projectFilter: "dev-study:project-nuntius",
+    })).toEqual({
+      deviceId: "dev-study",
+      projectId: "project-nuntius",
+    });
+  });
+
+  test("falls back to the selected device when no project is selected", () => {
+    expect(newThreadScopeFromRecentFilters({
+      deviceFilter: "dev-study",
+      projectFilter: "all",
+    })).toEqual({ deviceId: "dev-study" });
+    expect(newThreadScopeFromRecentFilters({
+      deviceFilter: "all",
+      projectFilter: "all",
+    })).toEqual({});
   });
 });

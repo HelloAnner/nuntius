@@ -504,8 +504,8 @@ export function ThreadPage({
               className="icon-btn"
               onClick={() => setCreating(true)}
               disabled={!online}
-              aria-label="新建会话（同设备 · 同项目）"
-              title="新建会话（同设备 · 同项目）"
+              aria-label="新建会话（默认当前项目）"
+              title="新建会话（默认当前项目）"
             >
               <IconPlus size={18} />
             </button>
@@ -525,12 +525,17 @@ export function ThreadPage({
 
   const newThreadSheet = project && !unassigned ? (
     <NewThreadSheet
-      deviceId={deviceId}
-      projectId={projectId}
+      initialDeviceId={deviceId}
+      initialProjectId={projectId}
       open={creating}
       onClose={() => setCreating(false)}
-      onCreated={(createdThreadId) =>
-        navigate({ name: "thread", deviceId, projectId, threadId: createdThreadId })
+      onCreated={(createdThreadId, createdDeviceId, createdProjectId) =>
+        navigate({
+          name: "thread",
+          deviceId: createdDeviceId,
+          projectId: createdProjectId,
+          threadId: createdThreadId,
+        })
       }
     />
   ) : null;

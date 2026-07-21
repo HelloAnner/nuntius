@@ -175,11 +175,18 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
       </div>
 
       <NewThreadSheet
-        deviceId={deviceId}
-        projectId={projectId}
+        initialDeviceId={deviceId}
+        initialProjectId={projectId}
         open={creating}
         onClose={() => setCreating(false)}
-        onCreated={(threadId) => navigate({ name: "thread", deviceId, projectId, threadId })}
+        onCreated={(threadId, createdDeviceId, createdProjectId) =>
+          navigate({
+            name: "thread",
+            deviceId: createdDeviceId,
+            projectId: createdProjectId,
+            threadId,
+          })
+        }
       />
       {confirmNode}
     </div>

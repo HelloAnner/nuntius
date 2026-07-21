@@ -1,5 +1,5 @@
-/* Reusable new-thread flow for project lists and wide conversation layouts. */
-import { useEffect, useState } from "react";
+/* Reusable new-thread flow with context-aware, editable device/project defaults. */
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ModelPicker,
@@ -65,14 +65,14 @@ async function waitForCreatedThread(commandId: string): Promise<CreatedThread> {
 }
 
 export function NewThreadSheet({
-  deviceId,
-  projectId,
+  initialDeviceId,
+  initialProjectId,
   open,
   onClose,
   onCreated,
 }: {
-  deviceId?: string;
-  projectId?: string;
+  initialDeviceId?: string;
+  initialProjectId?: string;
   open: boolean;
   onClose: () => void;
   onCreated: (threadId: string, deviceId: string, projectId: string) => void;
@@ -81,11 +81,12 @@ export function NewThreadSheet({
   const qc = useQueryClient();
   const accessMode = useAccessMode((state) => state.mode);
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
-  const [scopeDeviceId, setScopeDeviceId] = useState(deviceId ?? "");
-  const [scopeProjectId, setScopeProjectId] = useState(projectId ?? "");
-  const effectiveDeviceId = deviceId ?? scopeDeviceId;
-  const effectiveProjectId = projectId ?? scopeProjectId;
-  const fixedScope = Boolean(deviceId && projectId);
+  const [scopeDeviceId, setScopeDeviceId] = useState("");
+  const [scopeProjectId, setScopeProjectId] = useState("");
+  const initializedForOpen = useRef(false);
+  const projectDevice = useRef("");
+  const effectiveDeviceId = scopeDeviceId;
+  const effectiveProjectId = scopeProjectId;
   const projects = useQuery({
     queryKey: ["projects", effectiveDeviceId],
     queryFn: () => api.projects(effectiveDeviceId),
@@ -107,22 +108,40 @@ export function NewThreadSheet({
     selectedProviderStatus?.available ?? provider === "codex";
 
   useEffect(() => {
-    if (!open) return;
-    if (deviceId) setScopeDeviceId(deviceId);
-    else {
-      const current = devices.data?.find((device) => device.id === scopeDeviceId && device.status === "online");
-      if (!current) setScopeDeviceId(devices.data?.find((device) => device.status === "online")?.id ?? "");
+    if (!open) {
+      initializedForOpen.current = false;
+      projectDevice.current = "";
+      return;
     }
-  }, [deviceId, devices.data, open, scopeDeviceId]);
+    if (!devices.data) return;
+
+    const onlineDevices = devices.data.filter((device) => device.status === "online");
+    const reopening = !initializedForOpen.current;
+    if (!reopening && onlineDevices.some((device) => device.id === scopeDeviceId)) return;
+
+    const preferredDevice = onlineDevices.find((device) => device.id === initialDeviceId);
+    const nextDeviceId = preferredDevice?.id ?? onlineDevices[0]?.id ?? "";
+    initializedForOpen.current = true;
+    projectDevice.current = nextDeviceId;
+    setScopeDeviceId(nextDeviceId);
+    setScopeProjectId(nextDeviceId === initialDeviceId ? initialProjectId ?? "" : "");
+  }, [devices.data, initialDeviceId, initialProjectId, open, scopeDeviceId]);
 
   useEffect(() => {
-    if (!open) return;
-    if (projectId) setScopeProjectId(projectId);
-    else {
-      const available = (projects.data ?? []).filter((project) => project.kind === "workspace");
-      if (!available.some((project) => project.id === scopeProjectId)) setScopeProjectId(available[0]?.id ?? "");
-    }
-  }, [open, projectId, projects.data, scopeProjectId]);
+    if (
+      !open ||
+      !initializedForOpen.current ||
+      projectDevice.current !== effectiveDeviceId ||
+      !projects.data
+    ) return;
+
+    const available = projects.data.filter((project) => project.kind === "workspace");
+    if (available.some((project) => project.id === scopeProjectId)) return;
+    const preferredProject = effectiveDeviceId === initialDeviceId
+      ? available.find((project) => project.id === initialProjectId)
+      : undefined;
+    setScopeProjectId(preferredProject?.id ?? available[0]?.id ?? "");
+  }, [effectiveDeviceId, initialDeviceId, initialProjectId, open, projects.data, scopeProjectId]);
 
   useEffect(() => {
     if (!open) return;
@@ -230,43 +249,42 @@ export function NewThreadSheet({
       }
     >
       <div className="new-thread-form">
-        {!fixedScope ? (
-          <div className="new-thread-scope">
-            <div className="field">
-              <label>设备</label>
-              <SelectMenu
-                className="field-select"
-                label="设备"
-                value={effectiveDeviceId}
-                onChange={(value) => {
-                  setScopeDeviceId(value);
-                  setScopeProjectId("");
-                }}
-                disabled={busy}
-                options={(devices.data ?? []).filter((device) => device.status === "online").map((device) => ({
-                  value: device.id,
-                  label: device.displayName,
-                  description: `${device.projectCount} 个项目 · 在线`,
-                }))}
-              />
-            </div>
-            <div className="field">
-              <label>项目</label>
-              <SelectMenu
-                className="field-select"
-                label="项目"
-                value={effectiveProjectId}
-                onChange={setScopeProjectId}
-                disabled={busy || !effectiveDeviceId}
-                options={(projects.data ?? []).filter((project) => project.kind === "workspace").map((project) => ({
-                  value: project.id,
-                  label: project.displayName,
-                  description: project.pathHint ?? project.repoName ?? undefined,
-                }))}
-              />
-            </div>
+        <div className="new-thread-scope">
+          <div className="field">
+            <label>设备</label>
+            <SelectMenu
+              className="field-select"
+              label="设备"
+              value={effectiveDeviceId}
+              onChange={(value) => {
+                projectDevice.current = value;
+                setScopeDeviceId(value);
+                setScopeProjectId("");
+              }}
+              disabled={busy}
+              options={(devices.data ?? []).filter((device) => device.status === "online").map((device) => ({
+                value: device.id,
+                label: device.displayName,
+                description: `${device.projectCount} 个项目 · 在线`,
+              }))}
+            />
           </div>
-        ) : null}
+          <div className="field">
+            <label>项目</label>
+            <SelectMenu
+              className="field-select"
+              label="项目"
+              value={effectiveProjectId}
+              onChange={setScopeProjectId}
+              disabled={busy || !effectiveDeviceId}
+              options={(projects.data ?? []).filter((project) => project.kind === "workspace").map((project) => ({
+                value: project.id,
+                label: project.displayName,
+                description: project.pathHint ?? project.repoName ?? undefined,
+              }))}
+            />
+          </div>
+        </div>
         <ProviderPicker
           value={provider}
           onChange={(nextProvider) => {

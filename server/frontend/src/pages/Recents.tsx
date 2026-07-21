@@ -19,6 +19,7 @@ import { FilterSelect, SearchField, ThreadRow, TopBar } from "../components";
 import {
   isRecentStatusFilter,
   loadRecentFilterPreferences,
+  newThreadScopeFromRecentFilters,
   saveRecentFilterPreferences,
   type RecentFilterPreferences,
 } from "../recentsFilters";
@@ -39,6 +40,7 @@ export function RecentsPage() {
   const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const projectNames = useProjectNameMap((devices.data ?? []).map((device) => device.id));
+  const newThreadScope = newThreadScopeFromRecentFilters(filterPreferences);
 
   const updateFilterPreferences = useCallback((update: Partial<RecentFilterPreferences>) => {
     setFilterPreferences((current) => {
@@ -261,6 +263,8 @@ export function RecentsPage() {
         </div>
       </div>
       <NewThreadSheet
+        initialDeviceId={newThreadScope.deviceId}
+        initialProjectId={newThreadScope.projectId}
         open={creating}
         onClose={() => setCreating(false)}
         onCreated={(threadId, deviceId, projectId) => navigate({ name: "thread", deviceId, projectId, threadId })}
