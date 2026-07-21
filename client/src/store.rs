@@ -2156,6 +2156,39 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
+    async fn pi_provider_is_accepted_by_all_provider_constraints() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_pi", "Pi", &workspace, &json!({}))
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO threads(id,project_id,app_server_thread_id,title,created_at,updated_at,provider) VALUES('thr_pi','prj_pi','session_pi','Pi','2026-07-21T00:00:00Z','2026-07-21T00:00:00Z','pi')")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO pending_app_requests(approval_id,app_request_id,method,params,status,created_at,provider) VALUES('apr_pi','request_pi','tool','{}','pending','2026-07-21T00:00:00Z','pi')")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO removed_app_threads(app_server_thread_id,canonical_path,removed_at,provider) VALUES('removed_pi','/tmp/pi','2026-07-21T00:00:00Z','pi')")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM threads WHERE provider='pi') + (SELECT COUNT(*) FROM pending_app_requests WHERE provider='pi') + (SELECT COUNT(*) FROM removed_app_threads WHERE provider='pi')",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
     async fn pending_history_rehashes_legacy_protocol_rows() {
         let temp = tempfile::tempdir().unwrap();
         let store = ClientStore::open(temp.path()).await.unwrap();
