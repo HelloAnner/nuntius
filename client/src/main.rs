@@ -325,7 +325,6 @@ async fn run() -> Result<()> {
     let root = config::data_dir()?;
     let mut update_probation_pending = nuntius_updater::startup_update_pending(&root)?;
     let store = ClientStore::open(&root).await?;
-    let recovery_candidates = store.recover_process_state().await?;
     let (events, _) = tokio::sync::broadcast::channel(4096);
     let (command_acks, _) = tokio::sync::broadcast::channel(1024);
     let agents = AgentRuntimes::new(cfg.clone())?;
@@ -341,6 +340,14 @@ async fn run() -> Result<()> {
         command_notify: Arc::new(tokio::sync::Notify::new()),
         history_import_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
+    // Establish the control plane before scanning a potentially large local
+    // database. The tunnel heartbeat is intentionally independent from the
+    // recovery work, while command execution waits for recovery to complete.
+    let (desired_release_tx, desired_release_rx) = tokio::sync::watch::channel(None);
+    let tunnel_task = cfg
+        .device_id
+        .as_ref()
+        .map(|_| tokio::spawn(tunnel::run_forever(executor.clone(), desired_release_tx)));
     // Subscribe before `thread/resume`: resumed threads may begin streaming
     // notifications as soon as the App Server accepts the request.
     let app_event_receiver = agents.codex.subscribe();
@@ -352,32 +359,52 @@ async fn run() -> Result<()> {
     let kimi_event_stream_task = tokio::spawn(agents.kimi.clone().run_event_stream());
     let kimi_events_task = tokio::spawn(executor::process_kimi_events(executor.clone()));
     let pi_events_task = tokio::spawn(executor::process_pi_events(executor.clone()));
-    if !recovery_candidates.is_empty() {
-        tracing::info!(
-            count = recovery_candidates.len(),
-            "recovering running threads after restart"
-        );
-    }
-    // Give every durable runtime one synchronous resume attempt before exposing
-    // the new process. A provider outage must not keep the local API and device
-    // heartbeat offline indefinitely: unresolved runtimes are already marked
-    // `recovering`, so subsequent attempts can safely continue in background.
-    let pending_recovery = executor.recover_threads_once(&recovery_candidates).await;
-    if !pending_recovery.is_empty() {
-        tracing::warn!(
-            count = pending_recovery.len(),
-            "starting while thread recovery remains pending; retries will continue in background"
-        );
-        let recovery_executor = executor.clone();
-        tokio::spawn(async move {
+    let (startup_recovered_tx, startup_recovered_rx) = tokio::sync::watch::channel(false);
+    let recovery_executor = executor.clone();
+    let startup_recovery_task = tokio::spawn(async move {
+        // Give the listener and tunnel a deterministic head start. SQLite WAL
+        // recovery and projection repair can then take as long as necessary
+        // without making the device disappear from the control plane.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let recovery_candidates = loop {
+            match recovery_executor.store.recover_process_state().await {
+                Ok(candidates) => break candidates,
+                Err(error) => {
+                    tracing::warn!(error=?error, "startup database recovery failed; control plane remains online and recovery will retry");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        };
+        startup_recovered_tx.send_replace(true);
+        if !recovery_candidates.is_empty() {
+            tracing::info!(
+                count = recovery_candidates.len(),
+                "recovering running threads after restart"
+            );
+        }
+        let pending_recovery = recovery_executor
+            .recover_threads_once(&recovery_candidates)
+            .await;
+        if !pending_recovery.is_empty() {
+            tracing::warn!(
+                count = pending_recovery.len(),
+                "thread recovery remains pending; retries will continue in background"
+            );
             recovery_executor
                 .retry_thread_recovery(pending_recovery)
                 .await;
-        });
-    }
-    let command_queue_task = tokio::spawn(command_queue::run(executor.clone()));
+        }
+    });
+    let command_executor = executor.clone();
+    let command_recovery = startup_recovered_rx.clone();
+    let command_queue_task = tokio::spawn(async move {
+        wait_for_startup_recovery(command_recovery).await;
+        command_queue::run(command_executor).await;
+    });
     let maintenance_store = executor.store.clone();
+    let maintenance_recovery = startup_recovered_rx.clone();
     let maintenance_task = tokio::spawn(async move {
+        wait_for_startup_recovery(maintenance_recovery).await;
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -387,10 +414,22 @@ async fn run() -> Result<()> {
             }
         }
     });
-    let history_monitor_task = tokio::spawn(history_monitor::run(executor.clone()));
-    let runtime_reconciler_task = tokio::spawn(runtime_reconciler::run(executor.clone()));
+    let history_executor = executor.clone();
+    let history_recovery = startup_recovered_rx.clone();
+    let history_monitor_task = tokio::spawn(async move {
+        wait_for_startup_recovery(history_recovery).await;
+        history_monitor::run(history_executor).await;
+    });
+    let reconciler_executor = executor.clone();
+    let reconciler_recovery = startup_recovered_rx.clone();
+    let runtime_reconciler_task = tokio::spawn(async move {
+        wait_for_startup_recovery(reconciler_recovery).await;
+        runtime_reconciler::run(reconciler_executor).await;
+    });
     let discovery = executor.clone();
+    let discovery_recovery = startup_recovered_rx;
     let discovery_task = tokio::spawn(async move {
+        wait_for_startup_recovery(discovery_recovery).await;
         match discovery.discover_all().await {
             Ok(count) => tracing::info!(count, "agent history discovery completed"),
             Err(error) => {
@@ -398,11 +437,6 @@ async fn run() -> Result<()> {
             }
         }
     });
-    let (desired_release_tx, desired_release_rx) = tokio::sync::watch::channel(None);
-    let tunnel_task = cfg
-        .device_id
-        .as_ref()
-        .map(|_| tokio::spawn(tunnel::run_forever(executor.clone(), desired_release_tx)));
     let runtime_store = executor.store.clone();
     let runtime_agents = agents.clone();
     let router = api::router(executor)
@@ -524,6 +558,7 @@ async fn run() -> Result<()> {
     if let Some(task) = tunnel_task {
         task.abort()
     }
+    startup_recovery_task.abort();
     discovery_task.abort();
     history_monitor_task.abort();
     runtime_reconciler_task.abort();
@@ -543,6 +578,12 @@ async fn run() -> Result<()> {
         update.activate()?;
     }
     Ok(())
+}
+
+async fn wait_for_startup_recovery(mut recovered: tokio::sync::watch::Receiver<bool>) {
+    if !*recovered.borrow() {
+        let _ = recovered.changed().await;
+    }
 }
 
 fn finished_critical_task(

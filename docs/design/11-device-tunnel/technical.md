@@ -115,6 +115,10 @@ Server 验证后原子分配新 epoch，返回 welcome：
 
 应用 heartbeat 也用于复查 device key version 和 Server epoch。
 
+Client 进程重启时先绑定本地 API、建立 Tunnel 并启动独立 heartbeat，再在后台执行 SQLite
+projection 修复和运行中 Thread 恢复。命令可以先持久化，但 CommandExecutor 必须等启动恢复
+事务完成后再消费；数据库体积增长不能线性拉长设备离线窗口。
+
 ## 7. 重连分类
 
 | 错误 | 策略 |
