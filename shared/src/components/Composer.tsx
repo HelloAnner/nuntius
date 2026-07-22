@@ -1,4 +1,4 @@
-/* Message composer: autosizing textarea, send / steer / interrupt. */
+/* Message composer: autosizing textarea, image upload/paste, send / steer / interrupt. */
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import type { AttachmentView } from "../types";
 import { isRunningStatus } from "../format";
@@ -92,7 +92,7 @@ export function Composer({
     });
   };
 
-  const selectFiles = (files: FileList | null) => {
+  const selectFiles = (files: FileList | readonly File[] | null) => {
     if (!files || !onUpload) return;
     const remaining = Math.max(0, 4 - uploads.length);
     for (const file of Array.from(files).slice(0, remaining)) {
@@ -184,7 +184,8 @@ export function Composer({
               className="attach-btn"
               onClick={() => fileRef.current?.click()}
               disabled={locked || busy || uploads.length >= 4}
-              aria-label="添加图片"
+              aria-label="添加图片，也可以直接粘贴"
+              title="选择图片，或直接粘贴"
             >
               <IconImage size={19} />
             </button>
@@ -198,9 +199,16 @@ export function Composer({
           placeholder={
             locked
               ? (lockedReason ?? "当前不可发送")
-              : (placeholder ?? "输入消息…")
+              : (placeholder ?? (onUpload ? "输入消息，或粘贴图片…" : "输入消息…"))
           }
           onChange={(e) => setText(e.target.value)}
+          onPaste={(event) => {
+            if (!onUpload || locked || busy || uploads.length >= 4) return;
+            const images = clipboardImageFiles(event.clipboardData);
+            if (!images.length) return;
+            event.preventDefault();
+            selectFiles(images);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
               e.preventDefault();
@@ -230,6 +238,18 @@ export function Composer({
       </div>
     </div>
   );
+}
+
+type ClipboardImageSource = Pick<DataTransfer, "items" | "files">;
+
+export function clipboardImageFiles(source: ClipboardImageSource): File[] {
+  const itemImages = Array.from(source.items).flatMap((item) => {
+    if (item.kind !== "file" || !item.type.startsWith("image/")) return [];
+    const file = item.getAsFile();
+    return file ? [file] : [];
+  });
+  if (itemImages.length) return itemImages;
+  return Array.from(source.files).filter((file) => file.type.startsWith("image/"));
 }
 
 interface PendingImage {
