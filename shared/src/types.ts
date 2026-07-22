@@ -22,6 +22,55 @@ export interface AgentProviderStatus {
   models: AgentModelOption[];
 }
 
+export interface ProviderUsageAccount {
+  externalAccountId: string | null;
+  email: string | null;
+  plan: string | null;
+  scope: string | null;
+  subscriptionStartedAt: string | null;
+  subscriptionExpiresAt: string | null;
+  subscriptionLastCheckedAt: string | null;
+  credentialExpiresAt: string | null;
+}
+
+export interface ProviderQuotaWindow {
+  windowSeconds: number;
+  usedPercent: number;
+  used: number | null;
+  limit: number | null;
+  remaining: number | null;
+  resetsAt: string | null;
+}
+
+export interface ProviderUsageReport {
+  schemaVersion: number;
+  reportId: string;
+  provider: AgentProvider;
+  sampledAt: string;
+  source: "oauth" | "cli" | "api" | "web" | "auto";
+  status: "ok" | "partial" | "error" | "unavailable";
+  account: ProviderUsageAccount | null;
+  entitlementPlan: string | null;
+  windows: {
+    fiveHour: ProviderQuotaWindow | null;
+    sevenDay: ProviderQuotaWindow | null;
+  };
+  credits: {
+    balance: number | null;
+    resetCreditsAvailable: number | null;
+    nextResetCreditExpiresAt: string | null;
+  } | null;
+  warningCode: string | null;
+  errorCode: string | null;
+}
+
+export interface ProviderUsageLatestView {
+  deviceId: string;
+  deviceDisplayName: string;
+  receivedAt: string;
+  report: ProviderUsageReport;
+}
+
 export interface ServerInfo {
   apiVersion: string;
   serverVersion: string;
@@ -189,6 +238,11 @@ export interface CommandReceipt {
   status: CommandStatus;
   acceptedAt: string;
   statusUrl: string;
+}
+
+export interface ProviderUsageRefreshResponse {
+  requestedAt: string;
+  commands: CommandReceipt[];
 }
 
 export interface CommandView {

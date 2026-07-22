@@ -176,6 +176,7 @@ async fn run_connection(
                 CLIENT_UPDATE_CAPABILITY.into(),
                 "image-input.v1".into(),
                 "agent-provider.v1".into(),
+                PROVIDER_USAGE_CAPABILITY.into(),
             ],
         },
     )

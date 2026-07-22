@@ -16,6 +16,7 @@ mod pairing;
 mod pi;
 mod probe;
 mod protocol;
+mod provider_usage;
 mod runtime_reconciler;
 mod service;
 mod store;
@@ -344,6 +345,10 @@ async fn run() -> Result<()> {
         command_notify: Arc::new(tokio::sync::Notify::new()),
         history_import_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
+    let provider_usage_task = cfg
+        .device_id
+        .as_ref()
+        .map(|_| tokio::spawn(provider_usage::run(executor.clone())));
     // Establish the control plane before scanning a potentially large local
     // database. The tunnel heartbeat is intentionally independent from the
     // recovery work, while command execution waits for recovery to complete.
@@ -556,6 +561,7 @@ async fn run() -> Result<()> {
                     &maintenance_task,
                     &history_monitor_task,
                     &runtime_reconciler_task,
+                    provider_usage_task.as_ref(),
                     tunnel_task.as_ref(),
                 ) {
                     tracing::error!(task=name, "critical client task exited unexpectedly");
@@ -602,6 +608,9 @@ async fn run() -> Result<()> {
     discovery_task.abort();
     history_monitor_task.abort();
     runtime_reconciler_task.abort();
+    if let Some(task) = provider_usage_task {
+        task.abort();
+    }
     host_upgrade_check_task.abort();
     codex_event_stream_task.abort();
     app_events_task.abort();
@@ -658,6 +667,7 @@ fn finished_critical_task(
     maintenance: &tokio::task::JoinHandle<()>,
     history_monitor: &tokio::task::JoinHandle<()>,
     runtime_reconciler: &tokio::task::JoinHandle<()>,
+    provider_usage: Option<&tokio::task::JoinHandle<()>>,
     tunnel: Option<&tokio::task::JoinHandle<()>>,
 ) -> Option<&'static str> {
     [
@@ -673,6 +683,11 @@ fn finished_critical_task(
     ]
     .into_iter()
     .find_map(|(name, task)| task.is_finished().then_some(name))
+    .or_else(|| {
+        provider_usage
+            .is_some_and(|task| task.is_finished())
+            .then_some("provider_usage")
+    })
     .or_else(|| {
         tunnel
             .is_some_and(|task| task.is_finished())

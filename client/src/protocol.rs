@@ -10,6 +10,7 @@ pub const DEVICE_PROTOCOL_VERSION: u16 = 1;
 pub const DEVICE_SUBPROTOCOL: &str = "nuntius.device.v1";
 pub const DEVICE_DISPLAY_NAME_SYNC_CAPABILITY: &str = "device-display-name-sync.v1";
 pub const CLIENT_UPDATE_CAPABILITY: &str = "client-update.v1";
+pub const PROVIDER_USAGE_CAPABILITY: &str = "provider-usage.v1";
 
 pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::now_v7())
@@ -128,6 +129,63 @@ pub struct AgentProviderStatus {
     pub version: Option<String>,
     #[serde(default)]
     pub models: Vec<AgentModelOption>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsageAccount {
+    pub external_account_id: Option<String>,
+    pub email: Option<String>,
+    pub plan: Option<String>,
+    pub scope: Option<String>,
+    pub subscription_started_at: Option<String>,
+    pub subscription_expires_at: Option<String>,
+    pub subscription_last_checked_at: Option<String>,
+    pub credential_expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderQuotaWindow {
+    pub window_seconds: i64,
+    pub used_percent: f64,
+    pub used: Option<f64>,
+    pub limit: Option<f64>,
+    pub remaining: Option<f64>,
+    pub resets_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsageWindows {
+    pub five_hour: Option<ProviderQuotaWindow>,
+    pub seven_day: Option<ProviderQuotaWindow>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsageCredits {
+    pub balance: Option<f64>,
+    pub reset_credits_available: Option<i64>,
+    pub next_reset_credit_expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsageReport {
+    pub schema_version: u16,
+    pub report_id: String,
+    pub provider: AgentProvider,
+    pub sampled_at: String,
+    pub source: String,
+    pub status: String,
+    pub account: Option<ProviderUsageAccount>,
+    pub entitlement_plan: Option<String>,
+    #[serde(default)]
+    pub windows: ProviderUsageWindows,
+    pub credits: Option<ProviderUsageCredits>,
+    pub warning_code: Option<String>,
+    pub error_code: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -354,6 +412,7 @@ pub struct HistoryBatch {
 )]
 pub enum DeviceCommandKind {
     Refresh,
+    ProviderUsageRefresh,
     ProjectCreate(CreateProjectRequest),
     ProjectDelete {
         project_id: String,
@@ -565,6 +624,13 @@ mod tests {
         .unwrap();
         assert_eq!(value["kind"], "project_delete");
         assert_eq!(value["payload"]["projectId"], "prj_test");
+    }
+
+    #[test]
+    fn provider_usage_refresh_wire_tag_is_stable() {
+        let value = serde_json::to_value(DeviceCommandKind::ProviderUsageRefresh).unwrap();
+        assert_eq!(value["kind"], "provider_usage_refresh");
+        assert!(value.get("payload").is_none());
     }
 
     #[test]

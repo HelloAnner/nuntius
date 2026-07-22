@@ -1,9 +1,12 @@
 /* Settings: account, pairing codes, device revocation, theme, about. */
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Avatar,
+  IconBolt,
+  IconClock,
   IconKey,
+  IconRefresh,
   Segmented,
   Spinner,
   fullTime,
@@ -18,6 +21,8 @@ import {
   type ConversationAccessMode,
   type Theme,
   type DeviceSummary,
+  type ProviderQuotaWindow,
+  type ProviderUsageLatestView,
 } from "@nuntius/shared";
 import { api } from "../api";
 import { useAccessMode, useSession, useThemeStore } from "../stores";
@@ -34,9 +39,15 @@ export function SettingsPage() {
   const [pairing, setPairing] = useState<PairingCodeView | null>(null);
   const [busyPairing, setBusyPairing] = useState(false);
   const [renaming, setRenaming] = useState<DeviceSummary | null>(null);
+  const [refreshingUsage, setRefreshingUsage] = useState(false);
 
   const info = useQuery({ queryKey: ["info"], queryFn: api.info, staleTime: 60_000 });
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
+  const providerUsage = useQuery({
+    queryKey: ["providerUsage"],
+    queryFn: api.providerUsage,
+  });
+  const usageGroups = groupUsageByDevice(providerUsage.data ?? []);
 
   const newPairingCode = async () => {
     setBusyPairing(true);
@@ -63,6 +74,24 @@ export function SettingsPage() {
         }
       },
     });
+
+  const refreshUsage = async () => {
+    setRefreshingUsage(true);
+    try {
+      const response = await api.refreshAllProviderUsage();
+      toast(
+        response.commands.length > 0
+          ? `已通知 ${response.commands.length} 台设备刷新额度`
+          : "没有可刷新的设备",
+      );
+      window.setTimeout(() => void providerUsage.refetch(), 2_000);
+      window.setTimeout(() => void providerUsage.refetch(), 8_000);
+    } catch {
+      toast("额度刷新请求失败", { error: true });
+    } finally {
+      setRefreshingUsage(false);
+    }
+  };
 
   const revoke = (deviceId: string, name: string) =>
     confirm({
@@ -187,6 +216,48 @@ export function SettingsPage() {
             })}
           </div>
 
+          <div className="section-label micro usage-section-label">
+            <span>套餐额度</span>
+            <button
+              className="btn quiet sm usage-refresh"
+              onClick={refreshUsage}
+              disabled={refreshingUsage}
+            >
+              <IconRefresh size={14} className={refreshingUsage ? "spinning" : undefined} />
+              {refreshingUsage ? "正在通知" : "刷新全部设备"}
+            </button>
+          </div>
+          {providerUsage.isLoading ? (
+            <div className="card usage-empty"><Spinner sm />正在读取额度</div>
+          ) : usageGroups.length === 0 ? (
+            <div className="card usage-empty">
+              <span className="usage-empty-mark"><IconBolt size={17} /></span>
+              <span>还没有设备额度数据</span>
+            </div>
+          ) : (
+            <div className="usage-device-stack">
+              {usageGroups.map(([deviceId, entries], groupIndex) => (
+                <section
+                  className="usage-device-group"
+                  key={deviceId}
+                  style={{ "--usage-order": groupIndex } as CSSProperties & Record<"--usage-order", number>}
+                >
+                  <header className="usage-device-head">
+                    <Avatar sm text={initials(entries[0].deviceDisplayName)} tint={tintIndex(deviceId)} />
+                    <div>
+                      <strong>{entries[0].deviceDisplayName}</strong>
+                      <span>{entries.length} 个账户额度</span>
+                    </div>
+                    <span className="usage-device-time">最新 {relTime(latestReceivedAt(entries))}</span>
+                  </header>
+                  <div className="usage-card-grid">
+                    {entries.map((entry) => <ProviderUsageCard key={entry.report.reportId} entry={entry} />)}
+                  </div>
+                </section>
+              ))}
+            </div>
+          )}
+
           <div className="section-label micro">外观</div>
           <div className="card settings-panel">
             <Segmented
@@ -229,4 +300,134 @@ export function SettingsPage() {
       {confirmNode}
     </div>
   );
+}
+
+function groupUsageByDevice(entries: ProviderUsageLatestView[]) {
+  const groups = new Map<string, ProviderUsageLatestView[]>();
+  for (const entry of entries) {
+    const group = groups.get(entry.deviceId) ?? [];
+    group.push(entry);
+    groups.set(entry.deviceId, group);
+  }
+  return [...groups.entries()];
+}
+
+function latestReceivedAt(entries: ProviderUsageLatestView[]) {
+  return entries.reduce(
+    (latest, entry) => Date.parse(entry.receivedAt) > Date.parse(latest) ? entry.receivedAt : latest,
+    entries[0].receivedAt,
+  );
+}
+
+function ProviderUsageCard({ entry }: { entry: ProviderUsageLatestView }) {
+  const { report } = entry;
+  const account = report.account;
+  const credits = report.credits;
+  const plan = report.entitlementPlan ?? account?.plan ?? account?.scope;
+  const accountLabel = account?.email ?? account?.externalAccountId ?? "当前账户";
+  const healthy = report.status === "ok" || report.status === "partial";
+  const expiry = account?.subscriptionExpiresAt ?? account?.credentialExpiresAt;
+  const expiryLabel = account?.subscriptionExpiresAt ? "会员到期" : "凭据到期";
+  return (
+    <article className={`usage-card ${report.provider} usage-${report.status}`}>
+      <header className="usage-card-head">
+        <span className="usage-provider-mark" aria-hidden="true">
+          {report.provider === "codex" ? "O" : "K"}
+        </span>
+        <div className="usage-account-copy">
+          <strong>{report.provider === "codex" ? "OpenAI" : "Kimi Code"}</strong>
+          <span title={accountLabel}>{accountLabel}</span>
+        </div>
+        <span className={`usage-state ${healthy ? "healthy" : "error"}`}>
+          {usageStatusLabel(report.status, report.errorCode)}
+        </span>
+      </header>
+
+      {plan ? <div className="usage-plan-row"><span>{plan}</span><small>{sourceLabel(report.source)}</small></div> : null}
+
+      <div className="usage-window-grid">
+        <QuotaMeter label="5 小时" window={report.windows.fiveHour} provider={report.provider} />
+        <QuotaMeter label="7 天" window={report.windows.sevenDay} provider={report.provider} />
+      </div>
+
+      <footer className="usage-card-foot">
+        <div className="usage-meta-row">
+          {report.provider === "codex" && credits?.resetCreditsAvailable != null ? (
+            <span className="usage-chip accent">
+              <IconBolt size={12} />
+              重置卡 {credits.resetCreditsAvailable}
+              {credits.nextResetCreditExpiresAt ? ` · ${shortDate(credits.nextResetCreditExpiresAt)} 到期` : ""}
+            </span>
+          ) : null}
+          {credits?.balance != null ? (
+            <span className="usage-chip">余额 {formatNumber(credits.balance)}</span>
+          ) : null}
+          {expiry ? <span className="usage-chip"><IconClock size={12} />{expiryLabel} {shortDate(expiry)}</span> : null}
+        </div>
+        <span className="usage-sampled">采集于 {relTime(report.sampledAt)}</span>
+      </footer>
+    </article>
+  );
+}
+
+function QuotaMeter({
+  label,
+  window,
+  provider,
+}: {
+  label: string;
+  window: ProviderQuotaWindow | null;
+  provider: "codex" | "kimi" | "pi";
+}) {
+  const percent = Math.max(0, Math.min(100, window?.usedPercent ?? 0));
+  return (
+    <div className={`quota-meter ${window ? "" : "missing"}`}>
+      <div className="quota-meter-top">
+        <span>{label}</span>
+        <strong>{window ? `${formatNumber(percent)}%` : "—"}</strong>
+      </div>
+      <div className="quota-track" aria-label={window ? `${label}已使用 ${formatNumber(percent)}%` : `${label}额度未知`}>
+        <span style={{ width: `${percent}%` }} data-provider={provider} />
+      </div>
+      <div className="quota-meter-meta">
+        <span>{quotaAmount(window)}</span>
+        <span>{window?.resetsAt ? `重置 ${shortDateTime(window.resetsAt)}` : ""}</span>
+      </div>
+    </div>
+  );
+}
+
+function quotaAmount(window: ProviderQuotaWindow | null) {
+  if (!window || window.used === null || window.limit === null) return "";
+  const remaining = window.remaining === null ? "" : ` · 剩 ${formatNumber(window.remaining)}`;
+  return `${formatNumber(window.used)} / ${formatNumber(window.limit)}${remaining}`;
+}
+
+function usageStatusLabel(status: string, errorCode: string | null) {
+  if (status === "ok") return "已更新";
+  if (status === "partial") return "部分更新";
+  if (status === "unavailable") return "未登录";
+  if (errorCode === "upstream_unauthorized" || errorCode === "credentials_expired") return "登录已失效";
+  if (errorCode === "upstream_timeout" || errorCode === "upstream_network") return "网络异常";
+  return "获取失败";
+}
+
+function sourceLabel(source: string) {
+  return ({ oauth: "OAuth", cli: "CLI", api: "API Key", web: "Web", auto: "自动探测" } as Record<string, string>)[source] ?? source;
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: value < 100 ? 1 : 0 }).format(value);
+}
+
+function shortDate(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
+}
+
+function shortDateTime(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
 }

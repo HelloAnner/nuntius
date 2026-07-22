@@ -25,6 +25,7 @@ pub fn priority(command: &DeviceCommand) -> i64 {
         DeviceCommandKind::TurnInterrupt { .. } | DeviceCommandKind::ApprovalDecide { .. } => 0,
         DeviceCommandKind::TurnStart { .. } | DeviceCommandKind::TurnSteer { .. } => 1,
         DeviceCommandKind::HistorySync { .. } => 4,
+        DeviceCommandKind::ProviderUsageRefresh => 3,
         _ => 2,
     }
 }

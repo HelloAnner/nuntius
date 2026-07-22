@@ -52,6 +52,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/device-auth/token", post(device_token))
         .route("/api/v1/devices", get(list_devices))
         .route(
+            "/api/v1/provider-usage",
+            get(provider_usage).post(refresh_all_provider_usage),
+        )
+        .route(
             "/api/v1/devices/{device_id}",
             get(get_device).patch(rename_device).delete(revoke_device),
         )
@@ -187,6 +191,7 @@ async fn info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiErro
             "approvals.v1".into(),
             CLIENT_UPDATE_CAPABILITY.into(),
             DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into(),
+            PROVIDER_USAGE_CAPABILITY.into(),
         ],
     }))
 }
@@ -471,6 +476,58 @@ async fn list_devices(
         }
     }
     Ok(Json(devices))
+}
+
+async fn provider_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ProviderUsageLatestView>>, ApiError> {
+    let session = auth::authenticate_web(&state.store, &headers).await?;
+    Ok(Json(
+        state.store.latest_provider_usage(&session.user_id).await?,
+    ))
+}
+
+async fn refresh_all_provider_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<ProviderUsageRefreshResponse>), ApiError> {
+    let session = web_mutation(&state, &headers).await?;
+    let request_key = required_idempotency_key(&headers)?;
+    let requested_at = now();
+    let devices = state.store.list_devices(&session.user_id).await?;
+    let mut commands = Vec::new();
+    for device in devices
+        .into_iter()
+        .filter(|device| device.status != DeviceStatus::Revoked)
+    {
+        let derived_key = hex::encode(Sha256::digest(
+            format!("{request_key}\0{}", device.id).as_bytes(),
+        ));
+        let mut device_headers = headers.clone();
+        device_headers.insert(
+            "idempotency-key",
+            HeaderValue::from_str(&derived_key).map_err(ApiError::internal)?,
+        );
+        let (_, receipt) = enqueue(
+            &state,
+            &device_headers,
+            &session,
+            device.id,
+            None,
+            None,
+            DeviceCommandKind::ProviderUsageRefresh,
+        )
+        .await?;
+        commands.push(receipt.0);
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ProviderUsageRefreshResponse {
+            requested_at,
+            commands,
+        }),
+    ))
 }
 
 async fn get_device(
@@ -1359,7 +1416,10 @@ async fn enqueue(
     let issued = now();
     // Archive is an idempotent desired-state operation. Keep it durable long enough to
     // survive a device restart; interactive commands retain their short safety window.
-    let can_wait_for_device = matches!(&kind, DeviceCommandKind::ThreadArchive { .. });
+    let can_wait_for_device = matches!(
+        &kind,
+        DeviceCommandKind::ThreadArchive { .. } | DeviceCommandKind::ProviderUsageRefresh
+    );
     let expiry = OffsetDateTime::now_utc()
         + if can_wait_for_device {
             Duration::hours(24)
@@ -1638,6 +1698,7 @@ fn validate_device_command(kind: &DeviceCommandKind) -> Result<(), ApiError> {
             }
         }
         DeviceCommandKind::Refresh
+        | DeviceCommandKind::ProviderUsageRefresh
         | DeviceCommandKind::ThreadArchive { .. }
         | DeviceCommandKind::TurnInterrupt { .. }
         | DeviceCommandKind::HistorySync { .. } => {}

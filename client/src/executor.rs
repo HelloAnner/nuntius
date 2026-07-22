@@ -53,6 +53,16 @@ impl CommandExecutor {
                 self.emit_inventory().await?;
                 Ok(json!({"refreshed":true}))
             }
+            DeviceCommandKind::ProviderUsageRefresh => {
+                let reports = crate::provider_usage::collect_and_emit_all(self).await?;
+                Ok(json!({
+                    "reports": reports.into_iter().map(|report| json!({
+                        "reportId": report.report_id,
+                        "provider": report.provider.as_str(),
+                        "status": report.status,
+                    })).collect::<Vec<_>>()
+                }))
+            }
             DeviceCommandKind::ProjectCreate(request) => self.create_project(request).await,
             DeviceCommandKind::ProjectDelete { project_id } => {
                 self.delete_project(project_id).await
@@ -2389,6 +2399,7 @@ fn validate_command(kind: &DeviceCommandKind) -> Result<()> {
             }
         }
         DeviceCommandKind::Refresh
+        | DeviceCommandKind::ProviderUsageRefresh
         | DeviceCommandKind::ThreadArchive { .. }
         | DeviceCommandKind::TurnInterrupt { .. }
         | DeviceCommandKind::HistorySync { .. } => {}

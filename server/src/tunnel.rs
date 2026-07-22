@@ -109,14 +109,27 @@ impl TunnelRegistry {
     }
 
     pub async fn send(&self, device_id: &str, frame: TunnelFrame) -> Result<()> {
-        let sender = self
-            .connections
-            .read()
-            .await
-            .get(device_id)
-            .filter(|connection| connection.ready)
-            .map(|c| c.sender.clone())
-            .ok_or_else(|| anyhow!("device offline"))?;
+        let sender = {
+            let connections = self.connections.read().await;
+            let connection = connections
+                .get(device_id)
+                .filter(|connection| connection.ready)
+                .ok_or_else(|| anyhow!("device offline"))?;
+            if matches!(
+                &frame,
+                TunnelFrame::Command {
+                    command: DeviceCommand {
+                        command: DeviceCommandKind::ProviderUsageRefresh,
+                        ..
+                    },
+                    ..
+                }
+            ) && !connection.capabilities.contains(PROVIDER_USAGE_CAPABILITY)
+            {
+                return Err(anyhow!("device does not support provider usage commands"));
+            }
+            connection.sender.clone()
+        };
         tokio::time::timeout(std::time::Duration::from_secs(2), sender.send(frame))
             .await
             .map_err(|_| anyhow!("device connection send queue timed out"))?
@@ -340,6 +353,9 @@ async fn run_socket(
     let supports_client_update = client_capabilities
         .iter()
         .any(|capability| capability == CLIENT_UPDATE_CAPABILITY);
+    let supports_provider_usage = client_capabilities
+        .iter()
+        .any(|capability| capability == PROVIDER_USAGE_CAPABILITY);
 
     let (out_tx, mut out_rx) = mpsc::channel::<TunnelFrame>(256);
     let (supersede_tx, mut superseded) = oneshot::channel();
@@ -396,6 +412,7 @@ async fn run_socket(
                     CLIENT_UPDATE_CAPABILITY.into(),
                     "image-input.v1".into(),
                     "agent-provider.v1".into(),
+                    PROVIDER_USAGE_CAPABILITY.into(),
                 ],
                 display_name: Some(display_name.clone()),
             })
@@ -422,6 +439,13 @@ async fn run_socket(
             .pending_commands(&device_id, replay_after, 500)
             .await?
         {
+            if matches!(
+                &stored.command.command,
+                DeviceCommandKind::ProviderUsageRefresh
+            ) && !supports_provider_usage
+            {
+                continue;
+            }
             out_tx
                 .send(TunnelFrame::Command {
                     queue_epoch: stored.queue_epoch,
@@ -618,6 +642,14 @@ async fn handle_frame(
             let event_type = event.event_type.clone();
             let persisted = async {
                 event.user_id = Some(user_id.into());
+                let provider_usage = if event.event_type == "provider.usage.reported" {
+                    let report =
+                        serde_json::from_value::<ProviderUsageReport>(event.payload.clone())?;
+                    validate_provider_usage_report(&report)?;
+                    Some(report)
+                } else {
+                    None
+                };
                 if event.event_type == "thread.summary" {
                     let thread = serde_json::from_value::<ThreadSummary>(event.payload.clone())?;
                     if thread.device_id != device_id
@@ -671,7 +703,20 @@ async fn handle_frame(
                         .mark_history_inventory_complete(device_id)
                         .await?;
                 }
-                let cursor = state.store.append_event(user_id, &event).await?;
+                let cursor = if let Some(report) = provider_usage.as_ref() {
+                    if event.project_id.is_some()
+                        || event.thread_id.is_some()
+                        || event.turn_id.is_some()
+                    {
+                        return Err(anyhow!("provider usage event must be device-scoped"));
+                    }
+                    state
+                        .store
+                        .ingest_provider_usage_report(user_id, &event, report)
+                        .await?
+                } else {
+                    state.store.append_event(user_id, &event).await?
+                };
                 Ok::<_, anyhow::Error>((cursor, event))
             }
             .await;
@@ -787,6 +832,102 @@ fn event_closes_thread_approvals(event: &NuntiusEvent) -> bool {
     }
 }
 
+fn validate_provider_usage_report(report: &ProviderUsageReport) -> Result<()> {
+    if report.schema_version != 1
+        || report.report_id.is_empty()
+        || report.report_id.len() > 128
+        || !matches!(report.provider, AgentProvider::Codex | AgentProvider::Kimi)
+        || !matches!(
+            report.source.as_str(),
+            "oauth" | "cli" | "api" | "web" | "auto"
+        )
+        || !matches!(
+            report.status.as_str(),
+            "ok" | "partial" | "error" | "unavailable"
+        )
+    {
+        return Err(anyhow!("invalid provider usage report identity"));
+    }
+    time::OffsetDateTime::parse(
+        &report.sampled_at,
+        &time::format_description::well_known::Rfc3339,
+    )?;
+    for value in [
+        report.entitlement_plan.as_deref(),
+        report.warning_code.as_deref(),
+        report.error_code.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if value.is_empty() || value.len() > 256 {
+            return Err(anyhow!("provider usage report metadata is too long"));
+        }
+    }
+    if let Some(account) = &report.account {
+        for value in [
+            account.external_account_id.as_deref(),
+            account.email.as_deref(),
+            account.plan.as_deref(),
+            account.scope.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.is_empty() || value.len() > 320 {
+                return Err(anyhow!("provider usage account metadata is too long"));
+            }
+        }
+        for value in [
+            account.subscription_started_at.as_deref(),
+            account.subscription_expires_at.as_deref(),
+            account.subscription_last_checked_at.as_deref(),
+            account.credential_expires_at.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)?;
+        }
+    }
+    for window in [
+        report.windows.five_hour.as_ref(),
+        report.windows.seven_day.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if window.window_seconds <= 0
+            || !window.used_percent.is_finite()
+            || !(0.0..=100.0).contains(&window.used_percent)
+            || [window.used, window.limit, window.remaining]
+                .into_iter()
+                .flatten()
+                .any(|value| !value.is_finite() || value < 0.0)
+        {
+            return Err(anyhow!("provider usage quota window is invalid"));
+        }
+        if let Some(value) = window.resets_at.as_deref() {
+            time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)?;
+        }
+    }
+    if let Some(credits) = &report.credits {
+        if credits
+            .balance
+            .is_some_and(|value| !value.is_finite() || value < 0.0)
+            || credits
+                .reset_credits_available
+                .is_some_and(|value| value < 0)
+        {
+            return Err(anyhow!("provider usage credits are invalid"));
+        }
+        if let Some(value) = credits.next_reset_credit_expires_at.as_deref() {
+            time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn publish_device_event(
     state: &AppState,
     user_id: &str,
@@ -874,6 +1015,38 @@ mod tests {
         assert!(matches!(
             receiver.recv().await,
             Some(TunnelFrame::DeviceConfig { display_name }) if display_name == "Newest name"
+        ));
+    }
+
+    #[tokio::test]
+    async fn provider_usage_command_waits_for_a_capable_client() {
+        let registry = TunnelRegistry::new();
+        let (sender, mut receiver) = mpsc::channel(4);
+        let (supersede, _superseded) = oneshot::channel();
+        let epoch = registry
+            .register("dev_test", sender, supersede, HashSet::new())
+            .await;
+        registry
+            .activate("dev_test", epoch, "Device".into())
+            .await
+            .unwrap();
+        let command = TunnelFrame::Command {
+            queue_epoch: "epoch".into(),
+            server_sequence: 1,
+            command: DeviceCommand {
+                command_id: "cmd_usage".into(),
+                device_id: "dev_test".into(),
+                project_id: None,
+                thread_id: None,
+                issued_at: now(),
+                expires_at: now(),
+                command: DeviceCommandKind::ProviderUsageRefresh,
+            },
+        };
+        assert!(registry.send("dev_test", command).await.is_err());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
         ));
     }
 }

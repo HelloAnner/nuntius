@@ -100,6 +100,20 @@ paths:
       operationId: listDevices
       responses:
         '200': {description: 当前用户设备, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Device'}}}}}
+  /provider-usage:
+    get:
+      operationId: getLatestProviderUsage
+      description: 返回每台设备、每个 Provider 最近一次汇报；没有历史数据时返回空数组。
+      responses:
+        '200': {description: 最新额度快照, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/ProviderUsageLatest'}}}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      operationId: refreshAllProviderUsage
+      description: 为当前用户所有未撤销设备创建可重放的额度刷新命令；离线设备在重连后执行。
+      parameters: [{$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      responses:
+        '202': {description: 刷新命令已接受, content: {application/json: {schema: {$ref: '#/components/schemas/ProviderUsageRefreshResponse'}}}}
+        '403': {$ref: '#/components/responses/Forbidden'}
   /devices/{deviceId}:
     parameters: [{$ref: '#/components/parameters/DeviceId'}]
     get:
@@ -437,6 +451,69 @@ components:
                     isDefault: {type: boolean}
                     defaultReasoningEffort: {type: [string, 'null']}
                     reasoningEfforts: {type: array, items: {type: string}}
+    ProviderUsageAccount:
+      type: object
+      properties:
+        externalAccountId: {type: [string, 'null']}
+        email: {type: [string, 'null']}
+        plan: {type: [string, 'null']}
+        scope: {type: [string, 'null']}
+        subscriptionStartedAt: {type: [string, 'null'], format: date-time}
+        subscriptionExpiresAt: {type: [string, 'null'], format: date-time}
+        subscriptionLastCheckedAt: {type: [string, 'null'], format: date-time}
+        credentialExpiresAt: {type: [string, 'null'], format: date-time}
+    ProviderQuotaWindow:
+      type: object
+      required: [windowSeconds, usedPercent]
+      properties:
+        windowSeconds: {type: integer, minimum: 1}
+        usedPercent: {type: number, minimum: 0, maximum: 100}
+        used: {type: [number, 'null'], minimum: 0}
+        limit: {type: [number, 'null'], minimum: 0}
+        remaining: {type: [number, 'null'], minimum: 0}
+        resetsAt: {type: [string, 'null'], format: date-time}
+    ProviderUsageReport:
+      type: object
+      required: [schemaVersion, reportId, provider, sampledAt, source, status, windows]
+      properties:
+        schemaVersion: {type: integer, enum: [1]}
+        reportId: {type: string}
+        provider: {enum: [codex, kimi]}
+        sampledAt: {type: string, format: date-time}
+        source: {enum: [oauth, cli, api, web, auto]}
+        status: {enum: [ok, partial, error, unavailable]}
+        account: {anyOf: [{$ref: '#/components/schemas/ProviderUsageAccount'}, {type: 'null'}]}
+        entitlementPlan: {type: [string, 'null']}
+        windows:
+          type: object
+          required: [fiveHour, sevenDay]
+          properties:
+            fiveHour: {anyOf: [{$ref: '#/components/schemas/ProviderQuotaWindow'}, {type: 'null'}]}
+            sevenDay: {anyOf: [{$ref: '#/components/schemas/ProviderQuotaWindow'}, {type: 'null'}]}
+        credits:
+          anyOf:
+            - type: object
+              properties:
+                balance: {type: [number, 'null']}
+                resetCreditsAvailable: {type: [integer, 'null'], minimum: 0}
+                nextResetCreditExpiresAt: {type: [string, 'null'], format: date-time}
+            - {type: 'null'}
+        warningCode: {type: [string, 'null']}
+        errorCode: {type: [string, 'null']}
+    ProviderUsageLatest:
+      type: object
+      required: [deviceId, deviceDisplayName, receivedAt, report]
+      properties:
+        deviceId: {type: string}
+        deviceDisplayName: {type: string}
+        receivedAt: {type: string, format: date-time}
+        report: {$ref: '#/components/schemas/ProviderUsageReport'}
+    ProviderUsageRefreshResponse:
+      type: object
+      required: [requestedAt, commands]
+      properties:
+        requestedAt: {type: string, format: date-time}
+        commands: {type: array, items: {$ref: '#/components/schemas/CommandReceipt'}}
     Project:
       type: object
       required: [id, deviceId, kind, displayName, status, threadCount]

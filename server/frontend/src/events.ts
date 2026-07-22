@@ -188,6 +188,10 @@ export function startEvents(qc: QueryClient): () => void {
       void qc.invalidateQueries({ queryKey: ["devices"] });
       return;
     }
+    if (type === "provider.usage.reported") {
+      void qc.invalidateQueries({ queryKey: ["providerUsage"] });
+      return;
+    }
     if (type === "project.summary") {
       const project = event.payload as ProjectSummary;
       qc.setQueryData<ProjectSummary[]>(["projects", event.deviceId], (old) => {

@@ -47,6 +47,7 @@
 | 19 | 测试与质量保障 | [functional](./19-testing-quality/functional.md) | [technical](./19-testing-quality/technical.md) |
 | 20 | 会话历史汇总与同步 | [functional](./20-history-aggregation/functional.md) | [technical](./20-history-aggregation/technical.md) |
 | 21 | 远程目录浏览与项目创建 | [functional](./21-directory-browser/functional.md) | [technical](./21-directory-browser/technical.md) |
+| 22 | 模型套餐额度 | [functional](./22-provider-usage/functional.md) | [technical](./22-provider-usage/technical.md) |
 
 ## 模块依赖方向
 
@@ -58,6 +59,7 @@
   ├─ Device Tunnel ──> Reliable Messaging ──> Storage
   ├─ Directory Browser ──> Project
   ├─ History Aggregation ──> Thread/Turn/Storage
+  ├─ Provider Usage ──> Device Tunnel/Storage/Remote Console
   ├─ Local Console / Remote Console
   └─ Security / Observability / Release / Testing（横切）
 ```

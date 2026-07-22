@@ -1253,6 +1253,147 @@ impl ServerStore {
         Ok(result.last_insert_rowid())
     }
 
+    pub async fn ingest_provider_usage_report(
+        &self,
+        user_id: &str,
+        event: &NuntiusEvent,
+        report: &ProviderUsageReport,
+    ) -> Result<i64> {
+        let event_payload = serde_json::to_string(event)?;
+        let report_payload = serde_json::to_string(report)?;
+        let received_at = now();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+
+        if let Some(row) = sqlx::query(
+            "SELECT cursor,user_id,device_id,payload FROM event_journal WHERE event_id=?",
+        )
+        .bind(&event.event_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            if row.get::<String, _>("user_id") != user_id
+                || row.get::<String, _>("device_id") != event.device_id
+                || row.get::<String, _>("payload") != event_payload
+            {
+                bail!("provider usage event id reused with different payload");
+            }
+            return Ok(row.get("cursor"));
+        }
+        if sqlx::query_scalar::<_, i64>("SELECT 1 FROM provider_usage_reports WHERE report_id=?")
+            .bind(&report.report_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some()
+        {
+            bail!("provider usage report id reused by a different event");
+        }
+
+        let account = report.account.as_ref();
+        let five_hour = report.windows.five_hour.as_ref();
+        let seven_day = report.windows.seven_day.as_ref();
+        let credits = report.credits.as_ref();
+        sqlx::query(
+            "INSERT INTO provider_usage_reports(
+                report_id,event_id,user_id,device_id,provider,source,status,schema_version,
+                sampled_at,received_at,created_at,external_account_id,account_email,account_plan,
+                account_scope,subscription_started_at,subscription_expires_at,
+                subscription_last_checked_at,credential_expires_at,entitlement_plan,
+                five_hour_window_seconds,five_hour_used_percent,five_hour_used,five_hour_limit,
+                five_hour_remaining,five_hour_resets_at,seven_day_window_seconds,
+                seven_day_used_percent,seven_day_used,seven_day_limit,seven_day_remaining,
+                seven_day_resets_at,credit_balance,reset_credits_available,
+                next_reset_credit_expires_at,warning_code,error_code,payload_json
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(&report.report_id)
+        .bind(&event.event_id)
+        .bind(user_id)
+        .bind(&event.device_id)
+        .bind(report.provider.as_str())
+        .bind(&report.source)
+        .bind(&report.status)
+        .bind(i64::from(report.schema_version))
+        .bind(&report.sampled_at)
+        .bind(&received_at)
+        .bind(&received_at)
+        .bind(account.and_then(|value| value.external_account_id.as_deref()))
+        .bind(account.and_then(|value| value.email.as_deref()))
+        .bind(account.and_then(|value| value.plan.as_deref()))
+        .bind(account.and_then(|value| value.scope.as_deref()))
+        .bind(account.and_then(|value| value.subscription_started_at.as_deref()))
+        .bind(account.and_then(|value| value.subscription_expires_at.as_deref()))
+        .bind(account.and_then(|value| value.subscription_last_checked_at.as_deref()))
+        .bind(account.and_then(|value| value.credential_expires_at.as_deref()))
+        .bind(&report.entitlement_plan)
+        .bind(five_hour.map(|value| value.window_seconds))
+        .bind(five_hour.map(|value| value.used_percent))
+        .bind(five_hour.and_then(|value| value.used))
+        .bind(five_hour.and_then(|value| value.limit))
+        .bind(five_hour.and_then(|value| value.remaining))
+        .bind(five_hour.and_then(|value| value.resets_at.as_deref()))
+        .bind(seven_day.map(|value| value.window_seconds))
+        .bind(seven_day.map(|value| value.used_percent))
+        .bind(seven_day.and_then(|value| value.used))
+        .bind(seven_day.and_then(|value| value.limit))
+        .bind(seven_day.and_then(|value| value.remaining))
+        .bind(seven_day.and_then(|value| value.resets_at.as_deref()))
+        .bind(credits.and_then(|value| value.balance))
+        .bind(credits.and_then(|value| value.reset_credits_available))
+        .bind(credits.and_then(|value| value.next_reset_credit_expires_at.as_deref()))
+        .bind(&report.warning_code)
+        .bind(&report.error_code)
+        .bind(&report_payload)
+        .execute(&mut *tx)
+        .await?;
+        let result = sqlx::query(
+            "INSERT INTO event_journal(event_id,user_id,device_id,event_type,payload,created_at) VALUES(?,?,?,?,?,?)",
+        )
+        .bind(&event.event_id)
+        .bind(user_id)
+        .bind(&event.device_id)
+        .bind(&event.event_type)
+        .bind(&event_payload)
+        .bind(&received_at)
+        .execute(&mut *tx)
+        .await?;
+        let cursor = result.last_insert_rowid();
+        tx.commit().await?;
+        Ok(cursor)
+    }
+
+    pub async fn latest_provider_usage(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ProviderUsageLatestView>> {
+        let rows = sqlx::query(
+            "SELECT r.device_id,d.display_name,r.received_at,r.payload_json
+             FROM provider_usage_reports r
+             JOIN devices d ON d.id=r.device_id
+             WHERE r.user_id=? AND r.report_id=(
+                 SELECT latest.report_id FROM provider_usage_reports latest
+                 WHERE latest.user_id=r.user_id
+                   AND latest.device_id=r.device_id
+                   AND latest.provider=r.provider
+                 ORDER BY latest.received_at DESC,latest.report_id DESC
+                 LIMIT 1
+             )
+             ORDER BY lower(d.display_name),r.provider",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ProviderUsageLatestView {
+                    device_id: row.get("device_id"),
+                    device_display_name: row.get("display_name"),
+                    received_at: row.get("received_at"),
+                    report: serde_json::from_str(&row.get::<String, _>("payload_json"))?,
+                })
+            })
+            .collect()
+    }
+
     pub async fn replay_events(
         &self,
         user_id: &str,
@@ -1845,6 +1986,128 @@ pub fn unix_to_rfc3339(timestamp: i64) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn provider_usage_reports_are_append_only_while_latest_is_projected() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ServerStore::open(temp.path()).await.unwrap();
+        let user = store.create_owner("owner", "test-hash").await.unwrap();
+        assert!(
+            store
+                .latest_provider_usage(&user.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        store
+            .create_pairing_code(&user.id, "pair-hash", 10)
+            .await
+            .unwrap();
+        let device_id = store
+            .pair_device(
+                &PairDeviceRequest {
+                    code: "unused".into(),
+                    display_name: "Studio Mac".into(),
+                    public_key: "key".into(),
+                    agent_version: "test".into(),
+                    os_family: "test".into(),
+                    architecture: "test".into(),
+                },
+                "pair-hash",
+            )
+            .await
+            .unwrap();
+
+        let make_report =
+            |report_id: &str, used_percent: f64, sampled_at: &str| ProviderUsageReport {
+                schema_version: 1,
+                report_id: report_id.into(),
+                provider: AgentProvider::Codex,
+                sampled_at: sampled_at.into(),
+                source: "oauth".into(),
+                status: "ok".into(),
+                account: Some(ProviderUsageAccount {
+                    email: Some("owner@example.com".into()),
+                    plan: Some("plus".into()),
+                    ..ProviderUsageAccount::default()
+                }),
+                entitlement_plan: Some("plus".into()),
+                windows: ProviderUsageWindows {
+                    five_hour: Some(ProviderQuotaWindow {
+                        window_seconds: 18_000,
+                        used_percent,
+                        used: None,
+                        limit: None,
+                        remaining: None,
+                        resets_at: None,
+                    }),
+                    seven_day: None,
+                },
+                credits: None,
+                warning_code: None,
+                error_code: None,
+            };
+        let make_event = |event_id: &str, seq: i64, report: &ProviderUsageReport| NuntiusEvent {
+            event_id: event_id.into(),
+            user_id: None,
+            device_id: device_id.clone(),
+            project_id: None,
+            thread_id: None,
+            turn_id: None,
+            stream_id: format!("device:{device_id}:provider-usage"),
+            seq,
+            event_type: "provider.usage.reported".into(),
+            durability: "durable".into(),
+            occurred_at: report.sampled_at.clone(),
+            payload: serde_json::to_value(report).unwrap(),
+        };
+
+        let first = make_report("pur_01", 20.0, "2026-07-22T00:00:00Z");
+        let first_event = make_event("evt_01", 1, &first);
+        let first_cursor = store
+            .ingest_provider_usage_report(&user.id, &first_event, &first)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .ingest_provider_usage_report(&user.id, &first_event, &first)
+                .await
+                .unwrap(),
+            first_cursor
+        );
+
+        let second = make_report("pur_02", 55.0, "2026-07-22T01:00:00Z");
+        let second_event = make_event("evt_02", 2, &second);
+        store
+            .ingest_provider_usage_report(&user.id, &second_event, &second)
+            .await
+            .unwrap();
+
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_usage_reports WHERE user_id=? AND device_id=?",
+        )
+        .bind(&user.id)
+        .bind(&device_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(stored, 2);
+        let latest = store.latest_provider_usage(&user.id).await.unwrap();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].device_display_name, "Studio Mac");
+        assert_eq!(latest[0].report.report_id, "pur_02");
+        assert_eq!(
+            latest[0]
+                .report
+                .windows
+                .five_hour
+                .as_ref()
+                .unwrap()
+                .used_percent,
+            55.0
+        );
+    }
 
     #[tokio::test]
     async fn web_session_survives_store_reopen() {

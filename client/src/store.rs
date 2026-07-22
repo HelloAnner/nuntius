@@ -134,9 +134,9 @@ impl ClientStore {
             .bind(&stamp)
             .execute(&mut *tx)
             .await?;
-        // Archive expresses an idempotent desired state, so it is safe to run again after
-        // a process restart. Other applying commands retain the conservative unknown state.
-        sqlx::query("UPDATE command_inbox SET status='accepted',started_at=NULL,completed_at=NULL,error_code=NULL,error_message=NULL WHERE status='applying' AND json_extract(payload,'$.command.kind')='thread_archive'")
+        // Archive and provider usage refresh are safe to run again after a process restart.
+        // Other applying commands retain the conservative unknown state.
+        sqlx::query("UPDATE command_inbox SET status='accepted',started_at=NULL,completed_at=NULL,error_code=NULL,error_message=NULL WHERE status='applying' AND json_extract(payload,'$.command.kind') IN ('thread_archive','provider_usage_refresh')")
             .execute(&mut *tx)
             .await?;
         // Keep active projections for threads that will be reattached below. Orphaned
@@ -3489,6 +3489,27 @@ mod tests {
         assert_eq!(
             store
                 .inbox("cmd_retryable_archive")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "accepted"
+        );
+
+        let retryable_usage = DeviceCommand {
+            command_id: "cmd_retryable_usage".into(),
+            command: DeviceCommandKind::ProviderUsageRefresh,
+            ..command.clone()
+        };
+        store
+            .receive_command("epoch_test", 4, "device:dev_test", 3, &retryable_usage)
+            .await
+            .unwrap();
+        assert!(store.start_command("cmd_retryable_usage").await.unwrap());
+        store.recover_process_state().await.unwrap();
+        assert_eq!(
+            store
+                .inbox("cmd_retryable_usage")
                 .await
                 .unwrap()
                 .unwrap()

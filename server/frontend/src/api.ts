@@ -12,6 +12,8 @@ import {
   type HistoryTurnView,
   type PairingCodeView,
   type ProjectSummary,
+  type ProviderUsageLatestView,
+  type ProviderUsageRefreshResponse,
   type ServerInfo,
   type SyncSnapshot,
   type ThreadSummary,
@@ -137,6 +139,9 @@ export const api = {
   renameDevice: (deviceId: string, displayName: string) =>
     req<DeviceSummary>("PATCH", `/devices/${deviceId}`, { displayName }),
   revokeDevice: (deviceId: string) => req<void>("DELETE", `/devices/${deviceId}`),
+  providerUsage: () => req<ProviderUsageLatestView[]>("GET", "/provider-usage"),
+  refreshAllProviderUsage: () =>
+    req<ProviderUsageRefreshResponse>("POST", "/provider-usage"),
 
   projects: (deviceId: string) =>
     req<ProjectSummary[]>("GET", `/devices/${deviceId}/projects`),
