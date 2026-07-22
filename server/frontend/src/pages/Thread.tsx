@@ -33,6 +33,7 @@ import { liveStore, useAccessMode, useApprovals, useThreadLive } from "../stores
 import { ProviderBadge, StatusDot, ThreadListItem, TopBar, threadTone } from "../components";
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
 import { ThreadSwitcher } from "../sheets/ThreadSwitcher";
+import { threadRouteForContext, type ThreadNavigationContext } from "../threadNavigation";
 import {
   THREAD_SIDEBAR_DEFAULT_WIDTH,
   clampThreadSidebarWidth,
@@ -64,7 +65,7 @@ export function ThreadPage({
   deviceId: string;
   projectId: string;
   threadId: string;
-  navigationContext?: "project" | "recents";
+  navigationContext?: ThreadNavigationContext;
 }) {
   const toast = useToast();
   const qc = useQueryClient();
@@ -474,12 +475,12 @@ export function ThreadPage({
       open={creating}
       onClose={() => setCreating(false)}
       onCreated={(createdThreadId, createdDeviceId, createdProjectId) =>
-        navigate({
-          name: "thread",
-          deviceId: createdDeviceId,
-          projectId: createdProjectId,
-          threadId: createdThreadId,
-        })
+        navigate(threadRouteForContext(
+          navigationContext,
+          createdThreadId,
+          createdDeviceId,
+          createdProjectId,
+        ))
       }
     />
   ) : null;

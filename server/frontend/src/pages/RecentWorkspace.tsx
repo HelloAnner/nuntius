@@ -11,6 +11,7 @@ import {
   selectRecentWorkspaceThread,
 } from "../recentWorkspace";
 import { useSession } from "../stores";
+import { threadRouteForContext } from "../threadNavigation";
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
 import { RecentsPage } from "./Recents";
 import { ThreadPage } from "./Thread";
@@ -148,8 +149,11 @@ function EmptyRecentWorkspace({
       <NewThreadSheet
         open={creating}
         onClose={() => setCreating(false)}
-        onCreated={(threadId) =>
-          navigate({ name: "recentThread", threadId }, { replace: true })
+        onCreated={(threadId, deviceId, projectId) =>
+          navigate(
+            threadRouteForContext("recents", threadId, deviceId, projectId),
+            { replace: true },
+          )
         }
       />
     </div>

@@ -25,6 +25,7 @@ import {
   type RecentFilterPreferences,
 } from "../recentsFilters";
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
+import { threadRouteForContext } from "../threadNavigation";
 
 type SessionGroup = { key: string; label: string; threads: ThreadSummary[] };
 
@@ -275,7 +276,9 @@ export function RecentsPage() {
         initialProjectId={newThreadScope.projectId}
         open={creating}
         onClose={() => setCreating(false)}
-        onCreated={(threadId, deviceId, projectId) => navigate({ name: "thread", deviceId, projectId, threadId })}
+        onCreated={(threadId, deviceId, projectId) =>
+          navigate(threadRouteForContext("recents", threadId, deviceId, projectId))
+        }
       />
       <RenameThreadSheet
         thread={renamingThread}
