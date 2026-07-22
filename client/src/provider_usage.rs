@@ -169,7 +169,7 @@ async fn collect_openai(client: &Client) -> ProviderUsageReport {
         .and_then(openai_window);
     let balance = credits_value
         .and_then(|value| value.get("balance"))
-        .and_then(number);
+        .and_then(|value| number(Some(value)));
     let reset_result = fetch_reset_credits(client, &base_url, &credentials).await;
     let (reset_credits_available, next_reset_credit_expires_at, warning_code) = match reset_result {
         Ok((available, expires)) => (Some(available), expires, None),
@@ -510,7 +510,9 @@ fn first_kimi_limit(value: Option<&Value>) -> Option<&Value> {
     limits
         .iter()
         .find(|item| {
-            item.pointer("/window/duration").and_then(number) == Some(5.0)
+            item.pointer("/window/duration")
+                .and_then(|value| number(Some(value)))
+                == Some(5.0)
                 && item
                     .pointer("/window/timeUnit")
                     .and_then(Value::as_str)
@@ -728,19 +730,15 @@ fn jwt_payload(token: Option<&str>) -> Value {
 }
 
 fn account_present(account: ProviderUsageAccount) -> Option<ProviderUsageAccount> {
-    [
-        account.external_account_id.as_ref(),
-        account.email.as_ref(),
-        account.plan.as_ref(),
-        account.scope.as_ref(),
-        account.subscription_started_at.as_ref(),
-        account.subscription_expires_at.as_ref(),
-        account.subscription_last_checked_at.as_ref(),
-        account.credential_expires_at.as_ref(),
-    ]
-    .into_iter()
-    .any(|value| value.is_some())
-    .then_some(account)
+    let present = account.external_account_id.is_some()
+        || account.email.is_some()
+        || account.plan.is_some()
+        || account.scope.is_some()
+        || account.subscription_started_at.is_some()
+        || account.subscription_expires_at.is_some()
+        || account.subscription_last_checked_at.is_some()
+        || account.credential_expires_at.is_some();
+    present.then_some(account)
 }
 
 fn normalized_datetime(value: Option<&Value>) -> Option<String> {

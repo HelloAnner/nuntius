@@ -167,7 +167,7 @@ struct AppSessionHandle {
 }
 
 impl AppServerRuntime {
-    pub fn new(config: Arc<ClientConfig>) -> Result<Self> {
+    pub fn new(_config: Arc<ClientConfig>) -> Result<Self> {
         let (notifications, _) = broadcast::channel(4096);
         #[cfg(unix)]
         let mode = {
@@ -181,7 +181,7 @@ impl AppServerRuntime {
             }
         };
         #[cfg(not(unix))]
-        let mode = AppServerMode::Local(AppServerProcess::new(config));
+        let mode = AppServerMode::Local(AppServerProcess::new(_config));
         Ok(Self {
             mode: Arc::new(mode),
             notifications,

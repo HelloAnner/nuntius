@@ -10,11 +10,12 @@ use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde::Serialize;
 use serde_json::{Value, json};
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::process::Stdio;
 use std::{
     collections::VecDeque,
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
-    process::Stdio,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},

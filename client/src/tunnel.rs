@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
