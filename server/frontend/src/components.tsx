@@ -137,10 +137,13 @@ export function NavRail() {
   const { route, navigate } = useRoute();
   const loginName = useSession((state) => state.session?.loginName ?? "用户");
   const pending = usePendingApprovalCount();
+  const openRecents = () => {
+    if (route.name !== "recentThread") navigate({ name: "recents" });
+  };
   return (
     <nav className="navrail" aria-label="主导航">
       <div className="rail-top">
-        <button className="rail-brand" onClick={() => navigate({ name: "recents" })}>
+        <button className="rail-brand" onClick={openRecents}>
           <span className="rail-mark">N</span>
           <span>Nuntius</span>
         </button>
@@ -151,7 +154,7 @@ export function NavRail() {
               <button
                 key={tab.label}
                 className={`rail-btn${active ? " on" : ""}`}
-                onClick={() => navigate(tab.route)}
+                onClick={() => tab.route.name === "recents" ? openRecents() : navigate(tab.route)}
                 aria-current={active ? "page" : undefined}
               >
                 <span className="tab-icon">

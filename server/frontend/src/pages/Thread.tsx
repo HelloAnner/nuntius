@@ -574,28 +574,20 @@ export function ThreadPage({
             onDoubleClick={resetSidebarWidth}
           />
           <div className="thread-sidebar-scroll">
-            <button
-              className="thread-sidebar-context"
-              onClick={() =>
-                navigate(
-                  fromRecents
-                    ? { name: "recents" }
-                    : { name: "project", deviceId, projectId },
-                )
-              }
-            >
-              {fromRecents ? (
-                <>
-                  <strong>最近会话</strong>
-                  <span>运行中优先 · 按创建时间排序</span>
-                </>
-              ) : (
-                <>
-                  <strong>{project?.displayName ?? "项目"}</strong>
-                  <span>{device?.displayName ?? "设备"}{project?.pathHint ? ` · ${project.pathHint}` : ""}</span>
-                </>
-              )}
-            </button>
+            {fromRecents ? (
+              <header className="thread-sidebar-context static">
+                <strong>最近会话</strong>
+                <span>运行中优先 · 按创建时间排序</span>
+              </header>
+            ) : (
+              <button
+                className="thread-sidebar-context"
+                onClick={() => navigate({ name: "project", deviceId, projectId })}
+              >
+                <strong>{project?.displayName ?? "项目"}</strong>
+                <span>{device?.displayName ?? "设备"}{project?.pathHint ? ` · ${project.pathHint}` : ""}</span>
+              </button>
+            )}
             {sidebarLoading ? (
               <div className="detail-list-state"><Spinner /></div>
             ) : sidebarThreads.length === 0 ? (

@@ -1,7 +1,7 @@
 /* App shell: auth gate, SSE lifecycle, routing, responsive chrome. */
 import { useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Spinner, ToastHost, useTheme, type ThreadSummary } from "@nuntius/shared";
+import { Spinner, ToastHost, useTheme } from "@nuntius/shared";
 import { api, setCsrfProvider, ApiError } from "./api";
 import { startEvents } from "./events";
 import { useArchiveOutboxRunner } from "./archiveOutbox";
@@ -13,7 +13,7 @@ import { DevicePage } from "./pages/Device";
 import { ProjectPage } from "./pages/Project";
 import { ProjectsPage } from "./pages/Projects";
 import { ThreadPage } from "./pages/Thread";
-import { RecentsPage } from "./pages/Recents";
+import { RecentsEntryRoute, RecentThreadRoute } from "./pages/RecentWorkspace";
 import { ApprovalsPage } from "./pages/Approvals";
 import { SettingsPage } from "./pages/Settings";
 
@@ -85,7 +85,7 @@ function RouterView() {
     case "devices":
       return <DevicesPage />;
     case "recents":
-      return <RecentsPage />;
+      return <RecentsEntryRoute />;
     case "projects":
       return <ProjectsPage />;
     case "recentThread":
@@ -110,38 +110,6 @@ function RouterView() {
         />
       );
   }
-}
-
-function RecentThreadRoute({ threadId }: { threadId: string }) {
-  const navigate = useRoute((state) => state.navigate);
-  const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
-  const snapshot = useQuery<ThreadSummary | undefined>({
-    queryKey: ["threadSnapshot", threadId],
-    queryFn: async () => undefined,
-    enabled: false,
-  });
-  const thread = threads.data?.find((item) => item.id === threadId) ?? snapshot.data;
-
-  useEffect(() => {
-    if (threads.isSuccess && !thread) navigate({ name: "recents" }, { replace: true });
-  }, [navigate, thread, threads.isSuccess]);
-
-  if (!thread) {
-    return (
-      <div className="page boot-screen">
-        <Spinner />
-      </div>
-    );
-  }
-
-  return (
-    <ThreadPage
-      navigationContext="recents"
-      deviceId={thread.deviceId}
-      projectId={thread.projectId}
-      threadId={thread.id}
-    />
-  );
 }
 
 export function App() {
