@@ -34,6 +34,7 @@ import { ProviderBadge, StatusDot, ThreadListItem, TopBar, threadTone } from "..
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
 import { ThreadSwitcher } from "../sheets/ThreadSwitcher";
 import { threadRouteForContext, type ThreadNavigationContext } from "../threadNavigation";
+import { recentThreadDisplayTimestamp } from "../recentWorkspace";
 import {
   THREAD_SIDEBAR_DEFAULT_WIDTH,
   clampThreadSidebarWidth,
@@ -674,7 +675,7 @@ function ThreadSidebarGroup({
             contextDevice={context?.device}
             contextProject={context?.project}
             contextBelow={Boolean(context)}
-            timestamp={context ? thread.createdAt : undefined}
+            timestamp={context ? recentThreadDisplayTimestamp(thread) : undefined}
             onClick={() => onSelect(thread)}
           />
         );

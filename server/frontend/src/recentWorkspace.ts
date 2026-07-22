@@ -2,6 +2,7 @@ import { compareThreadStatusCreation, type ThreadSummary } from "@nuntius/shared
 
 type PreferenceStorage = Pick<Storage, "getItem" | "setItem">;
 type RecentThreadCandidate = Pick<ThreadSummary, "id" | "status" | "createdAt" | "archived">;
+type RecentThreadTimestamp = Pick<ThreadSummary, "createdAt" | "lastActivityAt">;
 
 const STORAGE_KEY = "nuntius:last-recent-thread:v1";
 const MAX_THREAD_ID_LENGTH = 512;
@@ -41,4 +42,8 @@ export function selectRecentWorkspaceThread<T extends RecentThreadCandidate>(
     ? available.find((thread) => thread.id === lastThreadId)
     : undefined;
   return remembered ?? [...available].sort(compareThreadStatusCreation)[0] ?? null;
+}
+
+export function recentThreadDisplayTimestamp(thread: RecentThreadTimestamp): string | null {
+  return thread.lastActivityAt ?? thread.createdAt;
 }

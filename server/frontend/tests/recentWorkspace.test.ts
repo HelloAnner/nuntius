@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   loadLastRecentThreadId,
+  recentThreadDisplayTimestamp,
   saveLastRecentThreadId,
   selectRecentWorkspaceThread,
 } from "../src/recentWorkspace";
@@ -22,7 +23,8 @@ const thread = (
   status: string,
   createdAt: string,
   archived = false,
-) => ({ id, status, createdAt, archived });
+  lastActivityAt: string | null = null,
+) => ({ id, status, createdAt, archived, lastActivityAt });
 
 describe("recent workspace selection", () => {
   test("restores the last valid thread before applying the fallback ordering", () => {
@@ -42,6 +44,24 @@ describe("recent workspace selection", () => {
     ];
 
     expect(selectRecentWorkspaceThread(threads, null)?.id).toBe("running-new");
+  });
+
+  test("sorts by creation time even when an older thread has newer message activity", () => {
+    const threads = [
+      thread("created-new", "idle", "2026-07-22T10:00:00Z", false, "2026-07-22T10:01:00Z"),
+      thread("active-new", "idle", "2026-07-21T10:00:00Z", false, "2026-07-22T12:00:00Z"),
+    ];
+
+    expect(selectRecentWorkspaceThread(threads, null)?.id).toBe("created-new");
+  });
+
+  test("displays the latest message activity while falling back to creation time", () => {
+    expect(recentThreadDisplayTimestamp(
+      thread("active", "idle", "2026-07-20T10:00:00Z", false, "2026-07-22T12:00:00Z"),
+    )).toBe("2026-07-22T12:00:00Z");
+    expect(recentThreadDisplayTimestamp(
+      thread("never-used", "idle", "2026-07-20T10:00:00Z"),
+    )).toBe("2026-07-20T10:00:00Z");
   });
 
   test("skips archived threads and pending archive intents", () => {
