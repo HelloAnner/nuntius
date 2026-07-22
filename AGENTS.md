@@ -40,7 +40,6 @@ cargo test --workspace
 - 每一个独立的大功能开发完成后，不需要等待用户再次提醒，立即创建一个语义清晰的 Git commit，并自动 push 到当前分支对应的远端；当前分支尚无 upstream 时，设置并 push 到 `origin` 的同名分支。云端流水线负责构建与完整验证。
 - commit 只包含该功能范围内的代码、测试、生成物和文档。工作区中用户已有或与本功能无关的改动必须保留，不得顺带提交、覆盖或丢弃。
 - 修改 Rust 源码时，commit 前必须使用 Ops 同版本工具链对受影响 crate 运行 `cargo +1.94.0 check -p <package> --all-targets`，至少覆盖类型检查、借用检查和测试目标编译；默认 toolchain 可能低于 SQLx 0.9 的 MSRV，不能用裸 `cargo check` 代替。`cargo check` 在本仓库视为必要的轻量静态检查，不属于正式构建。仍不要运行或等待 `cargo build`、`cargo test` 等正式构建或完整测试命令。
-- 普通 main push 不会触发 `.github/workflows/build-binaries.yml`；本机已配置 `nuntius-ops` 时，它才是 main 的实际构建与部署验证器。push 后必须运行 `nuntius-ops status`，确认 `observedSha` 已到达本次 commit，并持续跟踪到 `deployedSha` 等于本次 commit 或 `phase=failed`。
-- 不得在仅确认远端收到 commit 后就报告功能完成。Ops 失败时，读取 `lastError`，修复、提交并 push，然后继续跟踪新 SHA；如果本机没有 Ops 或状态无法读取，明确报告验证未闭环及原因。
-- push 后确认远端已包含该 commit；如果 CI 会被触发，应提供 commit、分支或 CI 链接。push 失败时保留本地 commit，并明确报告失败原因。
+- 代码 commit 并 push 到 `origin/main`，且确认远端已包含该 commit 后，即可结束当前任务并报告完成；不需要运行或等待 `nuntius-ops status`、二进制构建、部署结果或其他云端验证。
+- push 失败时保留本地 commit，并明确报告失败原因。
 - 用户明确要求暂不 commit、暂不 push 或采用其他 Git 流程时，以用户当次要求为准。密钥、令牌、生产配置和其他敏感信息始终不得进入 commit。
