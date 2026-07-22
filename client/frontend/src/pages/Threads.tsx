@@ -1,24 +1,30 @@
 /* All local threads, newest creation first. */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Empty,
   IconArchive,
   IconClock,
   Spinner,
+  RenameThreadSheet,
   SwipeActionRow,
   compareThreadCreation,
+  type ThreadSummary,
 } from "@nuntius/shared";
 import { api } from "../api";
-import { useArchiveThreadAction } from "../hooks";
+import { useArchiveThreadAction, useRenameThreadAction } from "../hooks";
 import { ConnIndicator, ThreadRowLink, TopBar } from "../components";
 
 export function ThreadsPage() {
   const { archive, busyIds } = useArchiveThreadAction();
+  const renameThread = useRenameThreadAction();
+  const [renamingThread, setRenamingThread] = useState<ThreadSummary | null>(null);
   const threads = useQuery({ queryKey: ["threads"], queryFn: api.threads });
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
 
   const projectName = (id: string) => projects.data?.find((p) => p.id === id)?.displayName ?? "";
+  const canArchive = (thread: ThreadSummary) =>
+    projects.data?.find((project) => project.id === thread.projectId)?.kind === "workspace";
   const list = useMemo(
     () => [...(threads.data ?? [])]
       .filter((thread) => !busyIds.has(thread.id))
@@ -48,15 +54,27 @@ export function ThreadsPage() {
                   icon={<IconArchive size={18} />}
                   label="归档"
                   busy={busyIds.has(t.id)}
+                  disabled={!canArchive(t)}
                   onAction={() => archive(t.id)}
                 >
-                  <ThreadRowLink thread={t} context={projectName(t.projectId)} />
+                  <ThreadRowLink
+                    thread={t}
+                    context={projectName(t.projectId)}
+                    onRename={() => setRenamingThread(t)}
+                    onArchive={canArchive(t) ? () => archive(t.id) : undefined}
+                  />
                 </SwipeActionRow>
               ))}
             </div>
           )}
         </div>
       </div>
+      <RenameThreadSheet
+        thread={renamingThread}
+        open={renamingThread !== null}
+        onClose={() => setRenamingThread(null)}
+        onRename={(title) => renamingThread ? renameThread(renamingThread, title) : Promise.resolve()}
+      />
     </div>
   );
 }

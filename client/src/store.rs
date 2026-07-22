@@ -394,10 +394,31 @@ impl ClientStore {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<ThreadSummary>> {
+        self.list_threads_page_filtered(device_id, project_id, false, limit, offset)
+            .await
+    }
+    pub async fn list_threads_page_including_archived(
+        &self,
+        device_id: &str,
+        project_id: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ThreadSummary>> {
+        self.list_threads_page_filtered(device_id, project_id, true, limit, offset)
+            .await
+    }
+    async fn list_threads_page_filtered(
+        &self,
+        device_id: &str,
+        project_id: Option<&str>,
+        include_archived: bool,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ThreadSummary>> {
         let rows = if let Some(project) = project_id {
-            sqlx::query("SELECT * FROM threads WHERE project_id=? AND archived=0 ORDER BY julianday(created_at) DESC,id DESC LIMIT ? OFFSET ?").bind(project).bind(limit).bind(offset).fetch_all(&self.pool).await?
+            sqlx::query("SELECT * FROM threads WHERE project_id=? AND (? OR archived=0) ORDER BY julianday(created_at) DESC,id DESC LIMIT ? OFFSET ?").bind(project).bind(include_archived).bind(limit).bind(offset).fetch_all(&self.pool).await?
         } else {
-            sqlx::query("SELECT * FROM threads WHERE archived=0 ORDER BY julianday(created_at) DESC,id DESC LIMIT ? OFFSET ?").bind(limit).bind(offset).fetch_all(&self.pool).await?
+            sqlx::query("SELECT * FROM threads WHERE (? OR archived=0) ORDER BY julianday(created_at) DESC,id DESC LIMIT ? OFFSET ?").bind(include_archived).bind(limit).bind(offset).fetch_all(&self.pool).await?
         };
         Ok(rows
             .into_iter()
@@ -513,6 +534,15 @@ impl ClientStore {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+    pub async fn set_thread_display_title(&self, id: &str, title: Option<&str>) -> Result<bool> {
+        let updated = sqlx::query("UPDATE threads SET display_title_override=?,title_revision=title_revision+1 WHERE id=? AND display_title_override IS NOT ?")
+            .bind(title)
+            .bind(id)
+            .bind(title)
+            .execute(&self.pool)
+            .await?;
+        Ok(updated.rows_affected() == 1)
     }
     /// App-server turn id of the thread's currently active turn, if any.
     pub async fn active_app_turn_id(&self, thread_id: &str) -> Result<Option<String>> {
@@ -2140,13 +2170,19 @@ fn thread_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ThreadSummary
         Some(value) if value >= updated_at => value,
         _ => updated_at,
     };
+    let display_title_override = r.get::<Option<String>, _>("display_title_override");
+    let title = display_title_override
+        .clone()
+        .unwrap_or_else(|| r.get("title"));
     ThreadSummary {
         id: r.get("id"),
         device_id: device_id.into(),
         project_id: r.get("project_id"),
         provider: provider_from_str(&r.get::<String, _>("provider")),
         app_server_thread_id: r.get("app_server_thread_id"),
-        title: r.get("title"),
+        title,
+        display_title_override,
+        title_revision: r.get("title_revision"),
         status: r.get("status"),
         archived: r.get("archived"),
         history_completeness: HistoryCompleteness::Complete,
@@ -2299,6 +2335,82 @@ fn history_payload_hash(records: &[HistoryRecord]) -> Result<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn display_title_survives_provider_refresh_and_can_be_reset() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_title", "Workspace", &workspace, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_provider_thread(
+                "thr_title",
+                "prj_title",
+                AgentProvider::Codex,
+                "app_title",
+                "Provider title",
+                ConversationAccessMode::Full,
+                &json!({}),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .set_thread_display_title("thr_title", Some("My display title"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .set_thread_display_title("thr_title", Some("My display title"))
+                .await
+                .unwrap()
+        );
+        store
+            .update_imported_thread(
+                "thr_title",
+                &json!({
+                    "id": "app_title",
+                    "name": "Provider title changed",
+                    "status": "idle",
+                    "updatedAt": "2026-07-22T00:00:00Z"
+                }),
+            )
+            .await
+            .unwrap();
+
+        let renamed = store
+            .thread("thr_title", "dev_test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.title, "My display title");
+        assert_eq!(
+            renamed.display_title_override.as_deref(),
+            Some("My display title")
+        );
+        assert_eq!(renamed.title_revision, 1);
+
+        assert!(
+            store
+                .set_thread_display_title("thr_title", None)
+                .await
+                .unwrap()
+        );
+        let reset = store
+            .thread("thr_title", "dev_test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reset.title, "Provider title changed");
+        assert_eq!(reset.display_title_override, None);
+        assert_eq!(reset.title_revision, 2);
+    }
 
     #[tokio::test]
     async fn pi_provider_is_accepted_by_all_provider_constraints() {

@@ -1,8 +1,9 @@
 /* misc hooks */
 import { useCallback, useSyncExternalStore } from "react";
-import { useQueries, useQueryClient } from "@tanstack/react-query";
-import { useToast, type ThreadSummary } from "@nuntius/shared";
+import { useQueries, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { newIdemKey, useToast, type ThreadSummary } from "@nuntius/shared";
 import { api } from "./api";
+import { trackCommand } from "./events";
 import {
   queueArchive,
   submitArchive,
@@ -53,6 +54,50 @@ export function projectNameFrom(
   projectId: string,
 ): string {
   return names.get(`${deviceId}:${projectId}`) ?? "项目";
+}
+
+function replaceThreadInCaches(qc: QueryClient, thread: ThreadSummary) {
+  const replace = (items: ThreadSummary[] | undefined) =>
+    items?.map((item) => (item.id === thread.id ? thread : item));
+  qc.setQueriesData<ThreadSummary[]>({ queryKey: ["projectThreads"] }, replace);
+  qc.setQueryData<ThreadSummary[]>(["allThreads"], replace);
+  qc.setQueryData<ThreadSummary>(["threadSnapshot", thread.id], thread);
+}
+
+export function useRenameThreadAction() {
+  const qc = useQueryClient();
+  const toast = useToast();
+
+  return useCallback(
+    async (thread: ThreadSummary, title: string | null) => {
+      if (title !== null) {
+        replaceThreadInCaches(qc, {
+          ...thread,
+          title,
+          displayTitleOverride: title,
+          titleRevision: thread.titleRevision + 1,
+        });
+      }
+      try {
+        const receipt = await api.renameThread(thread.id, title, newIdemKey());
+        trackCommand(qc, receipt.commandId, thread.id, "thread.rename");
+        toast(
+          receipt.status === "waiting_device"
+            ? "名称已保存，等待设备上线后同步"
+            : title === null
+              ? "正在恢复自动标题"
+              : "会话名称已更新",
+        );
+      } catch (error) {
+        replaceThreadInCaches(qc, thread);
+        void qc.invalidateQueries({ queryKey: ["projectThreads"] });
+        void qc.invalidateQueries({ queryKey: ["allThreads"] });
+        toast(error instanceof Error ? error.message : "重命名失败，请重试", { error: true });
+        throw error;
+      }
+    },
+    [qc, toast],
+  );
 }
 
 export function useArchiveThreadAction() {

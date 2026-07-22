@@ -105,7 +105,18 @@ paths:
       parameters:
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
         - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}}
+        - {name: includeArchived, in: query, schema: {type: boolean, default: false}}
       responses: {'200': {description: 本机全部已发现会话（包含未归类历史）, content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Thread'}}}}}}
+  /threads/{threadId}:
+    parameters: [{$ref: '#/components/parameters/ThreadId'}]
+    patch:
+      operationId: renameLocalThread
+      description: 设置 Nuntius 显示标题；传 null 恢复代理或首条消息产生的自动标题，不回写 provider。
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RenameThread'}}}}
+      responses:
+        '200': {description: 显示标题已更新, content: {application/json: {schema: {type: object, required: [threadId, title, thread], properties: {threadId: {type: string}, title: {type: string}, thread: {$ref: '#/components/schemas/Thread'}}}}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /threads/{threadId}/history:
     get:
       operationId: getLocalThreadHistory
@@ -205,7 +216,7 @@ components:
         lastActivityAt: {type: [string, 'null'], format: date-time}
     Thread:
       type: object
-      required: [id, deviceId, projectId, provider, title, status, archived, historyCompleteness, createdAt]
+      required: [id, deviceId, projectId, provider, title, displayTitleOverride, titleRevision, status, archived, historyCompleteness, createdAt]
       properties:
         id: {type: string}
         deviceId: {type: string}
@@ -213,6 +224,8 @@ components:
         provider: {enum: [codex, kimi, pi], default: codex}
         appServerThreadId: {type: [string, 'null']}
         title: {type: string}
+        displayTitleOverride: {type: [string, 'null']}
+        titleRevision: {type: integer, minimum: 0}
         status: {type: string}
         archived: {type: boolean}
         historyCompleteness: {enum: [not_started, backfilling, complete, partial, error]}
@@ -234,6 +247,11 @@ components:
         provider: {enum: [codex, kimi, pi], default: codex}
         accessMode: {enum: [full, ask], default: full}
         options: {type: object, additionalProperties: true}
+    RenameThread:
+      type: object
+      required: [title]
+      properties:
+        title: {type: [string, 'null'], minLength: 1, maxLength: 256, description: null 表示恢复自动标题}
     StartTurn:
       type: object
       required: [text]

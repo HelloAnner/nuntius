@@ -174,6 +174,8 @@ export interface ThreadSummary {
   provider: AgentProvider;
   appServerThreadId: string | null;
   title: string;
+  displayTitleOverride: string | null;
+  titleRevision: number;
   status: string;
   archived: boolean;
   historyCompleteness: HistoryCompleteness;

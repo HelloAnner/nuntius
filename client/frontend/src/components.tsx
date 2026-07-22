@@ -1,14 +1,17 @@
 /* App chrome: top bar, tabs, nav rail, list rows. */
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ConnPill,
   IconChat,
+  IconArchive,
   IconChevronLeft,
   IconChevronRight,
   IconClock,
   IconDevice,
+  IconEdit,
   IconFolder,
   IconGit,
+  IconMore,
   IconShield,
   isRunningStatus,
   relTime,
@@ -181,10 +184,14 @@ export function ThreadRow({
   thread,
   context,
   onClick,
+  onRename,
+  onArchive,
 }: {
   thread: ThreadSummary;
   context?: string;
   onClick: () => void;
+  onRename?: () => void;
+  onArchive?: () => void;
 }) {
   const active = isRunningStatus(thread.status);
   const secondaryStatus =
@@ -192,38 +199,107 @@ export function ThreadRow({
       ? statusLabel(thread.status)
       : null;
   const details = [context, providerLabel(thread.provider), thread.archived ? "已归档" : secondaryStatus].filter(Boolean) as string[];
+  const hasActions = Boolean(onRename || onArchive);
   return (
-    <button className="list-row" onClick={onClick}>
-      <span className={`row-glyph thread${thread.archived ? " muted" : ""}`}>
-        <IconChat size={16} />
-      </span>
-      <div className="grow">
-        <div className="title" style={thread.archived ? { color: "var(--ink-3)" } : undefined}>
-          {thread.title || "未命名会话"}
-        </div>
-        {details.length ? (
-          <div className="sub">
-            {details.map((detail) => <span className="ellipsis" key={detail}>{detail}</span>)}
-          </div>
-        ) : null}
-      </div>
-      <div className="trailing">
-        {active ? <span className="live-dot" aria-label="进行中" /> : null}
-        <span className="num" style={{ fontSize: 12 }}>
-          {relTime(thread.lastActivityAt)}
+    <div className={`thread-row-shell${hasActions ? " has-actions" : ""}`}>
+      <button className="list-row" onClick={onClick}>
+        <span className={`row-glyph thread${thread.archived ? " muted" : ""}`}>
+          <IconChat size={16} />
         </span>
-        <IconChevronRight size={16} />
-      </div>
-    </button>
+        <div className="grow">
+          <div className="title" style={thread.archived ? { color: "var(--ink-3)" } : undefined}>
+            {thread.title || "未命名会话"}
+          </div>
+          {details.length ? (
+            <div className="sub">
+              {details.map((detail) => <span className="ellipsis" key={detail}>{detail}</span>)}
+            </div>
+          ) : null}
+        </div>
+        <div className="trailing">
+          {active ? <span className="live-dot" aria-label="进行中" /> : null}
+          <span className="num" style={{ fontSize: 12 }}>
+            {relTime(thread.lastActivityAt)}
+          </span>
+          {!hasActions ? <IconChevronRight size={16} /> : null}
+        </div>
+      </button>
+      <ThreadRowActions
+        label={`“${thread.title || "未命名会话"}”的会话操作`}
+        onRename={onRename}
+        onArchive={onArchive}
+      />
+    </div>
   );
 }
 
-export function ThreadRowLink({ thread, context }: { thread: ThreadSummary; context?: string }) {
+function ThreadRowActions({
+  label,
+  onRename,
+  onArchive,
+}: {
+  label: string;
+  onRename?: () => void;
+  onArchive?: () => void;
+}) {
+  const root = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [open]);
+  if (!onRename && !onArchive) return null;
+  return (
+    <div ref={root} className="thread-row-actions">
+      <button
+        type="button"
+        className="thread-row-more"
+        onClick={() => setOpen((value) => !value)}
+        aria-label={label}
+        aria-expanded={open}
+      >
+        <IconMore size={17} />
+      </button>
+      {open ? (
+        <div className="thread-row-menu" role="menu">
+          {onRename ? (
+            <button type="button" role="menuitem" onClick={() => { setOpen(false); onRename(); }}>
+              <IconEdit size={14} />重命名
+            </button>
+          ) : null}
+          {onArchive ? (
+            <button type="button" role="menuitem" onClick={() => { setOpen(false); onArchive(); }}>
+              <IconArchive size={14} />归档
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function ThreadRowLink({
+  thread,
+  context,
+  onRename,
+  onArchive,
+}: {
+  thread: ThreadSummary;
+  context?: string;
+  onRename?: () => void;
+  onArchive?: () => void;
+}) {
   const navigate = useNavigate();
   return (
     <ThreadRow
       thread={thread}
       context={context}
+      onRename={onRename}
+      onArchive={onArchive}
       onClick={() =>
         navigate({ name: "thread", projectId: thread.projectId, threadId: thread.id })
       }

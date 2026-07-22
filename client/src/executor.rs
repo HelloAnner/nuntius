@@ -71,6 +71,22 @@ impl CommandExecutor {
                 project_id,
                 request,
             } => self.create_thread(project_id, request).await,
+            DeviceCommandKind::ThreadRename { thread_id, title } => {
+                self.thread(thread_id).await?;
+                self.store
+                    .set_thread_display_title(thread_id, title.as_deref())
+                    .await?;
+                let updated = self.thread(thread_id).await?;
+                self.emit_thread_summary(thread_id).await?;
+                if let Err(error) = self.sync_thread(thread_id).await {
+                    tracing::warn!(%thread_id,error=?error,"renamed thread history sync deferred");
+                }
+                Ok(json!({
+                    "threadId": thread_id,
+                    "title": &updated.title,
+                    "thread": updated,
+                }))
+            }
             DeviceCommandKind::ThreadArchive {
                 thread_id,
                 archived,
@@ -2367,6 +2383,14 @@ fn validate_command(kind: &DeviceCommandKind) -> Result<()> {
                 text("firstMessage", message, 256 * 1024)?;
             }
             value("options", &request.options, 64 * 1024)?;
+        }
+        DeviceCommandKind::ThreadRename { title, .. } => {
+            if let Some(title) = title {
+                text("title", title, 256)?;
+                if title.chars().any(char::is_control) {
+                    bail!("title must be a single line without control characters")
+                }
+            }
         }
         DeviceCommandKind::TurnStart {
             request,

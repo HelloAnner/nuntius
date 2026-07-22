@@ -12,7 +12,7 @@ use axum::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use futures_util::Stream;
 use serde::Deserialize;
@@ -35,6 +35,7 @@ pub fn router(executor: CommandExecutor) -> Router {
             get(project_threads).post(create_thread),
         )
         .route("/api/v1/threads", get(threads))
+        .route("/api/v1/threads/{thread_id}", patch(rename_thread))
         .route("/api/v1/threads/{thread_id}/history", get(history))
         .route(
             "/api/v1/attachments/{attachment_id}/content",
@@ -139,7 +140,7 @@ async fn info(State(executor): State<CommandExecutor>) -> Result<Json<Value>, Ap
         .iter()
         .any(|status| status.provider == AgentProvider::Codex && status.status == "online");
     Ok(Json(
-        json!({"apiVersion":"v1","clientVersion":env!("CARGO_PKG_VERSION"),"buildSha":nuntius_updater::build_sha(),"releaseSequence":nuntius_updater::build_sequence(),"deviceId":executor.device_id,"displayName":display_name,"paired":executor.config.device_id.is_some(),"localBind":executor.config.local_bind,"appServerRunning":app_server_running,"providers":providers,"projects":projects,"pendingCommands":inbox,"pendingEvents":outbox,"activeTurns":active,"capabilities":["local-console.v1","directory-browser.v1","project-delete.v1","image-input.v1","agent-provider.v1","agent-model-config.v1","app-server.v1","sse.v1",DEVICE_DISPLAY_NAME_SYNC_CAPABILITY,PROVIDER_USAGE_CAPABILITY]}),
+        json!({"apiVersion":"v1","clientVersion":env!("CARGO_PKG_VERSION"),"buildSha":nuntius_updater::build_sha(),"releaseSequence":nuntius_updater::build_sequence(),"deviceId":executor.device_id,"displayName":display_name,"paired":executor.config.device_id.is_some(),"localBind":executor.config.local_bind,"appServerRunning":app_server_running,"providers":providers,"projects":projects,"pendingCommands":inbox,"pendingEvents":outbox,"activeTurns":active,"capabilities":["local-console.v1","directory-browser.v1","project-delete.v1","image-input.v1","agent-provider.v1","agent-model-config.v1","app-server.v1","sse.v1",DEVICE_DISPLAY_NAME_SYNC_CAPABILITY,PROVIDER_USAGE_CAPABILITY,THREAD_RENAME_CAPABILITY]}),
     ))
 }
 async fn sync_snapshot(
@@ -272,23 +273,28 @@ async fn threads(
     State(executor): State<CommandExecutor>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<ThreadSummary>>, ApiError> {
-    Ok(Json(
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let offset = query.offset.unwrap_or(0).clamp(0, 1_000_000);
+    let threads = if query.include_archived.unwrap_or(false) {
         executor
             .store
-            .list_threads_page(
-                &executor.device_id,
-                None,
-                query.limit.unwrap_or(100).clamp(1, 500),
-                query.offset.unwrap_or(0).clamp(0, 1_000_000),
-            )
-            .await?,
-    ))
+            .list_threads_page_including_archived(&executor.device_id, None, limit, offset)
+            .await?
+    } else {
+        executor
+            .store
+            .list_threads_page(&executor.device_id, None, limit, offset)
+            .await?
+    };
+    Ok(Json(threads))
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListQuery {
     limit: Option<i64>,
     offset: Option<i64>,
+    include_archived: Option<bool>,
 }
 async fn history(
     State(executor): State<CommandExecutor>,
@@ -421,8 +427,43 @@ async fn interrupt_turn(
     .await
 }
 #[derive(Deserialize)]
+struct RenameThreadRequest {
+    title: Option<String>,
+}
+async fn rename_thread(
+    State(executor): State<CommandExecutor>,
+    Path(thread_id): Path<String>,
+    Json(request): Json<RenameThreadRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let title = request
+        .title
+        .as_deref()
+        .map(normalize_thread_title)
+        .transpose()?;
+    run(
+        &executor,
+        DeviceCommandKind::ThreadRename {
+            thread_id: thread_id.clone(),
+            title,
+        },
+        None,
+        Some(thread_id),
+    )
+    .await
+}
+#[derive(Deserialize)]
 struct ArchiveRequest {
     archived: bool,
+}
+
+fn normalize_thread_title(value: &str) -> Result<String, ApiError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest(
+            "title must contain 1 to 256 bytes on one line".into(),
+        ));
+    }
+    Ok(value.to_owned())
 }
 async fn archive_thread(
     State(executor): State<CommandExecutor>,

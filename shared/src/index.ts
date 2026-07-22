@@ -12,3 +12,4 @@ export * from "./components/ProviderPicker";
 export * from "./components/ModelPicker";
 export * from "./components/ThreadView";
 export * from "./components/DirectoryBrowser";
+export * from "./components/RenameThreadSheet";

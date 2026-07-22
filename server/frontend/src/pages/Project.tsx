@@ -7,6 +7,7 @@ import {
   IconChat,
   IconPlus,
   Spinner,
+  RenameThreadSheet,
   SwipeActionRow,
   compareThreadCreation,
   newIdemKey,
@@ -16,7 +17,7 @@ import {
   type ThreadSummary,
 } from "@nuntius/shared";
 import { api } from "../api";
-import { useArchiveThreadAction, useNavigate } from "../hooks";
+import { useArchiveThreadAction, useNavigate, useRenameThreadAction } from "../hooks";
 import { useRoute } from "../stores";
 import { trackCommand, waitForCommand } from "../events";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
@@ -25,12 +26,14 @@ import { NewThreadSheet } from "../sheets/NewThreadSheet";
 export function ProjectPage({ deviceId, projectId }: { deviceId: string; projectId: string }) {
   const navigate = useNavigate();
   const { archive, busyIds } = useArchiveThreadAction();
+  const renameThread = useRenameThreadAction();
   const back = useRoute((s) => s.back);
   const toast = useToast();
   const qc = useQueryClient();
   const { confirm, node: confirmNode } = useConfirmAction();
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [renamingThread, setRenamingThread] = useState<ThreadSummary | null>(null);
 
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const projects = useQuery({
@@ -154,6 +157,8 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
                     onClick={() =>
                       navigate({ name: "thread", deviceId, projectId, threadId: t.id })
                     }
+                    onRename={() => setRenamingThread(t)}
+                    onArchive={canArchive ? () => archive(t.id) : undefined}
                   />
                 </SwipeActionRow>
               ))}
@@ -190,6 +195,12 @@ export function ProjectPage({ deviceId, projectId }: { deviceId: string; project
             threadId,
           })
         }
+      />
+      <RenameThreadSheet
+        thread={renamingThread}
+        open={renamingThread !== null}
+        onClose={() => setRenamingThread(null)}
+        onRename={(title) => renamingThread ? renameThread(renamingThread, title) : Promise.resolve()}
       />
       {confirmNode}
     </div>

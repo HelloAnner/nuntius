@@ -647,6 +647,21 @@ impl ServerStore {
         Ok(rows.into_iter().map(thread_from_row).collect())
     }
 
+    pub async fn list_threads_including_archived(
+        &self,
+        user_id: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ThreadSummary>> {
+        let rows = sqlx::query("SELECT * FROM threads WHERE user_id=? ORDER BY julianday(COALESCE(created_at,last_activity_at)) DESC,id DESC LIMIT ? OFFSET ?")
+            .bind(user_id)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(thread_from_row).collect())
+    }
+
     pub async fn upsert_created_thread(&self, user_id: &str, thread: &ThreadSummary) -> Result<()> {
         let project_exists: Option<i64> = sqlx::query_scalar(
             "SELECT 1 FROM projects WHERE id=? AND device_id=? AND user_id=? AND removed_at IS NULL",
@@ -659,7 +674,7 @@ impl ServerStore {
         if project_exists.is_none() {
             bail!("created thread references an unavailable project")
         }
-        sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,status,archived,history_completeness,created_at,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,created_at=COALESCE(excluded.created_at,threads.created_at),last_activity_at=COALESCE(excluded.last_activity_at,threads.last_activity_at) WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id")
+        sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,display_title_override,title_revision,status,archived,history_completeness,created_at,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=CASE WHEN excluded.title_revision>=threads.title_revision THEN excluded.title ELSE threads.title END,display_title_override=CASE WHEN excluded.title_revision>=threads.title_revision THEN excluded.display_title_override ELSE threads.display_title_override END,title_revision=MAX(threads.title_revision,excluded.title_revision),status=excluded.status,archived=excluded.archived,created_at=COALESCE(excluded.created_at,threads.created_at),last_activity_at=COALESCE(excluded.last_activity_at,threads.last_activity_at) WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id")
             .bind(&thread.id)
             .bind(user_id)
             .bind(&thread.device_id)
@@ -667,6 +682,8 @@ impl ServerStore {
             .bind(thread.provider.as_str())
             .bind(&thread.app_server_thread_id)
             .bind(&thread.title)
+            .bind(&thread.display_title_override)
+            .bind(thread.title_revision)
             .bind(&thread.status)
             .bind(thread.archived)
             .bind("backfilling")
@@ -698,6 +715,19 @@ impl ServerStore {
     ) -> Result<Option<(String, String)>> {
         let row = sqlx::query("SELECT h.device_id,h.project_id FROM threads h JOIN devices d ON d.id=h.device_id JOIN projects p ON p.id=h.project_id WHERE h.id=? AND h.user_id=? AND h.archived=0 AND d.status='active' AND p.removed_at IS NULL AND p.kind='workspace' AND p.status='active'")
             .bind(thread_id).bind(user_id).fetch_optional(&self.pool).await?;
+        Ok(row.map(|r| (r.get("device_id"), r.get("project_id"))))
+    }
+
+    pub async fn thread_metadata_target(
+        &self,
+        user_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<(String, String)>> {
+        let row = sqlx::query("SELECT h.device_id,h.project_id FROM threads h JOIN devices d ON d.id=h.device_id JOIN projects p ON p.id=h.project_id WHERE h.id=? AND h.user_id=? AND d.status='active' AND p.removed_at IS NULL")
+            .bind(thread_id)
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.map(|r| (r.get("device_id"), r.get("project_id"))))
     }
 
@@ -1536,8 +1566,8 @@ impl ServerStore {
                     &fallback_project
                 };
                 if !stale {
-                    sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,status,archived,history_completeness,created_at,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,'backfilling',?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=excluded.title,status=excluded.status,archived=excluded.archived,created_at=COALESCE(excluded.created_at,threads.created_at),last_synced_at=excluded.last_synced_at,last_activity_at=excluded.last_activity_at,history_revision=excluded.history_revision WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id AND excluded.history_revision>=threads.history_revision")
-                    .bind(&thread.id).bind(user_id).bind(&batch.device_id).bind(project_id).bind(thread.provider.as_str()).bind(&thread.app_server_thread_id).bind(&thread.title).bind(&thread.status).bind(thread.archived)
+                    sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,display_title_override,title_revision,status,archived,history_completeness,created_at,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,'backfilling',?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=CASE WHEN excluded.title_revision>=threads.title_revision THEN excluded.title ELSE threads.title END,display_title_override=CASE WHEN excluded.title_revision>=threads.title_revision THEN excluded.display_title_override ELSE threads.display_title_override END,title_revision=MAX(threads.title_revision,excluded.title_revision),status=excluded.status,archived=excluded.archived,created_at=COALESCE(excluded.created_at,threads.created_at),last_synced_at=excluded.last_synced_at,last_activity_at=excluded.last_activity_at,history_revision=excluded.history_revision WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id AND excluded.history_revision>=threads.history_revision")
+                    .bind(&thread.id).bind(user_id).bind(&batch.device_id).bind(project_id).bind(thread.provider.as_str()).bind(&thread.app_server_thread_id).bind(&thread.title).bind(&thread.display_title_override).bind(thread.title_revision).bind(&thread.status).bind(thread.archived)
                     .bind(&thread.created_at).bind(&thread.last_synced_at).bind(&thread.last_activity_at).bind(batch.inventory_revision).execute(&mut *tx).await?;
                 }
             }
@@ -1852,6 +1882,8 @@ fn thread_from_row(r: sqlx::sqlite::SqliteRow) -> ThreadSummary {
         },
         app_server_thread_id: r.get("app_server_thread_id"),
         title: r.get("title"),
+        display_title_override: r.get("display_title_override"),
+        title_revision: r.get("title_revision"),
         status: r.get("status"),
         archived: r.get::<i64, _>("archived") != 0,
         history_completeness: parse_completeness(&r.get::<String, _>("history_completeness")),
@@ -1986,6 +2018,108 @@ pub fn unix_to_rfc3339(timestamp: i64) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn newest_display_title_revision_wins_during_sync() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ServerStore::open(temp.path()).await.unwrap();
+        let user = store.create_owner("owner", "test-hash").await.unwrap();
+        store
+            .create_pairing_code(&user.id, "pair-hash", 10)
+            .await
+            .unwrap();
+        let device_id = store
+            .pair_device(
+                &PairDeviceRequest {
+                    code: "unused".into(),
+                    display_name: "Studio Mac".into(),
+                    public_key: "key".into(),
+                    agent_version: "test".into(),
+                    os_family: "test".into(),
+                    architecture: "test".into(),
+                },
+                "pair-hash",
+            )
+            .await
+            .unwrap();
+        store
+            .upsert_project_summary(
+                &user.id,
+                &ProjectSummary {
+                    id: "prj_title".into(),
+                    device_id: device_id.clone(),
+                    kind: ProjectKind::Workspace,
+                    display_name: "Workspace".into(),
+                    path_hint: Some("workspace".into()),
+                    status: "active".into(),
+                    repo_name: None,
+                    branch: None,
+                    is_dirty: None,
+                    thread_count: 1,
+                    last_activity_at: Some(now()),
+                },
+                1,
+            )
+            .await
+            .unwrap();
+
+        let mut thread = ThreadSummary {
+            id: "thr_title".into(),
+            device_id: device_id.clone(),
+            project_id: "prj_title".into(),
+            provider: AgentProvider::Codex,
+            app_server_thread_id: Some("app_title".into()),
+            title: "My display title".into(),
+            display_title_override: Some("My display title".into()),
+            title_revision: 2,
+            status: "idle".into(),
+            archived: false,
+            history_completeness: HistoryCompleteness::Complete,
+            created_at: Some(now()),
+            last_synced_at: Some(now()),
+            last_activity_at: Some(now()),
+        };
+        store
+            .upsert_created_thread(&user.id, &thread)
+            .await
+            .unwrap();
+
+        thread.title = "Stale provider title".into();
+        thread.display_title_override = None;
+        thread.title_revision = 1;
+        store
+            .upsert_created_thread(&user.id, &thread)
+            .await
+            .unwrap();
+        let stored = store
+            .list_threads_including_archived(&user.id, 10, 0)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(stored.title, "My display title");
+        assert_eq!(
+            stored.display_title_override.as_deref(),
+            Some("My display title")
+        );
+        assert_eq!(stored.title_revision, 2);
+
+        thread.title = "Newest provider title".into();
+        thread.title_revision = 3;
+        store
+            .upsert_created_thread(&user.id, &thread)
+            .await
+            .unwrap();
+        let reset = store
+            .list_threads_including_archived(&user.id, 10, 0)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(reset.title, "Newest provider title");
+        assert_eq!(reset.display_title_override, None);
+        assert_eq!(reset.title_revision, 3);
+    }
 
     #[tokio::test]
     async fn provider_usage_reports_are_append_only_while_latest_is_projected() {
@@ -2233,6 +2367,8 @@ mod tests {
                     provider: AgentProvider::Pi,
                     app_server_thread_id: Some("app_pi".into()),
                     title: "Pi thread".into(),
+                    display_title_override: None,
+                    title_revision: 0,
                     status: "idle".into(),
                     archived: false,
                     history_completeness: HistoryCompleteness::Complete,
@@ -2305,6 +2441,8 @@ mod tests {
                     provider: AgentProvider::Codex,
                     app_server_thread_id: Some("app_remove".into()),
                     title: "Old thread".into(),
+                    display_title_override: None,
+                    title_revision: 0,
                     status: "idle".into(),
                     archived: false,
                     history_completeness: HistoryCompleteness::Complete,
@@ -2521,6 +2659,8 @@ mod tests {
                     provider: AgentProvider::Codex,
                     app_server_thread_id: Some("app_history".into()),
                     title: "Imported".into(),
+                    display_title_override: None,
+                    title_revision: 0,
                     status: "idle".into(),
                     archived: false,
                     history_completeness: HistoryCompleteness::Complete,
@@ -2734,6 +2874,8 @@ mod tests {
                     provider: AgentProvider::Codex,
                     app_server_thread_id: Some("app_history".into()),
                     title: "Second imported thread".into(),
+                    display_title_override: None,
+                    title_revision: 0,
                     status: "idle".into(),
                     archived: false,
                     history_completeness: HistoryCompleteness::Complete,

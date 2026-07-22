@@ -6,10 +6,12 @@ import {
   IconArchive,
   IconChevronDown,
   IconClock,
+  IconEdit,
   IconList,
   IconMore,
   IconPlus,
   Spinner,
+  RenameThreadSheet,
   ThreadView,
   compareThreadCreation,
   newIdemKey,
@@ -26,7 +28,7 @@ import {
 } from "@nuntius/shared";
 import { api, ApiError } from "../api";
 import { trackCommand } from "../events";
-import { useArchiveThreadAction, useMedia, useNavigate, useProjectNameMap, projectNameFrom } from "../hooks";
+import { useArchiveThreadAction, useMedia, useNavigate, useProjectNameMap, projectNameFrom, useRenameThreadAction } from "../hooks";
 import { liveStore, useAccessMode, useApprovals, useThreadLive } from "../stores";
 import { ProviderBadge, StatusDot, ThreadListItem, TopBar, threadTone } from "../components";
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
@@ -69,11 +71,13 @@ export function ThreadPage({
   const accessMode = useAccessMode((state) => state.mode);
   const navigate = useNavigate();
   const { archive: archiveThread, busyIds } = useArchiveThreadAction();
+  const renameThread = useRenameThreadAction();
   const wide = useMedia("(min-width: 900px)");
   const fromRecents = navigationContext === "recents";
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   const [turnCount, setTurnCount] = useState(12);
   const [routeGraceElapsed, setRouteGraceElapsed] = useState(false);
   const { confirm, node: confirmNode } = useConfirmAction();
@@ -419,6 +423,7 @@ export function ThreadPage({
   const currentStateLabel = pendingApproval ? "等待审批" : statusLabel(thread?.status ?? "offline");
 
   const sidebarSource = (fromRecents ? (allThreads.data ?? []) : (projectThreads.data ?? []))
+    .filter((item) => !item.archived || item.id === threadId)
     .filter((item) => !busyIds.has(item.id));
   const sidebarProjectNames = useProjectNameMap(
     fromRecents ? sidebarSource.map((item) => item.deviceId) : [],
@@ -473,8 +478,14 @@ export function ThreadPage({
 
   const mobileTopbar = (
     <TopBar
-      title={truncateEnd(fullThreadTitle)}
-      titleHint={fullThreadTitle}
+      title={
+        <span className="renameable-thread-title">
+          <span>{truncateEnd(fullThreadTitle)}</span>
+          <IconEdit size={13} />
+        </span>
+      }
+      titleHint={`重命名会话：${fullThreadTitle}`}
+      onTitleClick={thread ? () => setRenameOpen(true) : undefined}
       subtitle={device && project ? (
         <span className="thread-mobile-context">
           <StatusDot tone={online ? "success" : "offline"} />
@@ -501,8 +512,14 @@ export function ThreadPage({
 
   const desktopTopbar = (
     <TopBar
-      title={fullThreadTitle}
-      titleHint={fullThreadTitle}
+      title={
+        <span className="renameable-thread-title">
+          <span>{fullThreadTitle}</span>
+          <IconEdit size={13} />
+        </span>
+      }
+      titleHint={`重命名会话：${fullThreadTitle}`}
+      onTitleClick={thread ? () => setRenameOpen(true) : undefined}
       subtitle={device && project ? `${device.displayName} / ${project.displayName}` : undefined}
       trailing={
         <>
@@ -549,6 +566,11 @@ export function ThreadPage({
 
   const threadMenu = menuOpen ? (
     <div className="thread-actions-menu" role="menu">
+      {thread ? (
+        <button role="menuitem" onClick={() => { setMenuOpen(false); setRenameOpen(true); }}>
+          <IconEdit size={15} />重命名会话
+        </button>
+      ) : null}
       {project && !unassigned ? (
         <button role="menuitem" onClick={() => { setMenuOpen(false); setCreating(true); }} disabled={!online}>
           <IconPlus size={15} />新建会话
@@ -562,12 +584,22 @@ export function ThreadPage({
     </div>
   ) : null;
 
+  const renameSheet = (
+    <RenameThreadSheet
+      thread={thread ?? null}
+      open={renameOpen}
+      onClose={() => setRenameOpen(false)}
+      onRename={(title) => thread ? renameThread(thread, title) : Promise.resolve()}
+    />
+  );
+
   if (!wide) {
     return (
       <div className="page thread-page">
         {mobileTopbar}
         {threadView}
         {threadMenu}
+        {renameSheet}
         <ThreadSwitcher
           open={switcherOpen}
           onClose={() => setSwitcherOpen(false)}
@@ -689,6 +721,7 @@ export function ThreadPage({
         navigationContext={navigationContext}
       />
       {newThreadSheet}
+      {renameSheet}
       {confirmNode}
     </div>
   );

@@ -76,6 +76,103 @@
   gap: 10px;
 }
 
+/* thread display-title override */
+.rename-thread-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 20px;
+}
+.rename-thread-intro {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+.rename-thread-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.rename-thread-meta.error { color: var(--danger); }
+.rename-thread-meta .num { flex: none; }
+.rename-thread-reset {
+  align-self: flex-start;
+  padding: 2px 0;
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.rename-thread-reset:hover { text-decoration: underline; }
+.rename-thread-reset:disabled { opacity: 0.5; }
+.rename-thread-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.renameable-thread-title {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.thread-page,
+.thread-page .detail-main { position: relative; }
+.thread-actions-menu {
+  position: absolute;
+  top: calc(58px + var(--sat));
+  right: 12px;
+  z-index: 40;
+  width: 184px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+}
+.thread-actions-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+}
+.thread-actions-menu button:hover { background: var(--surface-2); }
+.thread-actions-menu button:disabled { opacity: 0.45; }
+.renameable-thread-title > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.renameable-thread-title svg {
+  flex: none;
+  opacity: 0;
+  color: var(--ink-3);
+  transform: translateX(-2px);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+.topbar-title.clickable:hover .renameable-thread-title svg,
+.topbar-title.clickable:focus-visible .renameable-thread-title svg {
+  opacity: 1;
+  transform: translateX(0);
+}
+@media (max-width: 559px) {
+  .renameable-thread-title svg { display: none; }
+}
+
 /* top bar */
 .topbar {
   flex: none;

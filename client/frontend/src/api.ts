@@ -77,6 +77,12 @@ export const api = {
     ),
   threads: () => req<ThreadSummary[]>("GET", "/threads"),
   history: (threadId: string) => req<HistoryRecord[]>("GET", `/threads/${threadId}/history`),
+  renameThread: (threadId: string, title: string | null) =>
+    req<{ threadId: string; title: string; thread: ThreadSummary }>(
+      "PATCH",
+      `/threads/${threadId}`,
+      { title },
+    ),
   startTurn: (threadId: string, text: string, clientMessageId?: string) =>
     req<{ operation: "start" | "steer"; turnId?: string }>("POST", `/threads/${threadId}/turns`, {
       text,

@@ -20,7 +20,7 @@ use axum::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use base64::Engine;
 use futures_util::Stream;
@@ -85,6 +85,7 @@ pub fn router(state: AppState) -> Router {
             get(list_project_threads).post(create_thread),
         )
         .route("/api/v1/threads", get(list_all_threads))
+        .route("/api/v1/threads/{thread_id}", patch(rename_thread))
         .route(
             "/api/v1/threads/{thread_id}/turns",
             get(history_turns).post(start_turn),
@@ -192,6 +193,7 @@ async fn info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiErro
             CLIENT_UPDATE_CAPABILITY.into(),
             DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into(),
             PROVIDER_USAGE_CAPABILITY.into(),
+            THREAD_RENAME_CAPABILITY.into(),
         ],
     }))
 }
@@ -840,9 +842,11 @@ async fn create_thread(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListQuery {
     limit: Option<i64>,
     offset: Option<i64>,
+    include_archived: Option<bool>,
 }
 async fn list_all_threads(
     State(state): State<AppState>,
@@ -850,18 +854,20 @@ async fn list_all_threads(
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<ThreadSummary>>, ApiError> {
     let session = auth::authenticate_web(&state.store, &headers).await?;
-    Ok(Json(
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let offset = query.offset.unwrap_or(0).clamp(0, 1_000_000);
+    let threads = if query.include_archived.unwrap_or(false) {
         state
             .store
-            .list_threads(
-                &session.user_id,
-                None,
-                None,
-                query.limit.unwrap_or(100).clamp(1, 500),
-                query.offset.unwrap_or(0).clamp(0, 1_000_000),
-            )
-            .await?,
-    ))
+            .list_threads_including_archived(&session.user_id, limit, offset)
+            .await?
+    } else {
+        state
+            .store
+            .list_threads(&session.user_id, None, None, limit, offset)
+            .await?
+    };
+    Ok(Json(threads))
 }
 
 async fn history_turns(
@@ -1190,6 +1196,38 @@ async fn interrupt_turn(
     })
     .await
 }
+#[derive(Deserialize)]
+struct RenameThreadRequest {
+    title: Option<String>,
+}
+async fn rename_thread(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+    Json(request): Json<RenameThreadRequest>,
+) -> Result<(StatusCode, Json<CommandReceipt>), ApiError> {
+    let session = web_mutation(&state, &headers).await?;
+    let title = request
+        .title
+        .as_deref()
+        .map(normalize_thread_title)
+        .transpose()?;
+    let (device_id, project_id) = state
+        .store
+        .thread_metadata_target(&session.user_id, &thread_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    enqueue(
+        &state,
+        &headers,
+        &session,
+        device_id,
+        Some(project_id),
+        Some(thread_id.clone()),
+        DeviceCommandKind::ThreadRename { thread_id, title },
+    )
+    .await
+}
 async fn archive_thread(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1414,11 +1452,13 @@ async fn enqueue(
         .ok_or_else(|| ApiError::BadRequest("Idempotency-Key header is required".into()))?;
     validate_device_command(&kind)?;
     let issued = now();
-    // Archive is an idempotent desired-state operation. Keep it durable long enough to
-    // survive a device restart; interactive commands retain their short safety window.
+    // Thread metadata desired-state operations are safe to retain while a device is offline.
+    // Interactive commands keep their short safety window.
     let can_wait_for_device = matches!(
         &kind,
-        DeviceCommandKind::ThreadArchive { .. } | DeviceCommandKind::ProviderUsageRefresh
+        DeviceCommandKind::ThreadArchive { .. }
+            | DeviceCommandKind::ThreadRename { .. }
+            | DeviceCommandKind::ProviderUsageRefresh
     );
     let expiry = OffsetDateTime::now_utc()
         + if can_wait_for_device {
@@ -1567,6 +1607,16 @@ fn bounded_nonempty<'a>(field: &str, value: &'a str, maximum: usize) -> Result<&
     Ok(value)
 }
 
+fn normalize_thread_title(value: &str) -> Result<String, ApiError> {
+    let value = bounded_nonempty("title", value, 256)?;
+    if value.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest(
+            "title must be a single line without control characters".into(),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
 fn bounded_json(field: &str, value: &Value, maximum: usize) -> Result<(), ApiError> {
     let length = serde_json::to_vec(value).map_err(ApiError::internal)?.len();
     if length > maximum {
@@ -1659,6 +1709,11 @@ fn validate_device_command(kind: &DeviceCommandKind) -> Result<(), ApiError> {
                 bounded_nonempty("firstMessage", message, 256 * 1024)?;
             }
             bounded_json("options", &request.options, 64 * 1024)?;
+        }
+        DeviceCommandKind::ThreadRename { title, .. } => {
+            if let Some(title) = title {
+                normalize_thread_title(title)?;
+            }
         }
         DeviceCommandKind::TurnStart {
             request,

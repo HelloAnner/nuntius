@@ -11,6 +11,7 @@ pub const DEVICE_SUBPROTOCOL: &str = "nuntius.device.v1";
 pub const DEVICE_DISPLAY_NAME_SYNC_CAPABILITY: &str = "device-display-name-sync.v1";
 pub const CLIENT_UPDATE_CAPABILITY: &str = "client-update.v1";
 pub const PROVIDER_USAGE_CAPABILITY: &str = "provider-usage.v1";
+pub const THREAD_RENAME_CAPABILITY: &str = "thread-rename.v1";
 
 pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::now_v7())
@@ -221,6 +222,10 @@ pub struct ThreadSummary {
     pub provider: AgentProvider,
     pub app_server_thread_id: Option<String>,
     pub title: String,
+    #[serde(default)]
+    pub display_title_override: Option<String>,
+    #[serde(default)]
+    pub title_revision: i64,
     pub status: String,
     pub archived: bool,
     pub history_completeness: HistoryCompleteness,
@@ -420,6 +425,10 @@ pub enum DeviceCommandKind {
     ThreadCreate {
         project_id: String,
         request: CreateThreadRequest,
+    },
+    ThreadRename {
+        thread_id: String,
+        title: Option<String>,
     },
     ThreadArchive {
         thread_id: String,

@@ -1,11 +1,13 @@
 /* Server console chrome and design-system primitives. */
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  IconArchive,
   IconChat,
   IconChevronLeft,
   IconChevronRight,
   IconClock,
   IconDevice,
+  IconEdit,
   IconFolder,
   IconGit,
   IconMore,
@@ -371,33 +373,94 @@ export function ThreadRow({
   projectName,
   selected = false,
   onClick,
+  onRename,
+  onArchive,
 }: {
   thread: ThreadSummary;
   deviceName: string;
   projectName: string;
   selected?: boolean;
   onClick: () => void;
+  onRename?: () => void;
+  onArchive?: () => void;
 }) {
   const tone = threadTone(thread);
+  const hasActions = Boolean(onRename || onArchive);
   return (
-    <button
-      className={`list-row thread-row thread-${tone}${selected ? " selected" : ""}`}
-      onClick={onClick}
-      aria-current={selected ? "page" : undefined}
-    >
-      <StatusDot tone={tone} pulse={tone === "active"} />
-      <span className="grow">
-        <span className="title">{thread.title || "未命名会话"}</span>
-        <span className="thread-meta" aria-label={`${deviceName}，${projectName}`}>
-          <span className="thread-device"><IconDevice size={11} />{deviceName}</span>
-          <span aria-hidden="true">·</span>
-          <span className="thread-project"><IconFolder size={11} />{projectName || "未归属项目"}</span>
-          <span aria-hidden="true">·</span>
-          <span className="thread-time num">{relTime(thread.lastActivityAt ?? thread.createdAt)}</span>
+    <div className={`thread-row-shell${hasActions ? " has-actions" : ""}`}>
+      <button
+        className={`list-row thread-row thread-${tone}${selected ? " selected" : ""}`}
+        onClick={onClick}
+        aria-current={selected ? "page" : undefined}
+      >
+        <StatusDot tone={tone} pulse={tone === "active"} />
+        <span className="grow">
+          <span className="title">{thread.title || "未命名会话"}</span>
+          <span className="thread-meta" aria-label={`${deviceName}，${projectName}`}>
+            <span className="thread-device"><IconDevice size={11} />{deviceName}</span>
+            <span aria-hidden="true">·</span>
+            <span className="thread-project"><IconFolder size={11} />{projectName || "未归属项目"}</span>
+            <span aria-hidden="true">·</span>
+            <span className="thread-time num">{relTime(thread.lastActivityAt ?? thread.createdAt)}</span>
+          </span>
         </span>
-      </span>
-      <ProviderBadge provider={thread.provider} />
-      <IconChevronRight className="row-chevron" size={16} />
-    </button>
+        <ProviderBadge provider={thread.provider} />
+        {!hasActions ? <IconChevronRight className="row-chevron" size={16} /> : null}
+      </button>
+      <ThreadRowActions
+        label={`“${thread.title || "未命名会话"}”的会话操作`}
+        onRename={onRename}
+        onArchive={onArchive}
+      />
+    </div>
+  );
+}
+
+function ThreadRowActions({
+  label,
+  onRename,
+  onArchive,
+}: {
+  label: string;
+  onRename?: () => void;
+  onArchive?: () => void;
+}) {
+  const root = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [open]);
+  if (!onRename && !onArchive) return null;
+  return (
+    <div ref={root} className="thread-row-actions">
+      <button
+        type="button"
+        className="thread-row-more"
+        onClick={() => setOpen((value) => !value)}
+        aria-label={label}
+        aria-expanded={open}
+      >
+        <IconMore size={17} />
+      </button>
+      {open ? (
+        <div className="thread-row-menu" role="menu">
+          {onRename ? (
+            <button type="button" role="menuitem" onClick={() => { setOpen(false); onRename(); }}>
+              <IconEdit size={14} />重命名
+            </button>
+          ) : null}
+          {onArchive ? (
+            <button type="button" role="menuitem" onClick={() => { setOpen(false); onArchive(); }}>
+              <IconArchive size={14} />归档
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }

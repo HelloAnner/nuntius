@@ -115,18 +115,29 @@ impl TunnelRegistry {
                 .get(device_id)
                 .filter(|connection| connection.ready)
                 .ok_or_else(|| anyhow!("device offline"))?;
-            if matches!(
-                &frame,
+            let required_capability = match &frame {
                 TunnelFrame::Command {
-                    command: DeviceCommand {
-                        command: DeviceCommandKind::ProviderUsageRefresh,
-                        ..
-                    },
+                    command:
+                        DeviceCommand {
+                            command: DeviceCommandKind::ProviderUsageRefresh,
+                            ..
+                        },
                     ..
-                }
-            ) && !connection.capabilities.contains(PROVIDER_USAGE_CAPABILITY)
+                } => Some(PROVIDER_USAGE_CAPABILITY),
+                TunnelFrame::Command {
+                    command:
+                        DeviceCommand {
+                            command: DeviceCommandKind::ThreadRename { .. },
+                            ..
+                        },
+                    ..
+                } => Some(THREAD_RENAME_CAPABILITY),
+                _ => None,
+            };
+            if let Some(capability) = required_capability
+                && !connection.capabilities.contains(capability)
             {
-                return Err(anyhow!("device does not support provider usage commands"));
+                return Err(anyhow!("device does not support {capability}"));
             }
             connection.sender.clone()
         };
@@ -356,6 +367,9 @@ async fn run_socket(
     let supports_provider_usage = client_capabilities
         .iter()
         .any(|capability| capability == PROVIDER_USAGE_CAPABILITY);
+    let supports_thread_rename = client_capabilities
+        .iter()
+        .any(|capability| capability == THREAD_RENAME_CAPABILITY);
 
     let (out_tx, mut out_rx) = mpsc::channel::<TunnelFrame>(256);
     let (supersede_tx, mut superseded) = oneshot::channel();
@@ -413,6 +427,7 @@ async fn run_socket(
                     "image-input.v1".into(),
                     "agent-provider.v1".into(),
                     PROVIDER_USAGE_CAPABILITY.into(),
+                    THREAD_RENAME_CAPABILITY.into(),
                 ],
                 display_name: Some(display_name.clone()),
             })
@@ -443,6 +458,13 @@ async fn run_socket(
                 &stored.command.command,
                 DeviceCommandKind::ProviderUsageRefresh
             ) && !supports_provider_usage
+            {
+                continue;
+            }
+            if matches!(
+                &stored.command.command,
+                DeviceCommandKind::ThreadRename { .. }
+            ) && !supports_thread_rename
             {
                 continue;
             }
@@ -594,7 +616,7 @@ async fn handle_frame(
                     .and_then(|value| serde_json::from_value::<ThreadSummary>(value.clone()).ok())
             {
                 if thread.device_id != device_id {
-                    return Err(anyhow!("created thread device mismatch"));
+                    return Err(anyhow!("command result thread device mismatch"));
                 }
                 state.store.upsert_created_thread(user_id, &thread).await?;
             }
@@ -1041,6 +1063,41 @@ mod tests {
                 issued_at: now(),
                 expires_at: now(),
                 command: DeviceCommandKind::ProviderUsageRefresh,
+            },
+        };
+        assert!(registry.send("dev_test", command).await.is_err());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn thread_rename_command_waits_for_a_capable_client() {
+        let registry = TunnelRegistry::new();
+        let (sender, mut receiver) = mpsc::channel(4);
+        let (supersede, _superseded) = oneshot::channel();
+        let epoch = registry
+            .register("dev_test", sender, supersede, HashSet::new())
+            .await;
+        registry
+            .activate("dev_test", epoch, "Device".into())
+            .await
+            .unwrap();
+        let command = TunnelFrame::Command {
+            queue_epoch: "epoch".into(),
+            server_sequence: 1,
+            command: DeviceCommand {
+                command_id: "cmd_rename".into(),
+                device_id: "dev_test".into(),
+                project_id: Some("prj_test".into()),
+                thread_id: Some("thr_test".into()),
+                issued_at: now(),
+                expires_at: now(),
+                command: DeviceCommandKind::ThreadRename {
+                    thread_id: "thr_test".into(),
+                    title: Some("New title".into()),
+                },
             },
         };
         assert!(registry.send("dev_test", command).await.is_err());

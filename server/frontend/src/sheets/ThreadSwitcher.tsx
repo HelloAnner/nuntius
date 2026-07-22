@@ -38,6 +38,7 @@ export function ThreadSwitcher({
   const scoped = useMemo(
     () => [...(threads.data ?? [])]
       .filter((thread) => !archivingIds.has(thread.id))
+      .filter((thread) => !thread.archived)
       .sort(compareThreadCreation),
     [archivingIds, threads.data],
   );

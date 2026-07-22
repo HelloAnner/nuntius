@@ -8,12 +8,13 @@ import {
   IconPlus,
   IconSearch,
   Spinner,
+  RenameThreadSheet,
   SwipeActionRow,
   compareThreadCreation,
   type ThreadSummary,
 } from "@nuntius/shared";
 import { api } from "../api";
-import { projectNameFrom, useArchiveThreadAction, useNavigate, useProjectNameMap } from "../hooks";
+import { projectNameFrom, useArchiveThreadAction, useNavigate, useProjectNameMap, useRenameThreadAction } from "../hooks";
 import { useApprovals } from "../stores";
 import { FilterSelect, SearchField, ThreadRow, TopBar } from "../components";
 import {
@@ -30,6 +31,7 @@ type SessionGroup = { key: string; label: string; threads: ThreadSummary[] };
 export function RecentsPage() {
   const navigate = useNavigate();
   const { archive, busyIds } = useArchiveThreadAction();
+  const renameThread = useRenameThreadAction();
   const approvals = useApprovals((state) => state.items);
   const [filterPreferences, setFilterPreferences] = useState(loadRecentFilterPreferences);
   const { deviceFilter, projectFilter, statusFilter } = filterPreferences;
@@ -37,6 +39,7 @@ export function RecentsPage() {
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [renamingThread, setRenamingThread] = useState<ThreadSummary | null>(null);
   const threads = useQuery({ queryKey: ["allThreads"], queryFn: () => api.allThreads() });
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const projectNames = useProjectNameMap((devices.data ?? []).map((device) => device.id));
@@ -90,6 +93,7 @@ export function RecentsPage() {
       .filter((thread) => deviceFilter === "all" || thread.deviceId === deviceFilter)
       .filter((thread) => projectFilter === "all" || `${thread.deviceId}:${thread.projectId}` === projectFilter)
       .filter((thread) => {
+        if (statusFilter !== "archived" && thread.archived) return false;
         if (statusFilter === "running") return thread.status === "active";
         if (statusFilter === "approval") return pendingThreadIds.has(thread.id);
         if (statusFilter === "idle") return thread.status !== "active" && !pendingThreadIds.has(thread.id);
@@ -246,6 +250,7 @@ export function RecentsPage() {
                       icon={<IconArchive size={18} />}
                       label="归档"
                       busy={busyIds.has(thread.id)}
+                      disabled={thread.archived}
                       onAction={() => archive(thread.id)}
                     >
                       <ThreadRow
@@ -253,6 +258,8 @@ export function RecentsPage() {
                         deviceName={deviceName(thread.deviceId)}
                         projectName={projectNameFrom(projectNames, thread.deviceId, thread.projectId)}
                         onClick={() => navigate({ name: "recentThread", threadId: thread.id })}
+                        onRename={() => setRenamingThread(thread)}
+                        onArchive={thread.archived ? undefined : () => archive(thread.id)}
                       />
                     </SwipeActionRow>
                   ))}
@@ -269,6 +276,12 @@ export function RecentsPage() {
         open={creating}
         onClose={() => setCreating(false)}
         onCreated={(threadId, deviceId, projectId) => navigate({ name: "thread", deviceId, projectId, threadId })}
+      />
+      <RenameThreadSheet
+        thread={renamingThread}
+        open={renamingThread !== null}
+        onClose={() => setRenamingThread(null)}
+        onRename={(title) => renamingThread ? renameThread(renamingThread, title) : Promise.resolve()}
       />
     </div>
   );

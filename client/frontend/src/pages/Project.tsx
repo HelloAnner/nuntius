@@ -7,14 +7,16 @@ import {
   IconChat,
   IconPlus,
   Spinner,
+  RenameThreadSheet,
   SwipeActionRow,
   compareThreadCreation,
   newIdemKey,
   useConfirmAction,
   useToast,
+  type ThreadSummary,
 } from "@nuntius/shared";
 import { api } from "../api";
-import { useArchiveThreadAction, useNavigate } from "../hooks";
+import { useArchiveThreadAction, useNavigate, useRenameThreadAction } from "../hooks";
 import { useRoute } from "../stores";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
@@ -22,12 +24,14 @@ import { NewThreadSheet } from "../sheets/NewThreadSheet";
 export function ProjectPage({ projectId }: { projectId: string }) {
   const navigate = useNavigate();
   const { archive, busyIds } = useArchiveThreadAction();
+  const renameThread = useRenameThreadAction();
   const back = useRoute((s) => s.back);
   const toast = useToast();
   const qc = useQueryClient();
   const { confirm, node: confirmNode } = useConfirmAction();
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [renamingThread, setRenamingThread] = useState<ThreadSummary | null>(null);
 
   const info = useQuery({ queryKey: ["info"], queryFn: api.info });
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
@@ -129,6 +133,8 @@ export function ProjectPage({ projectId }: { projectId: string }) {
                 >
                   <ThreadRow
                     thread={t}
+                    onRename={() => setRenamingThread(t)}
+                    onArchive={unassigned ? undefined : () => archive(t.id)}
                     onClick={() => navigate({ name: "thread", projectId, threadId: t.id })}
                   />
                 </SwipeActionRow>
@@ -158,6 +164,12 @@ export function ProjectPage({ projectId }: { projectId: string }) {
         open={creating}
         onClose={() => setCreating(false)}
         onCreated={(threadId) => navigate({ name: "thread", projectId, threadId })}
+      />
+      <RenameThreadSheet
+        thread={renamingThread}
+        open={renamingThread !== null}
+        onClose={() => setRenamingThread(null)}
+        onRename={(title) => renamingThread ? renameThread(renamingThread, title) : Promise.resolve()}
       />
       {confirmNode}
     </div>

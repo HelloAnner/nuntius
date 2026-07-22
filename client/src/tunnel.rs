@@ -177,6 +177,7 @@ async fn run_connection(
                 "image-input.v1".into(),
                 "agent-provider.v1".into(),
                 PROVIDER_USAGE_CAPABILITY.into(),
+                THREAD_RENAME_CAPABILITY.into(),
             ],
         },
     )

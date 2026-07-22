@@ -170,7 +170,11 @@ export const api = {
 
   // Keep this aligned with /sync's 500-thread snapshot. Replacing that cache
   // with a smaller refetch makes the recents tree visibly collapse and reorder.
-  allThreads: (limit = 500) => req<ThreadSummary[]>("GET", `/threads?limit=${limit}`),
+  allThreads: (limit = 500, includeArchived = true) =>
+    req<ThreadSummary[]>(
+      "GET",
+      `/threads?limit=${limit}&includeArchived=${includeArchived}`,
+    ),
   historyTurns: (threadId: string, limit = 200) =>
     req<HistoryTurnView[]>("GET", `/threads/${threadId}/turns?limit=${limit}`),
   historyItems: (turnId: string, limit = 500) =>
@@ -208,6 +212,8 @@ export const api = {
     ),
   interruptTurn: (threadId: string) =>
     req<CommandReceipt>("POST", `/threads/${threadId}/interrupt`),
+  renameThread: (threadId: string, title: string | null, idemKey?: string) =>
+    req<CommandReceipt>("PATCH", `/threads/${threadId}`, { title }, { idemKey }),
   archiveThread: (threadId: string, archived = true, idemKey?: string) =>
     req<CommandReceipt>("POST", `/threads/${threadId}/archive`, { archived }, { idemKey }),
 

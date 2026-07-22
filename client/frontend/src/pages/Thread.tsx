@@ -3,7 +3,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   IconArchive,
+  IconEdit,
+  IconMore,
   IconPlus,
+  RenameThreadSheet,
   SwipeActionRow,
   ThreadView,
   compareThreadCreation,
@@ -19,7 +22,7 @@ import {
   type ThreadSummary,
 } from "@nuntius/shared";
 import { api } from "../api";
-import { useArchiveThreadAction, useMedia, useNavigate } from "../hooks";
+import { useArchiveThreadAction, useMedia, useNavigate, useRenameThreadAction } from "../hooks";
 import { liveStore, useApprovals, useRoute, useThreadLive } from "../stores";
 import { ConnIndicator, ThreadRow, TopBar } from "../components";
 import { NewThreadSheet } from "../sheets/NewThreadSheet";
@@ -66,10 +69,13 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
   const toast = useToast();
   const navigate = useNavigate();
   const { archive: archiveThread, busyIds } = useArchiveThreadAction();
+  const renameThread = useRenameThreadAction();
   const back = useRoute((s) => s.back);
   const wide = useMedia("(min-width: 768px)");
   const { confirm, node: confirmNode } = useConfirmAction();
   const [creating, setCreating] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   const [sendBusy, setSendBusy] = useState(false);
   const [interruptBusy, setInterruptBusy] = useState(false);
   const sendPendingRef = useRef(false);
@@ -255,8 +261,14 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
 
   const topbar = (
     <TopBar
-      title={truncateEnd(fullThreadTitle)}
-      titleHint={fullThreadTitle}
+      title={
+        <span className="renameable-thread-title">
+          <span>{truncateEnd(fullThreadTitle)}</span>
+          <IconEdit size={13} />
+        </span>
+      }
+      titleHint={`重命名会话：${fullThreadTitle}`}
+      onTitleClick={thread ? () => setRenameOpen(true) : undefined}
       subtitle={thread ? `${project?.displayName ?? "项目"} · ${providerLabel(thread.provider)}` : project?.displayName}
       onBack={() => back({ name: "project", projectId })}
       trailing={
@@ -272,7 +284,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
               <IconPlus size={19} />
             </button>
           ) : null}
-          {!archived ? (
+          {wide && !archived ? (
             <button
               className="icon-btn"
               onClick={setArchived}
@@ -282,9 +294,41 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
               <IconArchive size={18} />
             </button>
           ) : null}
+          <button
+            className="icon-btn"
+            onClick={() => setMenuOpen((value) => !value)}
+            aria-label="更多会话操作"
+            aria-expanded={menuOpen}
+          >
+            <IconMore size={19} />
+          </button>
           <ConnIndicator />
         </>
       }
+    />
+  );
+
+  const threadMenu = menuOpen ? (
+    <div className="thread-actions-menu" role="menu">
+      {thread ? (
+        <button role="menuitem" onClick={() => { setMenuOpen(false); setRenameOpen(true); }}>
+          <IconEdit size={15} />重命名会话
+        </button>
+      ) : null}
+      {!archived ? (
+        <button role="menuitem" onClick={() => { setMenuOpen(false); setArchived(); }}>
+          <IconArchive size={15} />归档会话
+        </button>
+      ) : null}
+    </div>
+  ) : null;
+
+  const renameSheet = (
+    <RenameThreadSheet
+      thread={thread ?? null}
+      open={renameOpen}
+      onClose={() => setRenameOpen(false)}
+      onRename={(title) => thread ? renameThread(thread, title) : Promise.resolve()}
     />
   );
 
@@ -301,9 +345,11 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
 
   if (!wide) {
     return (
-      <div className="page">
+      <div className="page thread-page">
         {topbar}
         {threadView}
+        {threadMenu}
+        {renameSheet}
         {newThreadSheet}
         {confirmNode}
       </div>
@@ -315,7 +361,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     .sort(compareThreadCreation);
 
   return (
-    <div className="page">
+    <div className="page thread-page">
       <div className="detail-grid">
         <aside className="detail-side">
           <TopBar
@@ -346,9 +392,11 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
         <div className="detail-main">
           {topbar}
           {threadView}
+          {threadMenu}
         </div>
       </div>
       {newThreadSheet}
+      {renameSheet}
       {confirmNode}
     </div>
   );
