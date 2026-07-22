@@ -103,6 +103,15 @@ export function isRunningStatus(status: string | null | undefined): boolean {
   return status === "active" || status === "running" || status === "inProgress";
 }
 
+/** Running threads first, then newest-created first within the same status priority. */
+export function compareThreadStatusCreation(
+  left: { id: string; status?: string | null; createdAt?: string | null },
+  right: { id: string; status?: string | null; createdAt?: string | null },
+): number {
+  const runningPriority = Number(isRunningStatus(right.status)) - Number(isRunningStatus(left.status));
+  return runningPriority || compareThreadCreation(left, right);
+}
+
 export type Tone = "ok" | "warn" | "danger" | "info" | "muted";
 
 export function deviceTone(status: string): Tone {

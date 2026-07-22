@@ -1,7 +1,7 @@
 /*
  * Compact console typography
  *
- * Recent-session tree leaves are the density reference for the whole remote
+ * Recent-session list rows are the density reference for the whole remote
  * console: 12.5px for primary copy and 11px for supporting metadata. Visual
  * hierarchy comes from weight and color instead of unrelated font sizes.
  * Only brand marks and status microcopy keep specialized sizes.
@@ -64,8 +64,6 @@ body {
 .thread-list-title,
 .thread-actions-menu button,
 .thread-switcher-head strong,
-.thread-tree-device-row .thread-tree-name,
-.thread-tree-project-row .thread-tree-name,
 .thread-sidebar-context strong,
 .detail-main > .topbar .topbar-title .t,
 .thread-page > .topbar .topbar-title .t,
@@ -109,7 +107,6 @@ body {
 .thread-switcher-head > span,
 .thread-switcher-label,
 .thread-sidebar-label,
-.thread-tree-count,
 .thread-sidebar-context span,
 .thread-page .thread-runtime,
 .turn-meta,

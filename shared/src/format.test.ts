@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { compareThreadCreation, isRunningStatus, statusLabel, truncateEnd } from "./format";
+import {
+  compareThreadCreation,
+  compareThreadStatusCreation,
+  isRunningStatus,
+  statusLabel,
+  truncateEnd,
+} from "./format";
 
 describe("compareThreadCreation", () => {
   test("orders threads by creation time, newest first", () => {
@@ -46,5 +52,21 @@ describe("runtime status", () => {
     expect(isRunningStatus("notLoaded")).toBe(false);
     expect(statusLabel("inProgress")).toBe("运行中");
     expect(statusLabel("stalled")).toBe("长时间无活动");
+  });
+
+  test("orders running threads first and uses creation time within each priority", () => {
+    const threads = [
+      { id: "idle-new", status: "idle", createdAt: "2026-07-22T10:00:00Z" },
+      { id: "running-old", status: "active", createdAt: "2026-07-20T10:00:00Z" },
+      { id: "idle-old", status: "completed", createdAt: "2026-07-21T10:00:00Z" },
+      { id: "running-new", status: "running", createdAt: "2026-07-22T09:00:00Z" },
+    ];
+
+    expect(threads.sort(compareThreadStatusCreation).map((thread) => thread.id)).toEqual([
+      "running-new",
+      "running-old",
+      "idle-new",
+      "idle-old",
+    ]);
   });
 });

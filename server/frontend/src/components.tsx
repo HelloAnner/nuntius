@@ -332,6 +332,8 @@ export function ThreadListItem({
   selected = false,
   contextDevice,
   contextProject,
+  contextBelow = false,
+  timestamp,
   onClick,
 }: {
   thread: ThreadSummary;
@@ -339,10 +341,20 @@ export function ThreadListItem({
   selected?: boolean;
   contextDevice?: string;
   contextProject?: string;
+  contextBelow?: boolean;
+  timestamp?: string | null;
   onClick: () => void;
 }) {
   const tone = pendingApproval ? "warning" : threadTone(thread);
   const state = pendingApproval ? "等待审批" : statusLabel(thread.status);
+  const context = contextDevice || contextProject ? (
+    <span className="thread-list-context">
+      {contextDevice ? <span className="ctx-device"><IconDevice size={10} />{contextDevice}</span> : null}
+      {contextDevice && contextProject ? <span className="ctx-sep">·</span> : null}
+      {contextProject ? <span className="ctx-project"><IconFolder size={10} />{contextProject}</span> : null}
+    </span>
+  ) : null;
+  const relativeTime = relTime(timestamp === undefined ? thread.lastActivityAt ?? thread.createdAt : timestamp);
   return (
     <button
       className={`thread-list-item thread-${tone}${selected ? " selected" : ""}`}
@@ -352,15 +364,10 @@ export function ThreadListItem({
       <StatusDot tone={tone} pulse={tone === "active"} />
       <span className="thread-list-copy">
         <span className="thread-list-title">{thread.title || "未命名会话"}</span>
-        <span className="thread-list-meta">
-          {contextDevice || contextProject ? (
-            <span className="thread-list-context">
-              {contextDevice ? <span className="ctx-device">{contextDevice}</span> : null}
-              {contextDevice && contextProject ? <span className="ctx-sep">/</span> : null}
-              {contextProject ? <span className="ctx-project">{contextProject}</span> : null}
-            </span>
-          ) : null}
-          <span className="thread-list-state">{state} · {providerLabel(thread.provider)} · {relTime(thread.lastActivityAt ?? thread.createdAt)}</span>
+        <span className={`thread-list-meta${contextBelow && context ? " context-below" : ""}`}>
+          {contextBelow ? null : context}
+          <span className="thread-list-state">{state} · {providerLabel(thread.provider)} · {relativeTime}</span>
+          {contextBelow ? context : null}
         </span>
       </span>
     </button>
