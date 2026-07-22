@@ -5,6 +5,70 @@ import { isRunningStatus } from "../format";
 import { IconArrowUp, IconImage, IconStop, IconX } from "./icons";
 import { Spinner } from "./ui";
 
+type ComposerDraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+export interface ComposerDraftState {
+  draftKey: string;
+  text: string;
+}
+
+const memoryDrafts = new Map<string, string>();
+
+function defaultDraftStorage(): ComposerDraftStorage | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function draftStorageKey(draftKey: string): string {
+  return `nuntius:draft:${draftKey}`;
+}
+
+export function loadComposerDraft(
+  draftKey: string,
+  storage: ComposerDraftStorage | null = defaultDraftStorage(),
+): string {
+  try {
+    const stored = storage?.getItem(draftStorageKey(draftKey));
+    if (stored != null) {
+      if (stored) memoryDrafts.set(draftKey, stored);
+      else memoryDrafts.delete(draftKey);
+      return stored;
+    }
+  } catch {
+    /* Keep drafts available in this tab when browser storage is unavailable. */
+  }
+  return memoryDrafts.get(draftKey) ?? "";
+}
+
+export function saveComposerDraft(
+  draftKey: string,
+  text: string,
+  storage: ComposerDraftStorage | null = defaultDraftStorage(),
+): void {
+  if (text) memoryDrafts.set(draftKey, text);
+  else memoryDrafts.delete(draftKey);
+
+  try {
+    if (text) storage?.setItem(draftStorageKey(draftKey), text);
+    else storage?.removeItem(draftStorageKey(draftKey));
+  } catch {
+    /* The in-memory copy still isolates drafts for the lifetime of this tab. */
+  }
+}
+
+export function resolveComposerDraft(
+  current: ComposerDraftState,
+  draftKey: string,
+  storage: ComposerDraftStorage | null = defaultDraftStorage(),
+): ComposerDraftState {
+  return current.draftKey === draftKey
+    ? current
+    : { draftKey, text: loadComposerDraft(draftKey, storage) };
+}
+
 export function Composer({
   draftKey,
   canSend,
@@ -32,8 +96,12 @@ export function Composer({
   onDeleteAttachment?: (attachmentId: string) => Promise<void>;
   onInterrupt: () => void;
 }) {
-  const storageKey = `nuntius:draft:${draftKey}`;
-  const [text, setText] = useState(() => localStorage.getItem(storageKey) ?? "");
+  const [draft, setDraft] = useState<ComposerDraftState>(() => ({
+    draftKey,
+    text: loadComposerDraft(draftKey),
+  }));
+  const activeDraft = resolveComposerDraft(draft, draftKey);
+  const text = activeDraft.text;
   const [uploads, setUploads] = useState<PendingImage[]>([]);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -61,9 +129,9 @@ export function Composer({
     for (const upload of uploadsRef.current) URL.revokeObjectURL(upload.previewUrl);
   }, []);
 
-  useEffect(() => {
-    localStorage.setItem(storageKey, text);
-  }, [storageKey, text]);
+  useLayoutEffect(() => {
+    if (draft.draftKey !== draftKey) setDraft(activeDraft);
+  }, [activeDraft, draft.draftKey, draftKey]);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -71,6 +139,11 @@ export function Composer({
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
   }, [text]);
+
+  const updateText = (nextText: string) => {
+    setDraft({ draftKey, text: nextText });
+    saveComposerDraft(draftKey, nextText);
+  };
 
   const uploadFile = (entry: PendingImage) => {
     if (!onUpload) return;
@@ -138,7 +211,7 @@ export function Composer({
       ? crypto.randomUUID()
       : `msg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     onSend(value, readyAttachments, clientMessageId);
-    setText("");
+    updateText("");
     for (const upload of uploads) URL.revokeObjectURL(upload.previewUrl);
     setUploads([]);
   };
@@ -201,7 +274,7 @@ export function Composer({
               ? (lockedReason ?? "当前不可发送")
               : (placeholder ?? (onUpload ? "输入消息，或粘贴图片…" : "输入消息…"))
           }
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => updateText(e.target.value)}
           onPaste={(event) => {
             if (!onUpload || locked || busy || uploads.length >= 4) return;
             const images = clipboardImageFiles(event.clipboardData);

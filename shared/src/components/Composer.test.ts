@@ -1,5 +1,69 @@
 import { describe, expect, test } from "bun:test";
-import { clipboardImageFiles } from "./Composer";
+import {
+  clipboardImageFiles,
+  loadComposerDraft,
+  resolveComposerDraft,
+  saveComposerDraft,
+} from "./Composer";
+
+function memoryStorage() {
+  const values = new Map<string, string>();
+  return {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      values.set(key, value);
+    },
+    removeItem: (key: string) => {
+      values.delete(key);
+    },
+  };
+}
+
+describe("conversation drafts", () => {
+  test("keeps unsent text isolated by thread", () => {
+    const storage = memoryStorage();
+
+    saveComposerDraft("thread-a", "message for A", storage);
+    saveComposerDraft("thread-b", "message for B", storage);
+
+    expect(loadComposerDraft("thread-a", storage)).toBe("message for A");
+    expect(loadComposerDraft("thread-b", storage)).toBe("message for B");
+  });
+
+  test("resolves the selected thread instead of reusing the mounted input state", () => {
+    const storage = memoryStorage();
+    saveComposerDraft("thread-b", "saved B", storage);
+
+    expect(resolveComposerDraft(
+      { draftKey: "thread-a", text: "unsent A" },
+      "thread-b",
+      storage,
+    )).toEqual({ draftKey: "thread-b", text: "saved B" });
+  });
+
+  test("clearing one submitted draft leaves other threads untouched", () => {
+    const storage = memoryStorage();
+    saveComposerDraft("thread-a", "message for A", storage);
+    saveComposerDraft("thread-b", "message for B", storage);
+
+    saveComposerDraft("thread-a", "", storage);
+
+    expect(loadComposerDraft("thread-a", storage)).toBe("");
+    expect(loadComposerDraft("thread-b", storage)).toBe("message for B");
+  });
+
+  test("falls back to tab memory when browser storage is unavailable", () => {
+    const unavailable = {
+      getItem: () => { throw new Error("blocked"); },
+      setItem: () => { throw new Error("blocked"); },
+      removeItem: () => { throw new Error("blocked"); },
+    };
+
+    saveComposerDraft("thread-storage-blocked", "kept in memory", unavailable);
+
+    expect(loadComposerDraft("thread-storage-blocked", unavailable)).toBe("kept in memory");
+  });
+});
 
 function clipboardSource({
   items = [],
