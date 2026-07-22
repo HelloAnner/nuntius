@@ -5,6 +5,8 @@ use axum::{
 };
 use rust_embed::RustEmbed;
 
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
+
 #[derive(RustEmbed)]
 #[folder = "frontend/dist/"]
 pub struct Assets;
@@ -58,8 +60,16 @@ fn add_security_headers(response: &mut Response) {
     );
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
-        "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
-            .parse()
-            .expect("static header"),
+        CONTENT_SECURITY_POLICY.parse().expect("static header"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_security_policy_allows_local_image_previews() {
+        assert!(CONTENT_SECURITY_POLICY.contains("img-src 'self' data: blob:"));
+    }
 }
