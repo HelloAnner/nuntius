@@ -10,7 +10,9 @@ import {
   Spinner,
   RenameThreadSheet,
   SwipeActionRow,
-  compareThreadCreation,
+  compareThreadStatusCreation,
+  isRunningStatus,
+  threadNeedsReview,
   type ThreadSummary,
 } from "@nuntius/shared";
 import { api } from "../api";
@@ -89,15 +91,20 @@ export function RecentsPage() {
     const now = Date.now();
     const q = query.trim().toLocaleLowerCase();
     return [...(threads.data ?? [])]
-      .sort(compareThreadCreation)
+      .sort(compareThreadStatusCreation)
       .filter((thread) => !busyIds.has(thread.id))
       .filter((thread) => deviceFilter === "all" || thread.deviceId === deviceFilter)
       .filter((thread) => projectFilter === "all" || `${thread.deviceId}:${thread.projectId}` === projectFilter)
       .filter((thread) => {
         if (statusFilter !== "archived" && thread.archived) return false;
-        if (statusFilter === "running") return thread.status === "active";
+        if (statusFilter === "running") return isRunningStatus(thread.status);
+        if (statusFilter === "review") return threadNeedsReview(thread);
         if (statusFilter === "approval") return pendingThreadIds.has(thread.id);
-        if (statusFilter === "idle") return thread.status !== "active" && !pendingThreadIds.has(thread.id);
+        if (statusFilter === "idle") {
+          return !isRunningStatus(thread.status)
+            && !threadNeedsReview(thread)
+            && !pendingThreadIds.has(thread.id);
+        }
         if (statusFilter === "archived") return thread.archived;
         return true;
       })
@@ -178,6 +185,7 @@ export function RecentsPage() {
               {[
                 ["all", "全部"],
                 ["running", "运行中"],
+                ["review", "待查看"],
                 ["approval", "等待审批"],
                 ["idle", "空闲"],
                 ["archived", "已归档"],
@@ -220,6 +228,7 @@ export function RecentsPage() {
                 options={[
                   { value: "all", label: "状态：全部" },
                   { value: "running", label: "运行中" },
+                  { value: "review", label: "待查看" },
                   { value: "approval", label: "等待审批" },
                   { value: "idle", label: "空闲" },
                   { value: "archived", label: "已归档" },
@@ -291,18 +300,18 @@ export function RecentsPage() {
 }
 
 function groupSessions(threads: ThreadSummary[]): SessionGroup[] {
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const yesterday = today - 86_400_000;
-  const buckets: Record<string, ThreadSummary[]> = { today: [], yesterday: [], earlier: [] };
+  const buckets: Record<string, ThreadSummary[]> = { running: [], review: [], other: [] };
   for (const thread of threads) {
-    const time = Date.parse(thread.lastActivityAt ?? thread.createdAt ?? "");
-    const key = time >= today ? "today" : time >= yesterday ? "yesterday" : "earlier";
+    const key = isRunningStatus(thread.status)
+      ? "running"
+      : threadNeedsReview(thread)
+        ? "review"
+        : "other";
     buckets[key].push(thread);
   }
   return [
-    { key: "today", label: "今天", threads: buckets.today },
-    { key: "yesterday", label: "昨天", threads: buckets.yesterday },
-    { key: "earlier", label: "更早", threads: buckets.earlier },
+    { key: "running", label: "进行中", threads: buckets.running },
+    { key: "review", label: "待查看", threads: buckets.review },
+    { key: "other", label: "其他会话", threads: buckets.other },
   ].filter((group) => group.threads.length);
 }

@@ -87,6 +87,22 @@ impl CommandExecutor {
                     "thread": updated,
                 }))
             }
+            DeviceCommandKind::ThreadMarkViewed { thread_id } => {
+                self.thread(thread_id).await?;
+                let changed = self.store.mark_thread_viewed(thread_id).await?;
+                let updated = self.thread(thread_id).await?;
+                if changed {
+                    self.emit_thread_summary(thread_id).await?;
+                    if let Err(error) = self.sync_thread(thread_id).await {
+                        tracing::warn!(%thread_id,error=?error,"viewed thread history sync deferred");
+                    }
+                }
+                Ok(json!({
+                    "threadId": thread_id,
+                    "changed": changed,
+                    "thread": updated,
+                }))
+            }
             DeviceCommandKind::ThreadArchive {
                 thread_id,
                 archived,
@@ -2425,6 +2441,7 @@ fn validate_command(kind: &DeviceCommandKind) -> Result<()> {
         DeviceCommandKind::Refresh
         | DeviceCommandKind::ProviderUsageRefresh
         | DeviceCommandKind::ThreadArchive { .. }
+        | DeviceCommandKind::ThreadMarkViewed { .. }
         | DeviceCommandKind::TurnInterrupt { .. }
         | DeviceCommandKind::HistorySync { .. } => {}
     }

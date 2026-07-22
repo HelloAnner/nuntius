@@ -96,6 +96,11 @@ export const api = {
   interruptTurn: (threadId: string) => req<unknown>("POST", `/threads/${threadId}/interrupt`),
   archiveThread: (threadId: string, archived: boolean) =>
     req<unknown>("POST", `/threads/${threadId}/archive`, { archived }),
+  markThreadViewed: (threadId: string) =>
+    req<{ threadId: string; changed: boolean; thread: ThreadSummary }>(
+      "POST",
+      `/threads/${threadId}/viewed`,
+    ),
   decideApproval: (approvalId: string, decision: string) =>
     req<unknown>("POST", `/approvals/${approvalId}/decision`, { decision }),
 };

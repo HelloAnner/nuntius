@@ -300,6 +300,12 @@ paths:
       parameters: [{$ref: '#/components/parameters/ThreadId'}, {$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody: {required: true, content: {application/json: {schema: {type: object, required: [archived], properties: {archived: {type: boolean}}}}}}
       responses: {'202': {$ref: '#/components/responses/CommandAccepted'}}
+  /threads/{threadId}/viewed:
+    post:
+      operationId: markThreadViewed
+      description: 用户已经看到会话最新内容；仅当 needsReview 为 true 时清除待查看标记，设备离线时持久化排队。
+      parameters: [{$ref: '#/components/parameters/ThreadId'}, {$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {'202': {$ref: '#/components/responses/CommandAccepted'}}
   /threads/{threadId}/history-sync:
     post:
       operationId: syncThreadHistory
@@ -540,7 +546,7 @@ components:
         lastActivityAt: {type: [string, 'null'], format: date-time}
     Thread:
       type: object
-      required: [id, deviceId, projectId, provider, title, displayTitleOverride, titleRevision, status, archived, historyCompleteness, createdAt]
+      required: [id, deviceId, projectId, provider, title, displayTitleOverride, titleRevision, status, needsReview, archived, historyCompleteness, createdAt]
       properties:
         id: {type: string}
         deviceId: {type: string}
@@ -551,6 +557,7 @@ components:
         displayTitleOverride: {type: [string, 'null']}
         titleRevision: {type: integer, minimum: 0}
         status: {type: string}
+        needsReview: {type: boolean, default: false}
         archived: {type: boolean}
         historyCompleteness: {enum: [not_started, backfilling, complete, partial, error]}
         createdAt: {type: [string, 'null'], format: date-time}

@@ -119,6 +119,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/threads/{thread_id}/archive", post(archive_thread))
         .route(
+            "/api/v1/threads/{thread_id}/viewed",
+            post(mark_thread_viewed),
+        )
+        .route(
             "/api/v1/threads/{thread_id}/history-sync",
             post(sync_thread_history),
         )
@@ -194,6 +198,7 @@ async fn info(State(state): State<AppState>) -> Result<Json<ServerInfo>, ApiErro
             DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into(),
             PROVIDER_USAGE_CAPABILITY.into(),
             THREAD_RENAME_CAPABILITY.into(),
+            THREAD_VIEW_STATE_CAPABILITY.into(),
         ],
     }))
 }
@@ -1243,6 +1248,46 @@ async fn archive_thread(
     .await
 }
 
+async fn mark_thread_viewed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+) -> Result<(StatusCode, Json<CommandReceipt>), ApiError> {
+    let session = web_mutation(&state, &headers).await?;
+    let (device_id, project_id) = state
+        .store
+        .thread_metadata_target(&session.user_id, &thread_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let response = enqueue(
+        &state,
+        &headers,
+        &session,
+        device_id.clone(),
+        Some(project_id),
+        Some(thread_id.clone()),
+        DeviceCommandKind::ThreadMarkViewed {
+            thread_id: thread_id.clone(),
+        },
+    )
+    .await?;
+    if state
+        .store
+        .mark_thread_viewed(&session.user_id, &thread_id)
+        .await?
+    {
+        tunnel::publish_device_event(
+            &state,
+            &session.user_id,
+            &device_id,
+            "thread.review_state_changed",
+            serde_json::json!({"threadId": thread_id, "needsReview": false}),
+        )
+        .await?;
+    }
+    Ok(response)
+}
+
 #[derive(Deserialize)]
 struct ArchiveRequest {
     archived: bool,
@@ -1458,6 +1503,7 @@ async fn enqueue(
         &kind,
         DeviceCommandKind::ThreadArchive { .. }
             | DeviceCommandKind::ThreadRename { .. }
+            | DeviceCommandKind::ThreadMarkViewed { .. }
             | DeviceCommandKind::ProviderUsageRefresh
     );
     let expiry = OffsetDateTime::now_utc()
@@ -1755,6 +1801,7 @@ fn validate_device_command(kind: &DeviceCommandKind) -> Result<(), ApiError> {
         DeviceCommandKind::Refresh
         | DeviceCommandKind::ProviderUsageRefresh
         | DeviceCommandKind::ThreadArchive { .. }
+        | DeviceCommandKind::ThreadMarkViewed { .. }
         | DeviceCommandKind::TurnInterrupt { .. }
         | DeviceCommandKind::HistorySync { .. } => {}
     }

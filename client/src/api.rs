@@ -52,6 +52,10 @@ pub fn router(executor: CommandExecutor) -> Router {
             post(interrupt_turn),
         )
         .route("/api/v1/threads/{thread_id}/archive", post(archive_thread))
+        .route(
+            "/api/v1/threads/{thread_id}/viewed",
+            post(mark_thread_viewed),
+        )
         .route("/api/v1/approvals/{approval_id}/decision", post(approval))
         .route("/api/v1/events", get(events))
         .route("/", get(assets::serve_root))
@@ -140,7 +144,7 @@ async fn info(State(executor): State<CommandExecutor>) -> Result<Json<Value>, Ap
         .iter()
         .any(|status| status.provider == AgentProvider::Codex && status.status == "online");
     Ok(Json(
-        json!({"apiVersion":"v1","clientVersion":env!("CARGO_PKG_VERSION"),"buildSha":nuntius_updater::build_sha(),"releaseSequence":nuntius_updater::build_sequence(),"deviceId":executor.device_id,"displayName":display_name,"paired":executor.config.device_id.is_some(),"localBind":executor.config.local_bind,"appServerRunning":app_server_running,"providers":providers,"projects":projects,"pendingCommands":inbox,"pendingEvents":outbox,"activeTurns":active,"capabilities":["local-console.v1","directory-browser.v1","project-delete.v1","image-input.v1","agent-provider.v1","agent-model-config.v1","app-server.v1","sse.v1",DEVICE_DISPLAY_NAME_SYNC_CAPABILITY,PROVIDER_USAGE_CAPABILITY,THREAD_RENAME_CAPABILITY]}),
+        json!({"apiVersion":"v1","clientVersion":env!("CARGO_PKG_VERSION"),"buildSha":nuntius_updater::build_sha(),"releaseSequence":nuntius_updater::build_sequence(),"deviceId":executor.device_id,"displayName":display_name,"paired":executor.config.device_id.is_some(),"localBind":executor.config.local_bind,"appServerRunning":app_server_running,"providers":providers,"projects":projects,"pendingCommands":inbox,"pendingEvents":outbox,"activeTurns":active,"capabilities":["local-console.v1","directory-browser.v1","project-delete.v1","image-input.v1","agent-provider.v1","agent-model-config.v1","app-server.v1","sse.v1",DEVICE_DISPLAY_NAME_SYNC_CAPABILITY,PROVIDER_USAGE_CAPABILITY,THREAD_RENAME_CAPABILITY,THREAD_VIEW_STATE_CAPABILITY]}),
     ))
 }
 async fn sync_snapshot(
@@ -475,6 +479,20 @@ async fn archive_thread(
         DeviceCommandKind::ThreadArchive {
             thread_id: thread_id.clone(),
             archived: request.archived,
+        },
+        None,
+        Some(thread_id),
+    )
+    .await
+}
+async fn mark_thread_viewed(
+    State(executor): State<CommandExecutor>,
+    Path(thread_id): Path<String>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    run(
+        &executor,
+        DeviceCommandKind::ThreadMarkViewed {
+            thread_id: thread_id.clone(),
         },
         None,
         Some(thread_id),

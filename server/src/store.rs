@@ -674,7 +674,7 @@ impl ServerStore {
         if project_exists.is_none() {
             bail!("created thread references an unavailable project")
         }
-        sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,display_title_override,title_revision,status,archived,history_completeness,created_at,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=CASE WHEN excluded.title_revision>=threads.title_revision THEN excluded.title ELSE threads.title END,display_title_override=CASE WHEN excluded.title_revision>=threads.title_revision THEN excluded.display_title_override ELSE threads.display_title_override END,title_revision=MAX(threads.title_revision,excluded.title_revision),status=excluded.status,archived=excluded.archived,created_at=COALESCE(excluded.created_at,threads.created_at),last_activity_at=COALESCE(excluded.last_activity_at,threads.last_activity_at) WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id")
+        sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,display_title_override,title_revision,status,needs_review,archived,history_completeness,created_at,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=CASE WHEN excluded.title_revision>=threads.title_revision THEN excluded.title ELSE threads.title END,display_title_override=CASE WHEN excluded.title_revision>=threads.title_revision THEN excluded.display_title_override ELSE threads.display_title_override END,title_revision=MAX(threads.title_revision,excluded.title_revision),status=excluded.status,needs_review=excluded.needs_review,archived=excluded.archived,created_at=COALESCE(excluded.created_at,threads.created_at),last_activity_at=COALESCE(excluded.last_activity_at,threads.last_activity_at) WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id")
             .bind(&thread.id)
             .bind(user_id)
             .bind(&thread.device_id)
@@ -685,6 +685,7 @@ impl ServerStore {
             .bind(&thread.display_title_override)
             .bind(thread.title_revision)
             .bind(&thread.status)
+            .bind(thread.needs_review)
             .bind(thread.archived)
             .bind("backfilling")
             .bind(&thread.created_at)
@@ -693,6 +694,17 @@ impl ServerStore {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    pub async fn mark_thread_viewed(&self, user_id: &str, thread_id: &str) -> Result<bool> {
+        let updated = sqlx::query(
+            "UPDATE threads SET needs_review=0 WHERE id=? AND user_id=? AND needs_review=1",
+        )
+        .bind(thread_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
     }
 
     pub async fn thread_belongs_to_user(
@@ -1566,8 +1578,8 @@ impl ServerStore {
                     &fallback_project
                 };
                 if !stale {
-                    sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,display_title_override,title_revision,status,archived,history_completeness,created_at,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,'backfilling',?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=CASE WHEN excluded.title_revision>=threads.title_revision THEN excluded.title ELSE threads.title END,display_title_override=CASE WHEN excluded.title_revision>=threads.title_revision THEN excluded.display_title_override ELSE threads.display_title_override END,title_revision=MAX(threads.title_revision,excluded.title_revision),status=excluded.status,archived=excluded.archived,created_at=COALESCE(excluded.created_at,threads.created_at),last_synced_at=excluded.last_synced_at,last_activity_at=excluded.last_activity_at,history_revision=excluded.history_revision WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id AND excluded.history_revision>=threads.history_revision")
-                    .bind(&thread.id).bind(user_id).bind(&batch.device_id).bind(project_id).bind(thread.provider.as_str()).bind(&thread.app_server_thread_id).bind(&thread.title).bind(&thread.display_title_override).bind(thread.title_revision).bind(&thread.status).bind(thread.archived)
+                    sqlx::query("INSERT INTO threads(id,user_id,device_id,project_id,provider,app_server_thread_id,title,display_title_override,title_revision,status,needs_review,archived,history_completeness,created_at,last_synced_at,last_activity_at,history_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'backfilling',?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,provider=excluded.provider,app_server_thread_id=COALESCE(excluded.app_server_thread_id,threads.app_server_thread_id),title=CASE WHEN excluded.title_revision>=threads.title_revision THEN excluded.title ELSE threads.title END,display_title_override=CASE WHEN excluded.title_revision>=threads.title_revision THEN excluded.display_title_override ELSE threads.display_title_override END,title_revision=MAX(threads.title_revision,excluded.title_revision),status=excluded.status,needs_review=excluded.needs_review,archived=excluded.archived,created_at=COALESCE(excluded.created_at,threads.created_at),last_synced_at=excluded.last_synced_at,last_activity_at=excluded.last_activity_at,history_revision=excluded.history_revision WHERE threads.user_id=excluded.user_id AND threads.device_id=excluded.device_id AND excluded.history_revision>=threads.history_revision")
+                    .bind(&thread.id).bind(user_id).bind(&batch.device_id).bind(project_id).bind(thread.provider.as_str()).bind(&thread.app_server_thread_id).bind(&thread.title).bind(&thread.display_title_override).bind(thread.title_revision).bind(&thread.status).bind(thread.needs_review).bind(thread.archived)
                     .bind(&thread.created_at).bind(&thread.last_synced_at).bind(&thread.last_activity_at).bind(batch.inventory_revision).execute(&mut *tx).await?;
                 }
             }
@@ -1885,6 +1897,7 @@ fn thread_from_row(r: sqlx::sqlite::SqliteRow) -> ThreadSummary {
         display_title_override: r.get("display_title_override"),
         title_revision: r.get("title_revision"),
         status: r.get("status"),
+        needs_review: r.get::<i64, _>("needs_review") != 0,
         archived: r.get::<i64, _>("archived") != 0,
         history_completeness: parse_completeness(&r.get::<String, _>("history_completeness")),
         created_at: r.get("created_at"),
@@ -2073,6 +2086,7 @@ mod tests {
             display_title_override: Some("My display title".into()),
             title_revision: 2,
             status: "idle".into(),
+            needs_review: false,
             archived: false,
             history_completeness: HistoryCompleteness::Complete,
             created_at: Some(now()),
@@ -2119,6 +2133,21 @@ mod tests {
         assert_eq!(reset.title, "Newest provider title");
         assert_eq!(reset.display_title_override, None);
         assert_eq!(reset.title_revision, 3);
+
+        thread.needs_review = true;
+        store
+            .upsert_created_thread(&user.id, &thread)
+            .await
+            .unwrap();
+        assert!(store.mark_thread_viewed(&user.id, &thread.id).await.unwrap());
+        assert!(!store.mark_thread_viewed(&user.id, &thread.id).await.unwrap());
+        let viewed = store
+            .list_threads_including_archived(&user.id, 10, 0)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(!viewed.needs_review);
     }
 
     #[tokio::test]
@@ -2370,6 +2399,7 @@ mod tests {
                     display_title_override: None,
                     title_revision: 0,
                     status: "idle".into(),
+                    needs_review: false,
                     archived: false,
                     history_completeness: HistoryCompleteness::Complete,
                     created_at: Some(now()),
@@ -2444,6 +2474,7 @@ mod tests {
                     display_title_override: None,
                     title_revision: 0,
                     status: "idle".into(),
+                    needs_review: false,
                     archived: false,
                     history_completeness: HistoryCompleteness::Complete,
                     created_at: Some(now()),
@@ -2662,6 +2693,7 @@ mod tests {
                     display_title_override: None,
                     title_revision: 0,
                     status: "idle".into(),
+                    needs_review: false,
                     archived: false,
                     history_completeness: HistoryCompleteness::Complete,
                     created_at: Some(now()),
@@ -2877,6 +2909,7 @@ mod tests {
                     display_title_override: None,
                     title_revision: 0,
                     status: "idle".into(),
+                    needs_review: false,
                     archived: false,
                     history_completeness: HistoryCompleteness::Complete,
                     created_at: Some(now()),

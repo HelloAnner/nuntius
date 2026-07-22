@@ -216,6 +216,8 @@ export const api = {
     req<CommandReceipt>("PATCH", `/threads/${threadId}`, { title }, { idemKey }),
   archiveThread: (threadId: string, archived = true, idemKey?: string) =>
     req<CommandReceipt>("POST", `/threads/${threadId}/archive`, { archived }, { idemKey }),
+  markThreadViewed: (threadId: string, idemKey?: string) =>
+    req<CommandReceipt>("POST", `/threads/${threadId}/viewed`, undefined, { idemKey }),
 
   decideApproval: (deviceId: string, approvalId: string, decision: string, idemKey: string) =>
     req<CommandReceipt>(

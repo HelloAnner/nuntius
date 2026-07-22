@@ -132,6 +132,14 @@ impl TunnelRegistry {
                         },
                     ..
                 } => Some(THREAD_RENAME_CAPABILITY),
+                TunnelFrame::Command {
+                    command:
+                        DeviceCommand {
+                            command: DeviceCommandKind::ThreadMarkViewed { .. },
+                            ..
+                        },
+                    ..
+                } => Some(THREAD_VIEW_STATE_CAPABILITY),
                 _ => None,
             };
             if let Some(capability) = required_capability
@@ -370,6 +378,9 @@ async fn run_socket(
     let supports_thread_rename = client_capabilities
         .iter()
         .any(|capability| capability == THREAD_RENAME_CAPABILITY);
+    let supports_thread_view_state = client_capabilities
+        .iter()
+        .any(|capability| capability == THREAD_VIEW_STATE_CAPABILITY);
 
     let (out_tx, mut out_rx) = mpsc::channel::<TunnelFrame>(256);
     let (supersede_tx, mut superseded) = oneshot::channel();
@@ -428,6 +439,7 @@ async fn run_socket(
                     "agent-provider.v1".into(),
                     PROVIDER_USAGE_CAPABILITY.into(),
                     THREAD_RENAME_CAPABILITY.into(),
+                    THREAD_VIEW_STATE_CAPABILITY.into(),
                 ],
                 display_name: Some(display_name.clone()),
             })
@@ -465,6 +477,13 @@ async fn run_socket(
                 &stored.command.command,
                 DeviceCommandKind::ThreadRename { .. }
             ) && !supports_thread_rename
+            {
+                continue;
+            }
+            if matches!(
+                &stored.command.command,
+                DeviceCommandKind::ThreadMarkViewed { .. }
+            ) && !supports_thread_view_state
             {
                 continue;
             }

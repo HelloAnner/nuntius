@@ -554,7 +554,8 @@ impl ClientStore {
         .await?)
     }
     pub async fn touch_thread(&self, id: &str, status: &str) -> Result<()> {
-        sqlx::query("UPDATE threads SET status=?,last_activity_at=?,updated_at=? WHERE id=?")
+        sqlx::query("UPDATE threads SET status=?,needs_review=CASE WHEN lower(?) IN ('active','running','inprogress','recovering','stalled') THEN 0 WHEN lower(status) IN ('active','running','inprogress','recovering','stalled') THEN 1 ELSE needs_review END,last_activity_at=?,updated_at=? WHERE id=?")
+            .bind(status)
             .bind(status)
             .bind(now())
             .bind(now())
@@ -564,13 +565,22 @@ impl ClientStore {
         Ok(())
     }
     pub async fn set_thread_status(&self, id: &str, status: &str) -> Result<()> {
-        sqlx::query("UPDATE threads SET status=?,updated_at=? WHERE id=?")
+        sqlx::query("UPDATE threads SET status=?,needs_review=CASE WHEN lower(?) IN ('active','running','inprogress','recovering','stalled') THEN 0 WHEN lower(status) IN ('active','running','inprogress','recovering','stalled') THEN 1 ELSE needs_review END,updated_at=? WHERE id=?")
+            .bind(status)
             .bind(status)
             .bind(now())
             .bind(id)
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+    pub async fn mark_thread_viewed(&self, id: &str) -> Result<bool> {
+        let updated =
+            sqlx::query("UPDATE threads SET needs_review=0 WHERE id=? AND needs_review=1")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+        Ok(updated.rows_affected() == 1)
     }
     /// Returns only rows whose durable runtime projection can block or
     /// misroute the next user input. The provider is consulted before any
@@ -695,7 +705,7 @@ impl ClientStore {
                 .await?;
         }
         sqlx::query(
-            "UPDATE threads SET status='active',last_activity_at=?,updated_at=? WHERE id=?",
+            "UPDATE threads SET status='active',needs_review=0,last_activity_at=?,updated_at=? WHERE id=?",
         )
         .bind(&stamp)
         .bind(&stamp)
@@ -754,7 +764,7 @@ impl ClientStore {
             .bind(thread_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE threads SET status='idle',updated_at=? WHERE id=?")
+        sqlx::query("UPDATE threads SET status='idle',needs_review=1,updated_at=? WHERE id=?")
             .bind(&stamp)
             .bind(thread_id)
             .execute(&mut *tx)
@@ -887,7 +897,7 @@ impl ClientStore {
             .await?;
         }
         sqlx::query(
-            "UPDATE threads SET status='active',last_activity_at=?,updated_at=? WHERE id=?",
+            "UPDATE threads SET status='active',needs_review=0,last_activity_at=?,updated_at=? WHERE id=?",
         )
         .bind(&stamp)
         .bind(&stamp)
@@ -972,7 +982,7 @@ impl ClientStore {
                 .execute(&mut *tx).await?;
         }
         sqlx::query(
-            "UPDATE threads SET status='active',last_activity_at=?,updated_at=? WHERE id=?",
+            "UPDATE threads SET status='active',needs_review=0,last_activity_at=?,updated_at=? WHERE id=?",
         )
         .bind(&stamp)
         .bind(&stamp)
@@ -1178,7 +1188,7 @@ impl ClientStore {
             .bind(thread_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE threads SET status='idle',last_activity_at=?,updated_at=? WHERE id=?")
+        sqlx::query("UPDATE threads SET status='idle',needs_review=1,last_activity_at=?,updated_at=? WHERE id=?")
             .bind(&stamp)
             .bind(&stamp)
             .bind(thread_id)
@@ -1241,8 +1251,11 @@ impl ClientStore {
         } else {
             raw_status.as_str()
         };
-        sqlx::query("UPDATE threads SET title=?,status=CASE WHEN status='stalled' AND ?='active' THEN status WHEN ? AND status IN ('active','recovering','stalled') THEN status ELSE ? END,created_at=COALESCE(?,created_at),last_activity_at=CASE WHEN ? IS NULL THEN last_activity_at WHEN last_activity_at IS NULL OR julianday(?)>julianday(last_activity_at) THEN ? ELSE last_activity_at END,updated_at=CASE WHEN ? IS NOT NULL AND julianday(?)>julianday(updated_at) THEN ? ELSE updated_at END WHERE id=?")
+        sqlx::query("UPDATE threads SET title=?,status=CASE WHEN status='stalled' AND ?='active' THEN status WHEN ? AND status IN ('active','recovering','stalled') THEN status ELSE ? END,needs_review=CASE WHEN status='stalled' AND ?='active' THEN needs_review WHEN ? AND status IN ('active','recovering','stalled') THEN needs_review WHEN lower(?) IN ('active','running','inprogress','recovering','stalled') THEN 0 WHEN lower(status) IN ('active','running','inprogress','recovering','stalled') THEN 1 ELSE needs_review END,created_at=COALESCE(?,created_at),last_activity_at=CASE WHEN ? IS NULL THEN last_activity_at WHEN last_activity_at IS NULL OR julianday(?)>julianday(last_activity_at) THEN ? ELSE last_activity_at END,updated_at=CASE WHEN ? IS NOT NULL AND julianday(?)>julianday(updated_at) THEN ? ELSE updated_at END WHERE id=?")
         .bind(title)
+        .bind(&raw_status)
+        .bind(residency_only)
+        .bind(status)
         .bind(&raw_status)
         .bind(residency_only)
         .bind(status)
@@ -1444,8 +1457,9 @@ impl ClientStore {
                 .execute(&mut *tx)
                 .await?;
         }
-        sqlx::query("UPDATE threads SET status=?,updated_at=? WHERE id=?")
-            .bind(thread_status)
+        sqlx::query("UPDATE threads SET status=?,needs_review=CASE WHEN lower(?) IN ('active','running','inprogress','recovering','stalled') THEN 0 WHEN lower(status) IN ('active','running','inprogress','recovering','stalled') THEN 1 ELSE needs_review END,updated_at=? WHERE id=?")
+            .bind(&thread_status)
+            .bind(&thread_status)
             .bind(&stamp)
             .bind(thread_id)
             .execute(&mut *tx)
@@ -2184,6 +2198,7 @@ fn thread_summary(r: &sqlx::sqlite::SqliteRow, device_id: &str) -> ThreadSummary
         display_title_override,
         title_revision: r.get("title_revision"),
         status: r.get("status"),
+        needs_review: r.get::<i64, _>("needs_review") != 0,
         archived: r.get("archived"),
         history_completeness: HistoryCompleteness::Complete,
         created_at: Some(r.get("created_at")),
@@ -2371,6 +2386,7 @@ mod tests {
                 .await
                 .unwrap()
         );
+        store.touch_thread("thr_title", "active").await.unwrap();
         store
             .update_imported_thread(
                 "thr_title",
@@ -2395,6 +2411,7 @@ mod tests {
             Some("My display title")
         );
         assert_eq!(renamed.title_revision, 1);
+        assert!(renamed.needs_review);
 
         assert!(
             store
@@ -3145,15 +3162,23 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(active, 0);
-        assert_eq!(
-            store
-                .thread("thr_runtime", "dev_test")
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "idle"
-        );
+        let completed = store
+            .thread("thr_runtime", "dev_test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.status, "idle");
+        assert!(completed.needs_review);
+        assert!(store.mark_thread_viewed("thr_runtime").await.unwrap());
+        let viewed = store
+            .thread("thr_runtime", "dev_test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(viewed.status, "idle");
+        assert!(!viewed.needs_review);
+        assert_eq!(viewed.last_activity_at, completed.last_activity_at);
+        assert!(!store.mark_thread_viewed("thr_runtime").await.unwrap());
 
         store
             .import_app_history(

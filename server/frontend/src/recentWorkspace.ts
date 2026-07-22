@@ -1,7 +1,7 @@
 import { compareThreadStatusCreation, type ThreadSummary } from "@nuntius/shared";
 
 type PreferenceStorage = Pick<Storage, "getItem" | "setItem">;
-type RecentThreadCandidate = Pick<ThreadSummary, "id" | "status" | "createdAt" | "archived">;
+type RecentThreadCandidate = Pick<ThreadSummary, "id" | "status" | "needsReview" | "createdAt" | "archived">;
 type RecentThreadTimestamp = Pick<ThreadSummary, "createdAt" | "lastActivityAt">;
 
 const STORAGE_KEY = "nuntius:last-recent-thread:v1";

@@ -1,6 +1,6 @@
 /* Thread page (local console): conversation with the selected on-device provider. */
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   IconArchive,
   IconEdit,
@@ -9,9 +9,10 @@ import {
   RenameThreadSheet,
   SwipeActionRow,
   ThreadView,
-  compareThreadCreation,
+  compareThreadStatusCreation,
   newIdemKey,
   providerLabel,
+  threadNeedsReview,
   truncateEnd,
   useConfirmAction,
   useToast,
@@ -67,6 +68,7 @@ function groupHistory(records: HistoryRecord[]): HistoryGroup[] {
 
 export function ThreadPage({ projectId, threadId }: { projectId: string; threadId: string }) {
   const toast = useToast();
+  const qc = useQueryClient();
   const navigate = useNavigate();
   const { archive: archiveThread, busyIds } = useArchiveThreadAction();
   const renameThread = useRenameThreadAction();
@@ -80,6 +82,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
   const [interruptBusy, setInterruptBusy] = useState(false);
   const sendPendingRef = useRef(false);
   const interruptPendingRef = useRef(false);
+  const viewedPendingRef = useRef<string | null>(null);
 
   const info = useQuery({ queryKey: ["info"], queryFn: api.info });
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
@@ -170,6 +173,31 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
           ? "正在恢复运行连接…"
           : null;
 
+  useEffect(() => {
+    if (!thread || !threadNeedsReview(thread)) viewedPendingRef.current = null;
+  }, [thread]);
+
+  const markLatestViewed = useCallback(() => {
+    if (
+      !thread
+      || !threadNeedsReview(thread)
+      || history.isFetching
+      || history.isError
+      || viewedPendingRef.current === threadId
+    ) return;
+    viewedPendingRef.current = threadId;
+    void api.markThreadViewed(threadId).then(({ thread: updated }) => {
+      const replace = (items: ThreadSummary[] | undefined) => items?.map((item) =>
+        item.id === threadId ? updated : item,
+      );
+      qc.setQueriesData<ThreadSummary[]>({ queryKey: ["threads"] }, replace);
+      qc.setQueriesData<ThreadSummary[]>({ queryKey: ["projectThreads"] }, replace);
+      qc.setQueryData(["threadSnapshot", threadId], updated);
+    }).catch(() => {
+      viewedPendingRef.current = null;
+    });
+  }, [history.isError, history.isFetching, qc, thread, threadId]);
+
   const send = async (text: string, attachments: AttachmentView[] = [], clientMessageId = newIdemKey()) => {
     if (sendPendingRef.current) return;
     sendPendingRef.current = true;
@@ -255,6 +283,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
       busy={busyIds.has(threadId) || sendBusy || interruptBusy}
       onSend={send}
       onRetry={retry}
+      onLatestVisible={markLatestViewed}
       onInterrupt={interrupt}
     />
   );
@@ -358,7 +387,7 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
 
   const sortedThreads = [...(projectThreads.data ?? [])]
     .filter((thread) => !busyIds.has(thread.id))
-    .sort(compareThreadCreation);
+    .sort(compareThreadStatusCreation);
 
   return (
     <div className="page thread-page">

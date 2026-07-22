@@ -17,6 +17,7 @@ import {
   orderedTimeline,
   liveTurnHasTranscript,
   optimisticEchoIsInHistory,
+  shouldMarkLatestViewed,
   shouldRenderThreadLoading,
   visibleHistoryItems,
   visibleLiveItems,
@@ -40,6 +41,15 @@ describe("ThreadView initial loading", () => {
     expect(shouldRenderThreadLoading(true, 0)).toBe(true);
     expect(shouldRenderThreadLoading(true, 1)).toBe(false);
     expect(shouldRenderThreadLoading(false, 0)).toBe(false);
+  });
+});
+
+describe("ThreadView viewed state", () => {
+  test("marks the latest content viewed only when it is loaded, followed, and visible", () => {
+    expect(shouldMarkLatestViewed(false, true, true)).toBe(true);
+    expect(shouldMarkLatestViewed(true, true, true)).toBe(false);
+    expect(shouldMarkLatestViewed(false, false, true)).toBe(false);
+    expect(shouldMarkLatestViewed(false, true, false)).toBe(false);
   });
 });
 

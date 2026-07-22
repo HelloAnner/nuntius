@@ -177,6 +177,7 @@ export interface ThreadSummary {
   displayTitleOverride: string | null;
   titleRevision: number;
   status: string;
+  needsReview: boolean;
   archived: boolean;
   historyCompleteness: HistoryCompleteness;
   createdAt: string | null;

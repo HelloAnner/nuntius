@@ -65,6 +65,7 @@ const STATUS_LABELS: Record<string, string> = {
   inProgress: "运行中",
   recovering: "恢复中",
   stalled: "长时间无活动",
+  needs_review: "待查看",
   idle: "空闲",
   running: "运行中",
   interrupted: "已中断",
@@ -103,13 +104,33 @@ export function isRunningStatus(status: string | null | undefined): boolean {
   return status === "active" || status === "running" || status === "inProgress";
 }
 
-/** Running threads first, then newest-created first within the same status priority. */
+export function isNeedsReviewStatus(status: string | null | undefined): boolean {
+  return status === "needs_review";
+}
+
+export function threadNeedsReview(thread: {
+  status?: string | null;
+  needsReview?: boolean | null;
+}): boolean {
+  return !isRunningStatus(thread.status)
+    && (Boolean(thread.needsReview) || isNeedsReviewStatus(thread.status));
+}
+
+export function threadPresentationStatus(thread: {
+  status?: string | null;
+  needsReview?: boolean | null;
+}): string | null | undefined {
+  return threadNeedsReview(thread) ? "needs_review" : thread.status;
+}
+
+/** Running first, then unseen completed work, then newest-created within each priority. */
 export function compareThreadStatusCreation(
-  left: { id: string; status?: string | null; createdAt?: string | null },
-  right: { id: string; status?: string | null; createdAt?: string | null },
+  left: { id: string; status?: string | null; needsReview?: boolean | null; createdAt?: string | null },
+  right: { id: string; status?: string | null; needsReview?: boolean | null; createdAt?: string | null },
 ): number {
-  const runningPriority = Number(isRunningStatus(right.status)) - Number(isRunningStatus(left.status));
-  return runningPriority || compareThreadCreation(left, right);
+  const priority = (thread: typeof left) =>
+    isRunningStatus(thread.status) ? 2 : threadNeedsReview(thread) ? 1 : 0;
+  return priority(right) - priority(left) || compareThreadCreation(left, right);
 }
 
 export type Tone = "ok" | "warn" | "danger" | "info" | "muted";

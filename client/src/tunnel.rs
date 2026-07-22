@@ -178,6 +178,7 @@ async fn run_connection(
                 "agent-provider.v1".into(),
                 PROVIDER_USAGE_CAPABILITY.into(),
                 THREAD_RENAME_CAPABILITY.into(),
+                THREAD_VIEW_STATE_CAPABILITY.into(),
             ],
         },
     )

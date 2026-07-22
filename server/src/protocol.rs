@@ -12,6 +12,7 @@ pub const DEVICE_DISPLAY_NAME_SYNC_CAPABILITY: &str = "device-display-name-sync.
 pub const CLIENT_UPDATE_CAPABILITY: &str = "client-update.v1";
 pub const PROVIDER_USAGE_CAPABILITY: &str = "provider-usage.v1";
 pub const THREAD_RENAME_CAPABILITY: &str = "thread-rename.v1";
+pub const THREAD_VIEW_STATE_CAPABILITY: &str = "thread-view-state.v1";
 
 pub fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::now_v7())
@@ -356,6 +357,8 @@ pub struct ThreadSummary {
     #[serde(default)]
     pub title_revision: i64,
     pub status: String,
+    #[serde(default)]
+    pub needs_review: bool,
     pub archived: bool,
     pub history_completeness: HistoryCompleteness,
     #[serde(default)]
@@ -631,6 +634,9 @@ pub enum DeviceCommandKind {
         thread_id: String,
         archived: bool,
     },
+    ThreadMarkViewed {
+        thread_id: String,
+    },
     TurnStart {
         thread_id: String,
         request: StartTurnRequest,
@@ -668,6 +674,7 @@ impl DeviceCommandKind {
             Self::ThreadArchive {
                 archived: false, ..
             } => "thread.unarchive",
+            Self::ThreadMarkViewed { .. } => "thread.mark_viewed",
             Self::TurnStart { .. } => "turn.start",
             Self::TurnSteer { .. } => "turn.steer",
             Self::TurnInterrupt { .. } => "turn.interrupt",
@@ -862,6 +869,16 @@ mod tests {
         let value = serde_json::to_value(DeviceCommandKind::ProviderUsageRefresh).unwrap();
         assert_eq!(value["kind"], "provider_usage_refresh");
         assert!(value.get("payload").is_none());
+    }
+
+    #[test]
+    fn thread_mark_viewed_wire_tag_is_stable() {
+        let value = serde_json::to_value(DeviceCommandKind::ThreadMarkViewed {
+            thread_id: "thr_test".into(),
+        })
+        .unwrap();
+        assert_eq!(value["kind"], "thread_mark_viewed");
+        assert_eq!(value["payload"]["threadId"], "thr_test");
     }
 
     #[test]

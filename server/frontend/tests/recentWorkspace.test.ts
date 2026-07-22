@@ -24,7 +24,8 @@ const thread = (
   createdAt: string,
   archived = false,
   lastActivityAt: string | null = null,
-) => ({ id, status, createdAt, archived, lastActivityAt });
+  needsReview = false,
+) => ({ id, status, needsReview, createdAt, archived, lastActivityAt });
 
 describe("recent workspace selection", () => {
   test("restores the last valid thread before applying the fallback ordering", () => {
@@ -44,6 +45,17 @@ describe("recent workspace selection", () => {
     ];
 
     expect(selectRecentWorkspaceThread(threads, null)?.id).toBe("running-new");
+  });
+
+  test("places unseen completed work after running and before idle threads", () => {
+    const threads = [
+      thread("idle-new", "idle", "2026-07-22T10:00:00Z"),
+      thread("review-old", "idle", "2026-07-20T10:00:00Z", false, null, true),
+      thread("running-old", "active", "2026-07-19T10:00:00Z"),
+    ];
+
+    expect(selectRecentWorkspaceThread(threads, null)?.id).toBe("running-old");
+    expect(selectRecentWorkspaceThread(threads.slice(0, 2), null)?.id).toBe("review-old");
   });
 
   test("sorts by creation time even when an older thread has newer message activity", () => {

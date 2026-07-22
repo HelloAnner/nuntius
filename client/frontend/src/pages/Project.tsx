@@ -9,7 +9,7 @@ import {
   Spinner,
   RenameThreadSheet,
   SwipeActionRow,
-  compareThreadCreation,
+  compareThreadStatusCreation,
   newIdemKey,
   useConfirmAction,
   useToast,
@@ -53,7 +53,7 @@ export function ProjectPage({ projectId }: { projectId: string }) {
   const canCreate = Boolean(!unassigned && providerStatuses.some((status) => status.available));
   const sorted = [...(threads.data ?? [])]
     .filter((thread) => !busyIds.has(thread.id))
-    .sort(compareThreadCreation);
+    .sort(compareThreadStatusCreation);
 
   const remove = () => {
     if (!project || unassigned || deleting) return;

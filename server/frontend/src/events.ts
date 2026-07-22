@@ -209,6 +209,13 @@ export function startEvents(qc: QueryClient): () => void {
       void qc.invalidateQueries({ queryKey: ["devices"] });
       return;
     }
+    if (type === "thread.review_state_changed") {
+      const threadId = typeof (event.payload as { threadId?: unknown }).threadId === "string"
+        ? (event.payload as { threadId: string }).threadId
+        : null;
+      markThreadDirty(threadId);
+      return;
+    }
     if (type === "project.removed") {
       const projectId =
         typeof (event.payload as { projectId?: unknown }).projectId === "string"

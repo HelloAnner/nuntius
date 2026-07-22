@@ -61,6 +61,14 @@ export function isThreadNearBottom(
   return Math.max(0, distance) <= BOTTOM_FOLLOW_EPSILON;
 }
 
+export function shouldMarkLatestViewed(
+  loading: boolean,
+  followingLatest: boolean,
+  pageVisible: boolean,
+): boolean {
+  return !loading && followingLatest && pageVisible;
+}
+
 /**
  * Keep the live transcript stable while App Server events and persisted history
  * overlap. A turn already renders its initial prompt from `userText`; some App
@@ -420,6 +428,7 @@ export function ThreadView({
   onUpload,
   onDeleteAttachment,
   onRetry,
+  onLatestVisible,
   onInterrupt,
 }: {
   history: HistoryGroup[];
@@ -443,6 +452,7 @@ export function ThreadView({
   onUpload?: (file: File, onProgress: (progress: number) => void) => Promise<AttachmentView>;
   onDeleteAttachment?: (attachmentId: string) => Promise<void>;
   onRetry?: (turnId: string, text: string, attachments: AttachmentView[]) => void;
+  onLatestVisible?: () => void;
   onInterrupt: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -454,6 +464,9 @@ export function ThreadView({
     scrollTop: number;
   } | null>(null);
   const [stick, setStick] = useState(true);
+  const [pageVisible, setPageVisible] = useState(
+    () => typeof document === "undefined" || document.visibilityState === "visible",
+  );
 
   const durableHistory = orderedHistory(history);
   const unmatchedLiveTurns = freshLiveTurnsForHistory(durableHistory, live.turns);
@@ -672,6 +685,17 @@ export function ThreadView({
     observer.observe(scroller);
     return () => observer.disconnect();
   }, [draftKey, scrollToBottom]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onVisibilityChange = () => setPageVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
+
+  useEffect(() => {
+    if (shouldMarkLatestViewed(Boolean(loading), stick, pageVisible)) onLatestVisible?.();
+  }, [draftKey, loading, onLatestVisible, pageVisible, stick, transcriptCount]);
 
   useLayoutEffect(() => {
     if (loading) return;

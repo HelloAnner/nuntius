@@ -20,6 +20,8 @@ import {
   providerLabel,
   relTime,
   statusLabel,
+  threadNeedsReview,
+  threadPresentationStatus,
   truncateMiddle,
   type ConnState,
   type DeviceSummary,
@@ -323,6 +325,7 @@ export function ProjectRow({ project, onClick }: { project: ProjectSummary; onCl
 
 export function threadTone(thread: ThreadSummary): StatusTone {
   if (thread.status === "active") return "active";
+  if (threadNeedsReview(thread)) return "warning";
   if (thread.status === "recovering") return "warning";
   if (["failed", "error", "rejected"].includes(thread.status)) return "danger";
   if (["completed", "idle"].includes(thread.status)) return "success";
@@ -348,8 +351,9 @@ export function ThreadListItem({
   timestamp?: string | null;
   onClick: () => void;
 }) {
+  const needsReview = threadNeedsReview(thread);
   const tone = pendingApproval ? "warning" : threadTone(thread);
-  const state = pendingApproval ? "等待审批" : statusLabel(thread.status);
+  const state = pendingApproval ? "等待审批" : statusLabel(threadPresentationStatus(thread));
   const context = contextDevice || contextProject ? (
     <span className="thread-list-context">
       {contextDevice ? <span className="ctx-device"><IconDevice size={10} />{contextDevice}</span> : null}
@@ -360,16 +364,19 @@ export function ThreadListItem({
   const relativeTime = relTime(timestamp === undefined ? thread.lastActivityAt ?? thread.createdAt : timestamp);
   return (
     <button
-      className={`thread-list-item thread-${tone}${selected ? " selected" : ""}`}
+      className={`thread-list-item thread-${tone}${needsReview ? " needs-review" : ""}${selected ? " selected" : ""}`}
       onClick={onClick}
       aria-current={selected ? "page" : undefined}
     >
-      <StatusDot tone={tone} pulse={tone === "active"} />
+      <StatusDot tone={tone} pulse={tone === "active" || needsReview} />
       <span className="thread-list-copy">
         <span className="thread-list-title">{thread.title || "未命名会话"}</span>
         <span className={`thread-list-meta${contextBelow && context ? " context-below" : ""}`}>
           {contextBelow ? null : context}
-          <span className="thread-list-state">{state} · {providerLabel(thread.provider)} · {relativeTime}</span>
+          <span className="thread-list-state">
+            <span className={needsReview ? "review-label" : undefined}>{state}</span>
+            <span aria-hidden="true"> · </span>{providerLabel(thread.provider)} · {relativeTime}
+          </span>
           {contextBelow ? context : null}
         </span>
       </span>
@@ -394,6 +401,7 @@ export function ThreadRow({
   onRename?: () => void;
   onArchive?: () => void;
 }) {
+  const needsReview = threadNeedsReview(thread);
   const tone = threadTone(thread);
   const hasActions = Boolean(onRename || onArchive);
   return (
@@ -403,7 +411,7 @@ export function ThreadRow({
         onClick={onClick}
         aria-current={selected ? "page" : undefined}
       >
-        <StatusDot tone={tone} pulse={tone === "active"} />
+        <StatusDot tone={tone} pulse={tone === "active" || needsReview} />
         <span className="grow">
           <span className="title">{thread.title || "未命名会话"}</span>
           <span className="thread-meta" aria-label={`${deviceName}，${projectName}`}>
@@ -411,6 +419,7 @@ export function ThreadRow({
             <span aria-hidden="true">·</span>
             <span className="thread-project"><IconFolder size={11} />{projectName || "未归属项目"}</span>
             <span aria-hidden="true">·</span>
+            {needsReview ? <><span className="review-label">待查看</span><span aria-hidden="true">·</span></> : null}
             <span className="thread-time num">{relTime(thread.lastActivityAt ?? thread.createdAt)}</span>
           </span>
         </span>

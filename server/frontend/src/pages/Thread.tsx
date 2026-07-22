@@ -1,5 +1,5 @@
 /* Thread page: the focused conversation surface. */
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Empty,
@@ -17,6 +17,8 @@ import {
   newIdemKey,
   providerLabel,
   statusLabel,
+  threadNeedsReview,
+  threadPresentationStatus,
   truncateEnd,
   useConfirmAction,
   useToast,
@@ -87,6 +89,7 @@ export function ThreadPage({
   const [interruptBusy, setInterruptBusy] = useState(false);
   const sendPendingRef = useRef(false);
   const interruptPendingRef = useRef(false);
+  const viewedPendingRef = useRef<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(loadThreadSidebarWidth);
   const sidebarWidthRef = useRef(sidebarWidth);
 
@@ -265,6 +268,38 @@ export function ThreadPage({
             ? "正在恢复运行连接…"
             : null;
 
+  useEffect(() => {
+    if (!thread || !threadNeedsReview(thread)) viewedPendingRef.current = null;
+  }, [thread]);
+
+  const markLatestViewed = useCallback(() => {
+    if (
+      !thread
+      || !threadNeedsReview(thread)
+      || history.isFetching
+      || history.isError
+      || history.isPlaceholderData
+      || viewedPendingRef.current === threadId
+    ) return;
+    viewedPendingRef.current = threadId;
+    const idemKey = newIdemKey();
+    void api.markThreadViewed(threadId, idemKey).then((receipt) => {
+      const markViewed = (items: ThreadSummary[] | undefined) => items?.map((item) =>
+        item.id === threadId && threadNeedsReview(item)
+          ? { ...item, needsReview: false }
+          : item,
+      );
+      qc.setQueriesData<ThreadSummary[]>({ queryKey: ["allThreads"] }, markViewed);
+      qc.setQueriesData<ThreadSummary[]>({ queryKey: ["projectThreads"] }, markViewed);
+      qc.setQueryData<ThreadSummary | undefined>(["threadSnapshot", threadId], (item) =>
+        item && threadNeedsReview(item) ? { ...item, needsReview: false } : item,
+      );
+      trackCommand(qc, receipt.commandId, threadId, "thread.mark_viewed");
+    }).catch(() => {
+      viewedPendingRef.current = null;
+    });
+  }, [history.isError, history.isFetching, history.isPlaceholderData, qc, thread, threadId]);
+
   const send = async (text: string, attachments: AttachmentView[] = [], clientMessageId = newIdemKey()) => {
     if (sendPendingRef.current) return;
     sendPendingRef.current = true;
@@ -383,13 +418,16 @@ export function ThreadPage({
       onUpload={(file, onProgress) => api.uploadAttachment(threadId, file, onProgress)}
       onDeleteAttachment={api.deleteAttachment}
       onRetry={retry}
+      onLatestVisible={markLatestViewed}
       onInterrupt={interrupt}
     />
   );
 
   const pendingApproval = threadApprovals.some((approval) => approval.state === "pending");
   const currentTone = thread ? (pendingApproval ? "warning" : threadTone(thread)) : "offline";
-  const currentStateLabel = pendingApproval ? "等待审批" : statusLabel(thread?.status ?? "offline");
+  const currentStateLabel = pendingApproval
+    ? "等待审批"
+    : statusLabel(thread ? threadPresentationStatus(thread) : "offline");
 
   const sidebarSource = (fromRecents ? (allThreads.data ?? []) : (projectThreads.data ?? []))
     .filter((item) => !item.archived || item.id === threadId)

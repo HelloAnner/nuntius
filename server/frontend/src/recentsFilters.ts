@@ -1,4 +1,4 @@
-export type RecentStatusFilter = "all" | "running" | "approval" | "idle" | "archived";
+export type RecentStatusFilter = "all" | "running" | "review" | "approval" | "idle" | "archived";
 
 export interface RecentFilterPreferences {
   deviceFilter: string;
@@ -18,6 +18,7 @@ const MAX_FILTER_VALUE_LENGTH = 256;
 const STATUS_FILTERS = new Set<RecentStatusFilter>([
   "all",
   "running",
+  "review",
   "approval",
   "idle",
   "archived",

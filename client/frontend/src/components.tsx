@@ -17,6 +17,8 @@ import {
   relTime,
   providerLabel,
   statusLabel,
+  threadNeedsReview,
+  threadPresentationStatus,
   truncateMiddle,
   type ConnState,
   type ProjectSummary,
@@ -194,9 +196,11 @@ export function ThreadRow({
   onArchive?: () => void;
 }) {
   const active = isRunningStatus(thread.status);
+  const needsReview = threadNeedsReview(thread);
+  const presentationStatus = threadPresentationStatus(thread) ?? thread.status;
   const secondaryStatus =
-    !thread.archived && !["active", "completed", "idle"].includes(thread.status)
-      ? statusLabel(thread.status)
+    !thread.archived && !["active", "completed", "idle"].includes(presentationStatus)
+      ? statusLabel(presentationStatus)
       : null;
   const details = [context, providerLabel(thread.provider), thread.archived ? "已归档" : secondaryStatus].filter(Boolean) as string[];
   const hasActions = Boolean(onRename || onArchive);
@@ -212,12 +216,20 @@ export function ThreadRow({
           </div>
           {details.length ? (
             <div className="sub">
-              {details.map((detail) => <span className="ellipsis" key={detail}>{detail}</span>)}
+              {details.map((detail) => (
+                <span
+                  className={`ellipsis${needsReview && detail === secondaryStatus ? " review-label" : ""}`}
+                  key={detail}
+                >
+                  {detail}
+                </span>
+              ))}
             </div>
           ) : null}
         </div>
         <div className="trailing">
           {active ? <span className="live-dot" aria-label="进行中" /> : null}
+          {needsReview ? <span className="live-dot review" aria-label="待查看" /> : null}
           <span className="num" style={{ fontSize: 12 }}>
             {relTime(thread.lastActivityAt)}
           </span>

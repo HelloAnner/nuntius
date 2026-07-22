@@ -33,6 +33,19 @@ describe("recent filter preferences", () => {
     expect(loadRecentFilterPreferences(storage)).toEqual(preferences);
   });
 
+  test("persists the needs-review filter", () => {
+    const storage = new MemoryStorage();
+    const preferences: RecentFilterPreferences = {
+      deviceFilter: "all",
+      projectFilter: "all",
+      statusFilter: "review",
+    };
+
+    saveRecentFilterPreferences(preferences, storage);
+
+    expect(loadRecentFilterPreferences(storage)).toEqual(preferences);
+  });
+
   test("falls back safely for malformed or unsupported stored values", () => {
     const storage = new MemoryStorage();
     storage.value = JSON.stringify({

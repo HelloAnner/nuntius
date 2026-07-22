@@ -1,7 +1,13 @@
 /* Global thread switcher matching the mobile conversation sheet. */
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { IconPlus, Sheet, compareThreadCreation } from "@nuntius/shared";
+import {
+  IconPlus,
+  Sheet,
+  compareThreadStatusCreation,
+  isRunningStatus,
+  threadNeedsReview,
+} from "@nuntius/shared";
 import { api } from "../api";
 import { usePendingArchiveIds } from "../archiveOutbox";
 import { projectNameFrom, useNavigate, useProjectNameMap } from "../hooks";
@@ -39,15 +45,21 @@ export function ThreadSwitcher({
     () => [...(threads.data ?? [])]
       .filter((thread) => !archivingIds.has(thread.id))
       .filter((thread) => !thread.archived)
-      .sort(compareThreadCreation),
+      .sort(compareThreadStatusCreation),
     [archivingIds, threads.data],
   );
   const contextFor = (thread: (typeof scoped)[number]) => ({
     device: devices.data?.find((item) => item.id === thread.deviceId)?.displayName ?? "设备",
     project: projectNameFrom(projectNames, thread.deviceId, thread.projectId),
   });
-  const active = scoped.filter((thread) => thread.status === "active" || pendingIds.has(thread.id));
-  const recent = scoped.filter((thread) => thread.status !== "active" && !pendingIds.has(thread.id));
+  const active = scoped.filter((thread) => isRunningStatus(thread.status));
+  const review = scoped.filter(
+    (thread) => !isRunningStatus(thread.status) && threadNeedsReview(thread),
+  );
+  const recent = scoped.filter(
+    (thread) => !isRunningStatus(thread.status)
+      && !threadNeedsReview(thread)
+  );
 
   const select = (thread: (typeof scoped)[number]) => {
     navigate(
@@ -79,8 +91,9 @@ export function ThreadSwitcher({
           </button>
         ) : null}
         {active.length ? <ThreadSwitcherGroup label="进行中" threads={active} currentThreadId={currentThreadId} pendingIds={pendingIds} contextFor={contextFor} onSelect={select} /> : null}
+        {review.length ? <ThreadSwitcherGroup label="待查看" threads={review} currentThreadId={currentThreadId} pendingIds={pendingIds} contextFor={contextFor} onSelect={select} /> : null}
         {recent.length ? <ThreadSwitcherGroup label="最近" threads={recent} currentThreadId={currentThreadId} pendingIds={pendingIds} contextFor={contextFor} onSelect={select} /> : null}
-        {!active.length && !recent.length ? <div className="switcher-empty">还没有会话</div> : null}
+        {!active.length && !review.length && !recent.length ? <div className="switcher-empty">还没有会话</div> : null}
       </div>
     </Sheet>
   );
