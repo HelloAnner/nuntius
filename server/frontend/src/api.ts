@@ -14,6 +14,7 @@ import {
   type ProjectSummary,
   type ProviderUsageLatestView,
   type ProviderUsageRefreshResponse,
+  type SavedItemView,
   type ServerInfo,
   type SyncSnapshot,
   type ThreadSummary,
@@ -179,6 +180,8 @@ export const api = {
     req<HistoryTurnView[]>("GET", `/threads/${threadId}/turns?limit=${limit}`),
   historyItems: (turnId: string, limit = 500) =>
     req<HistoryItemView[]>("GET", `/turns/${turnId}/items?limit=${limit}`),
+  saveItem: (sourceItemId: string, idemKey: string) =>
+    req<SavedItemView>("POST", "/saved-items", { sourceItemId }, { idemKey }),
 
   uploadAttachment,
   deleteAttachment: (attachmentId: string) =>

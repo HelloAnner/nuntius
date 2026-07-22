@@ -908,8 +908,8 @@ impl ServerStore {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<HistoryItemView>> {
-        let rows = sqlx::query("SELECT i.* FROM items i JOIN turns t ON t.id=i.turn_id JOIN threads h ON h.id=t.thread_id WHERE h.user_id=? AND i.turn_id=? ORDER BY julianday(i.occurred_at),i.ordinal,i.id LIMIT ? OFFSET ?")
-            .bind(user_id).bind(turn_id).bind(limit).bind(offset).fetch_all(&self.pool).await?;
+        let rows = sqlx::query("SELECT i.*,EXISTS(SELECT 1 FROM saved_items s WHERE s.user_id=? AND s.source_item_id=i.id) saved FROM items i JOIN turns t ON t.id=i.turn_id JOIN threads h ON h.id=t.thread_id WHERE h.user_id=? AND i.turn_id=? ORDER BY julianday(i.occurred_at),i.ordinal,i.id LIMIT ? OFFSET ?")
+            .bind(user_id).bind(user_id).bind(turn_id).bind(limit).bind(offset).fetch_all(&self.pool).await?;
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
             let mut item = item_from_row(row);
@@ -917,6 +917,70 @@ impl ServerStore {
             items.push(item);
         }
         Ok(items)
+    }
+
+    pub async fn save_history_item(
+        &self,
+        user_id: &str,
+        source_item_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<(SavedItemView, bool)>> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(row) = sqlx::query("SELECT id,source_thread_id,source_item_id,content_markdown,created_at FROM saved_items WHERE user_id=? AND idempotency_key=?")
+            .bind(user_id)
+            .bind(idempotency_key)
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            if row.get::<String, _>("source_item_id") != source_item_id {
+                bail!("idempotency key reused with different saved item");
+            }
+            return Ok(Some((saved_item_from_row(row), false)));
+        }
+
+        let source = sqlx::query("SELECT h.id source_thread_id,i.content_text FROM items i JOIN turns t ON t.id=i.turn_id JOIN threads h ON h.id=t.thread_id WHERE h.user_id=? AND i.id=? AND i.kind='agent_message' AND i.status='completed' AND i.is_truncated=0")
+            .bind(user_id)
+            .bind(source_item_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        let Some(content_markdown) = source.get::<Option<String>, _>("content_text") else {
+            return Ok(None);
+        };
+        if content_markdown.trim().is_empty() {
+            return Ok(None);
+        }
+
+        if let Some(row) = sqlx::query("SELECT id,source_thread_id,source_item_id,content_markdown,created_at FROM saved_items WHERE user_id=? AND source_item_id=?")
+            .bind(user_id)
+            .bind(source_item_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            return Ok(Some((saved_item_from_row(row), false)));
+        }
+
+        let saved = SavedItemView {
+            id: new_id("sav"),
+            source_thread_id: source.get("source_thread_id"),
+            source_item_id: source_item_id.into(),
+            content_markdown,
+            created_at: now(),
+        };
+        sqlx::query("INSERT INTO saved_items(id,user_id,source_thread_id,source_item_id,content_markdown,idempotency_key,created_at) VALUES(?,?,?,?,?,?,?)")
+            .bind(&saved.id)
+            .bind(user_id)
+            .bind(&saved.source_thread_id)
+            .bind(&saved.source_item_id)
+            .bind(&saved.content_markdown)
+            .bind(idempotency_key)
+            .bind(&saved.created_at)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(Some((saved, true)))
     }
 
     async fn item_attachments(&self, item_id: &str) -> Result<Vec<AttachmentView>> {
@@ -1922,6 +1986,17 @@ fn item_from_row(r: sqlx::sqlite::SqliteRow) -> HistoryItemView {
         occurred_at: r.get("occurred_at"),
         completed_at: r.get("completed_at"),
         attachments: Vec::new(),
+        saved: r.get::<i64, _>("saved") != 0,
+    }
+}
+
+fn saved_item_from_row(r: sqlx::sqlite::SqliteRow) -> SavedItemView {
+    SavedItemView {
+        id: r.get("id"),
+        source_thread_id: r.get("source_thread_id"),
+        source_item_id: r.get("source_item_id"),
+        content_markdown: r.get("content_markdown"),
+        created_at: r.get("created_at"),
     }
 }
 
@@ -2731,6 +2806,7 @@ mod tests {
                     occurred_at: now(),
                     completed_at: Some(now()),
                     attachments: Vec::new(),
+                    saved: false,
                 }),
             },
             HistoryRecord {
@@ -2749,6 +2825,7 @@ mod tests {
                     occurred_at: now(),
                     completed_at: Some(now()),
                     attachments: Vec::new(),
+                    saved: false,
                 }),
             },
         ];
@@ -2789,6 +2866,38 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(stored_messages, vec!["question", "done"]);
+        assert!(
+            store
+                .save_history_item(&user.id, "itm_history_user", "save-user")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let (saved, created) = store
+            .save_history_item(&user.id, "itm_history_agent", "save-agent")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(created);
+        assert_eq!(saved.source_thread_id, "thr_history");
+        assert_eq!(saved.source_item_id, "itm_history_agent");
+        assert_eq!(saved.content_markdown, "done");
+        let (replayed, replay_created) = store
+            .save_history_item(&user.id, "itm_history_agent", "save-agent")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!replay_created);
+        assert_eq!(replayed.id, saved.id);
+        let history_items = store
+            .history_items(&user.id, "trn_history", 10, 0)
+            .await
+            .unwrap();
+        assert!(
+            history_items
+                .iter()
+                .any(|item| item.id == "itm_history_agent" && item.saved)
+        );
 
         let mut upgraded_replay = history_batch.clone();
         upgraded_replay.payload_hash = "0".repeat(64);
@@ -2834,6 +2943,21 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(stored_messages, vec!["question"]);
+        let saved_snapshot = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT source_thread_id,source_item_id,content_markdown FROM saved_items WHERE id=?",
+        )
+        .bind(&saved.id)
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            saved_snapshot,
+            (
+                "thr_history".into(),
+                "itm_history_agent".into(),
+                "done".into()
+            )
+        );
 
         let mut replaced_records = pruned_batch.records.clone();
         for record in &mut replaced_records {
@@ -2947,6 +3071,7 @@ mod tests {
                     occurred_at: now(),
                     completed_at: Some(now()),
                     attachments: Vec::new(),
+                    saved: false,
                 }),
             },
         ];

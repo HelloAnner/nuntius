@@ -24,6 +24,10 @@ pub fn now() -> String {
         .expect("RFC3339")
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportSecurity {
@@ -394,6 +398,18 @@ pub struct HistoryItemView {
     pub completed_at: Option<String>,
     #[serde(default)]
     pub attachments: Vec<AttachmentView>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub saved: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedItemView {
+    pub id: String,
+    pub source_thread_id: String,
+    pub source_item_id: String,
+    pub content_markdown: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

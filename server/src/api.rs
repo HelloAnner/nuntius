@@ -26,7 +26,7 @@ use base64::Engine;
 use futures_util::Stream;
 use rand::RngCore;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{convert::Infallible, time::Duration as StdDuration};
 use time::{Duration, OffsetDateTime};
@@ -127,6 +127,7 @@ pub fn router(state: AppState) -> Router {
             post(sync_thread_history),
         )
         .route("/api/v1/turns/{turn_id}/items", get(history_items))
+        .route("/api/v1/saved-items", post(create_saved_item))
         .route(
             "/api/v1/approvals/{approval_id}/decision",
             post(decide_approval),
@@ -920,6 +921,42 @@ async fn history_items(
                 query.offset.unwrap_or(0).clamp(0, 1_000_000),
             )
             .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateSavedItemRequest {
+    source_item_id: String,
+}
+
+async fn create_saved_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateSavedItemRequest>,
+) -> Result<(StatusCode, Json<SavedItemView>), ApiError> {
+    let session = web_mutation(&state, &headers).await?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let source_item_id = bounded_nonempty("sourceItemId", &request.source_item_id, 128)?;
+    let result = state
+        .store
+        .save_history_item(&session.user_id, source_item_id, idempotency_key)
+        .await
+        .map_err(|error| {
+            if error.to_string().starts_with("idempotency key reused") {
+                ApiError::Conflict(error.to_string())
+            } else {
+                ApiError::internal(error)
+            }
+        })?
+        .ok_or(ApiError::NotFound)?;
+    Ok((
+        if result.1 {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        Json(result.0),
     ))
 }
 

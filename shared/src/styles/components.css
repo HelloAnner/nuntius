@@ -1010,6 +1010,48 @@
   min-width: 0;
   font-size: 15px;
 }
+.message-actions {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 31px;
+  margin-top: 7px;
+  padding-top: 5px;
+  border-top: 1px solid color-mix(in srgb, var(--hairline) 72%, transparent);
+}
+.message-save {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 66px;
+  min-height: 30px;
+  padding: 0 9px;
+  border-radius: 999px;
+  color: var(--ink-3);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: color 0.15s, background 0.15s, transform 0.15s var(--ease-out);
+}
+.message-save:active:not(:disabled) {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  transform: scale(0.96);
+}
+.message-save.saving,
+.message-save.saved {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+.message-save:disabled {
+  cursor: default;
+}
+@media (hover: hover) {
+  .message-save.idle:hover {
+    color: var(--accent-ink);
+    background: var(--accent-soft);
+  }
+}
 .msg-agent.streaming .mark {
   animation: pulse-dot 1.2s ease-in-out infinite;
 }

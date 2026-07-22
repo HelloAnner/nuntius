@@ -319,6 +319,23 @@ paths:
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 2000, default: 500}}
         - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}}
       responses: {'200': {description: Server 聚合的消息与工具项, content: {application/json: {schema: {type: array, items: {type: object, additionalProperties: true}}}}}}
+  /saved-items:
+    post:
+      operationId: createSavedItem
+      description: 将一条已完整同步的 AI 回复保存为独立 Markdown 文本快照；重复保存同一回复时返回原记录。
+      parameters: [{$ref: '#/components/parameters/Csrf'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sourceItemId]
+              properties: {sourceItemId: {type: string, minLength: 1, maxLength: 128}}
+      responses:
+        '200': {description: 该回复此前已经保存, content: {application/json: {schema: {$ref: '#/components/schemas/SavedItem'}}}}
+        '201': {description: 回复已经保存, content: {application/json: {schema: {$ref: '#/components/schemas/SavedItem'}}}}
+        '404': {$ref: '#/components/responses/NotFound'}
   /approvals:
     get:
       operationId: listApprovals
@@ -563,6 +580,15 @@ components:
         createdAt: {type: [string, 'null'], format: date-time}
         lastSyncedAt: {type: [string, 'null'], format: date-time}
         lastActivityAt: {type: [string, 'null'], format: date-time}
+    SavedItem:
+      type: object
+      required: [id, sourceThreadId, sourceItemId, contentMarkdown, createdAt]
+      properties:
+        id: {type: string}
+        sourceThreadId: {type: string}
+        sourceItemId: {type: string}
+        contentMarkdown: {type: string}
+        createdAt: {type: string, format: date-time}
     DirectoryPage:
       type: object
       required: [deviceId, breadcrumb, entries, expiresAt]

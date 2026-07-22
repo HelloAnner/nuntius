@@ -56,6 +56,7 @@ function mapHistoryItem(item: HistoryItemView) {
     occurredAt: item.occurredAt,
     truncated: item.isTruncated,
     attachments: item.attachments ?? [],
+    saved: item.saved ?? false,
   };
 }
 
@@ -89,6 +90,9 @@ export function ThreadPage({
   const [interruptBusy, setInterruptBusy] = useState(false);
   const sendPendingRef = useRef(false);
   const interruptPendingRef = useRef(false);
+  const savingItemIdsRef = useRef(new Set<string>());
+  const [savingItemIds, setSavingItemIds] = useState<Set<string>>(() => new Set());
+  const [savedItemIds, setSavedItemIds] = useState<Set<string>>(() => new Set());
   const viewedPendingRef = useRef<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(loadThreadSidebarWidth);
   const sidebarWidthRef = useRef(sidebarWidth);
@@ -186,6 +190,9 @@ export function ThreadPage({
 
   useEffect(() => {
     setTurnCount(12);
+    savingItemIdsRef.current.clear();
+    setSavingItemIds(new Set());
+    setSavedItemIds(new Set());
     setRouteGraceElapsed(false);
     const timer = window.setTimeout(() => setRouteGraceElapsed(true), 10_000);
     return () => window.clearTimeout(timer);
@@ -359,6 +366,22 @@ export function ThreadPage({
     }
   };
 
+  const saveAgentMessage = async (itemId: string) => {
+    if (savingItemIdsRef.current.has(itemId)) return;
+    savingItemIdsRef.current.add(itemId);
+    setSavingItemIds(new Set(savingItemIdsRef.current));
+    try {
+      await api.saveItem(itemId, newIdemKey());
+      setSavedItemIds((current) => new Set(current).add(itemId));
+      toast("已保存");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "保存失败，请重试", { error: true });
+    } finally {
+      savingItemIdsRef.current.delete(itemId);
+      setSavingItemIds(new Set(savingItemIdsRef.current));
+    }
+  };
+
   const decide = async (approvalId: string, decision: string) => {
     const approvalsApi = useApprovals.getState();
     approvalsApi.setState(approvalId, "responding");
@@ -420,6 +443,9 @@ export function ThreadPage({
       onRetry={retry}
       onLatestVisible={markLatestViewed}
       onInterrupt={interrupt}
+      onSaveAgentMessage={saveAgentMessage}
+      savingAgentMessageIds={savingItemIds}
+      savedAgentMessageIds={savedItemIds}
     />
   );
 

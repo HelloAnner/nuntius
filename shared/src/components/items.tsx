@@ -6,6 +6,8 @@ import type { AttachmentView } from "../types";
 import { Markdown } from "./Markdown";
 import {
   IconAlert,
+  IconBook,
+  IconCheck,
   IconChevronRight,
   IconFile,
   IconShield,
@@ -117,9 +119,13 @@ function AttachmentGallery({ attachments }: { attachments: AttachmentView[] }) {
 export const AgentMessage = memo(function AgentMessage({
   text,
   streaming,
+  saveState = "idle",
+  onSave,
 }: {
   text: string;
   streaming?: boolean;
+  saveState?: "idle" | "saving" | "saved";
+  onSave?: () => void;
 }) {
   return (
     <div
@@ -136,6 +142,26 @@ export const AgentMessage = memo(function AgentMessage({
           <span className="thinking-indicator" role="status" aria-label="正在思考">
             <span aria-hidden="true" />
           </span>
+        ) : null}
+        {onSave ? (
+          <div className="message-actions">
+            <button
+              className={`message-save ${saveState}`}
+              type="button"
+              onClick={onSave}
+              disabled={saveState !== "idle"}
+              aria-label={saveState === "saved" ? "这条回答已保存" : "保存这条回答"}
+            >
+              {saveState === "saving" ? (
+                <Spinner sm />
+              ) : saveState === "saved" ? (
+                <IconCheck size={14} />
+              ) : (
+                <IconBook size={14} />
+              )}
+              {saveState === "saving" ? "保存中" : saveState === "saved" ? "已保存" : "保存"}
+            </button>
+          </div>
         ) : null}
       </div>
     </div>

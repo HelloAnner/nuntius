@@ -207,6 +207,15 @@ export interface HistoryItemView {
   occurredAt: string;
   completedAt: string | null;
   attachments: AttachmentView[];
+  saved?: boolean;
+}
+
+export interface SavedItemView {
+  id: string;
+  sourceThreadId: string;
+  sourceItemId: string;
+  contentMarkdown: string;
+  createdAt: string;
 }
 
 export interface AttachmentView {

@@ -33,6 +33,7 @@ export interface RenderItem {
   occurredAt: string;
   truncated?: boolean;
   attachments: AttachmentView[];
+  saved?: boolean;
 }
 
 export interface HistoryGroup {
@@ -430,6 +431,9 @@ export function ThreadView({
   onRetry,
   onLatestVisible,
   onInterrupt,
+  onSaveAgentMessage,
+  savingAgentMessageIds,
+  savedAgentMessageIds,
 }: {
   history: HistoryGroup[];
   loading?: boolean;
@@ -454,6 +458,9 @@ export function ThreadView({
   onRetry?: (turnId: string, text: string, attachments: AttachmentView[]) => void;
   onLatestVisible?: () => void;
   onInterrupt: () => void;
+  onSaveAgentMessage?: (itemId: string) => void;
+  savingAgentMessageIds?: ReadonlySet<string>;
+  savedAgentMessageIds?: ReadonlySet<string>;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -778,7 +785,25 @@ export function ThreadView({
                   attachments={entry.item.attachments}
                 />
               ) : (
-                <AgentMessage key={entry.key} text={entry.item.text} />
+                <AgentMessage
+                  key={entry.key}
+                  text={entry.item.text}
+                  saveState={
+                    entry.item.saved || savedAgentMessageIds?.has(entry.item.id)
+                      ? "saved"
+                      : savingAgentMessageIds?.has(entry.item.id)
+                        ? "saving"
+                        : "idle"
+                  }
+                  onSave={
+                    onSaveAgentMessage &&
+                    entry.item.status === "completed" &&
+                    !entry.item.truncated &&
+                    entry.item.text.trim()
+                      ? () => onSaveAgentMessage(entry.item.id)
+                      : undefined
+                  }
+                />
               );
             }
             if (entry.kind === "live-prompt") {
