@@ -495,10 +495,11 @@ impl CommandExecutor {
                 request.options.clone(),
             )
             .await?;
-        let id = new_id("thr");
-        self.store
+        let proposed_id = new_id("thr");
+        let id = self
+            .store
             .create_provider_thread(
-                &id,
+                &proposed_id,
                 project_id,
                 request.provider,
                 &provider_session_id,

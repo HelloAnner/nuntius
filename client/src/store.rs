@@ -461,6 +461,7 @@ impl ClientStore {
             app_server_options,
         )
         .await
+        .map(|_| ())
     }
     pub async fn create_provider_thread(
         &self,
@@ -471,10 +472,57 @@ impl ClientStore {
         title: &str,
         access_mode: ConversationAccessMode,
         app_server_options: &Value,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let stamp = now();
-        sqlx::query("INSERT INTO threads(id,project_id,provider,app_server_thread_id,title,access_mode,app_server_options,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)").bind(id).bind(project_id).bind(provider.as_str()).bind(app_id).bind(title).bind(access_mode.as_str()).bind(serde_json::to_string(app_server_options)?).bind(&stamp).bind(&stamp).bind(&stamp).execute(&self.pool).await?;
-        Ok(())
+        let encoded_options = serde_json::to_string(app_server_options)?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let inserted = sqlx::query("INSERT INTO threads(id,project_id,provider,app_server_thread_id,title,access_mode,app_server_options,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(app_server_thread_id) DO NOTHING")
+            .bind(id)
+            .bind(project_id)
+            .bind(provider.as_str())
+            .bind(app_id)
+            .bind(title)
+            .bind(access_mode.as_str())
+            .bind(&encoded_options)
+            .bind(&stamp)
+            .bind(&stamp)
+            .bind(&stamp)
+            .execute(&mut *tx)
+            .await?;
+        if inserted.rows_affected() == 1 {
+            tx.commit().await?;
+            return Ok(id.to_owned());
+        }
+
+        // Provider session creation happens before this write. The history monitor
+        // can discover and import that session in the meantime, so converge on the
+        // imported row instead of failing the user command on the unique app id.
+        let existing = sqlx::query(
+            "SELECT id,provider FROM threads WHERE app_server_thread_id=?",
+        )
+        .bind(app_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow!("provider thread conflict disappeared for {app_id}"))?;
+        let canonical_id: String = existing.get("id");
+        let existing_provider: String = existing.get("provider");
+        if existing_provider != provider.as_str() {
+            bail!(
+                "provider thread {app_id} already belongs to {existing_provider}, not {}",
+                provider.as_str()
+            );
+        }
+        sqlx::query("UPDATE threads SET project_id=?,title=?,access_mode=?,app_server_options=?,archived=0,updated_at=? WHERE id=?")
+            .bind(project_id)
+            .bind(title)
+            .bind(access_mode.as_str())
+            .bind(encoded_options)
+            .bind(&stamp)
+            .bind(&canonical_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(canonical_id)
     }
     pub async fn thread_has_turns(&self, id: &str) -> Result<bool> {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE thread_id=?")
@@ -1479,6 +1527,7 @@ impl ClientStore {
                 }
                 let item_id = existing.unwrap_or_else(|| new_id("itm"));
                 claimed_item_ids.insert(item_id.clone());
+                let item_status = value_status(item.get("status"), "completed");
                 let stamp = app_item_occurred_at(item)
                     .or_else(|| started.clone())
                     .or_else(|| completed.clone())
@@ -1487,8 +1536,8 @@ impl ClientStore {
                 // items (user/agent messages) already occupy ordinals, and the (turn_id, ordinal)
                 // unique index must never abort the whole history import. Existing rows keep their
                 // ordinal so re-imports cannot reshuffle what the live path already persisted.
-                sqlx::query("INSERT INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,revision,content_text,structured_detail,occurred_at,completed_at) VALUES(?,?,NULLIF(?,''),COALESCE((SELECT MAX(ordinal)+1 FROM items WHERE turn_id=?),1),?,'completed',1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET app_server_item_id=COALESCE(excluded.app_server_item_id,items.app_server_item_id),kind=excluded.kind,content_text=excluded.content_text,structured_detail=excluded.structured_detail,occurred_at=CASE WHEN julianday(excluded.occurred_at)<julianday(items.occurred_at) THEN excluded.occurred_at ELSE items.occurred_at END,completed_at=COALESCE(excluded.completed_at,items.completed_at),revision=CASE WHEN items.app_server_item_id IS NOT COALESCE(excluded.app_server_item_id,items.app_server_item_id) OR items.kind IS NOT excluded.kind OR items.content_text IS NOT excluded.content_text OR items.structured_detail IS NOT excluded.structured_detail OR (excluded.completed_at IS NOT NULL AND items.completed_at IS NOT excluded.completed_at) THEN items.revision+1 ELSE items.revision END")
-                    .bind(&item_id).bind(&turn_id).bind(app_item).bind(&turn_id).bind(kind).bind(text).bind(serde_json::to_string(item)?).bind(&stamp).bind(&completed).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,revision,content_text,structured_detail,occurred_at,completed_at) VALUES(?,?,NULLIF(?,''),COALESCE((SELECT MAX(ordinal)+1 FROM items WHERE turn_id=?),1),?,?,1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET app_server_item_id=COALESCE(excluded.app_server_item_id,items.app_server_item_id),kind=excluded.kind,status=excluded.status,content_text=excluded.content_text,structured_detail=excluded.structured_detail,occurred_at=CASE WHEN julianday(excluded.occurred_at)<julianday(items.occurred_at) THEN excluded.occurred_at ELSE items.occurred_at END,completed_at=COALESCE(excluded.completed_at,items.completed_at),revision=CASE WHEN items.app_server_item_id IS NOT COALESCE(excluded.app_server_item_id,items.app_server_item_id) OR items.kind IS NOT excluded.kind OR items.status IS NOT excluded.status OR items.content_text IS NOT excluded.content_text OR items.structured_detail IS NOT excluded.structured_detail OR (excluded.completed_at IS NOT NULL AND items.completed_at IS NOT excluded.completed_at) THEN items.revision+1 ELSE items.revision END")
+                    .bind(&item_id).bind(&turn_id).bind(app_item).bind(&turn_id).bind(kind).bind(&item_status).bind(text).bind(serde_json::to_string(item)?).bind(&stamp).bind(&completed).execute(&mut *tx).await?;
                 if kind == "user_message" {
                     for path in app_item_local_image_paths(item) {
                         let attachment_id: Option<String> = sqlx::query_scalar(
@@ -2955,6 +3004,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_create_adopts_a_provider_thread_imported_during_session_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_create_race", "Create race", &workspace, &json!({}))
+            .await
+            .unwrap();
+        let imported_id = store
+            .import_provider_thread(
+                AgentProvider::Kimi,
+                "prj_create_race",
+                &json!({
+                    "id":"kimi_session_create_race",
+                    "cwd":workspace,
+                    "preview":"Explicit Kimi thread",
+                    "status":"idle"
+                }),
+            )
+            .await
+            .unwrap();
+
+        let canonical_id = store
+            .create_provider_thread(
+                "thr_explicit_create",
+                "prj_create_race",
+                AgentProvider::Kimi,
+                "kimi_session_create_race",
+                "Explicit Kimi thread",
+                ConversationAccessMode::Ask,
+                &json!({"model":"kimi-code/k3"}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(canonical_id, imported_id);
+        let row = sqlx::query("SELECT id,provider,access_mode,app_server_options FROM threads WHERE app_server_thread_id='kimi_session_create_race'")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<String, _>("id"), imported_id);
+        assert_eq!(row.get::<String, _>("provider"), "kimi");
+        assert_eq!(row.get::<String, _>("access_mode"), "ask");
+        assert_eq!(
+            serde_json::from_str::<Value>(&row.get::<String, _>("app_server_options")).unwrap(),
+            json!({"model":"kimi-code/k3"})
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM threads WHERE app_server_thread_id='kimi_session_create_race'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
     async fn project_removal_cleans_records_and_blocks_automatic_reimport() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
@@ -3551,6 +3658,86 @@ mod tests {
         assert_eq!(turns, 1);
         assert_eq!(provider_id, "pi_user_entry");
         assert_eq!(user_items, 1);
+    }
+
+    #[tokio::test]
+    async fn pi_history_preserves_and_updates_provider_item_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_pi_status", "Pi status", &workspace, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_provider_thread(
+                "thr_pi_status",
+                "prj_pi_status",
+                AgentProvider::Pi,
+                "pi_status_session",
+                "Pi status",
+                ConversationAccessMode::Full,
+                &json!({}),
+            )
+            .await
+            .unwrap();
+
+        store
+            .import_app_history(
+                "thr_pi_status",
+                &json!({
+                    "status":"idle",
+                    "turns":[{
+                        "id":"pi_status_turn",
+                        "status":"completed",
+                        "items":[{
+                            "id":"pi_failed_item",
+                            "type":"agentMessage",
+                            "status":"failed",
+                            "text":"fetch failed"
+                        }]
+                    }]
+                }),
+            )
+            .await
+            .unwrap();
+        let failed = sqlx::query(
+            "SELECT status,revision FROM items WHERE app_server_item_id='pi_failed_item'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(failed.get::<String, _>("status"), "failed");
+        assert_eq!(failed.get::<i64, _>("revision"), 1);
+
+        store
+            .import_app_history(
+                "thr_pi_status",
+                &json!({
+                    "status":"idle",
+                    "turns":[{
+                        "id":"pi_status_turn",
+                        "status":"completed",
+                        "items":[{
+                            "id":"pi_failed_item",
+                            "type":"agentMessage",
+                            "status":"completed",
+                            "text":"recovered"
+                        }]
+                    }]
+                }),
+            )
+            .await
+            .unwrap();
+        let recovered = sqlx::query(
+            "SELECT status,revision FROM items WHERE app_server_item_id='pi_failed_item'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(recovered.get::<String, _>("status"), "completed");
+        assert_eq!(recovered.get::<i64, _>("revision"), 2);
     }
 
     #[tokio::test]
