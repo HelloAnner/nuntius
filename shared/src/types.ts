@@ -84,6 +84,8 @@ export interface ServerInfo {
 export interface ClientInfo {
   apiVersion: string;
   clientVersion: string;
+  serverVersion: string | null;
+  versionCompatibility: VersionCompatibility;
   buildSha: string;
   releaseSequence: number;
   deviceId: string;
@@ -128,12 +130,16 @@ export type HistoryCompleteness =
   | "partial"
   | "error";
 
+export type VersionCompatibility = "compatible" | "mismatch" | "unknown";
+
 export interface DeviceSummary {
   id: string;
   displayName: string;
   status: DeviceStatus;
   lastSeenAt: string | null;
   agentVersion: string | null;
+  expectedVersion: string;
+  versionCompatibility: VersionCompatibility;
   codexVersion: string | null;
   osFamily: string | null;
   architecture: string | null;

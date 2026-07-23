@@ -12,7 +12,7 @@
     },
     "client/frontend": {
       "name": "@nuntius/client-web",
-      "version": "0.1.0",
+      "version": "0.0.1",
       "dependencies": {
         "@nuntius/shared": "workspace:*",
         "@tanstack/react-query": "^5.59.0",
@@ -30,7 +30,7 @@
     },
     "server/frontend": {
       "name": "@nuntius/server-web",
-      "version": "0.1.0",
+      "version": "0.0.1",
       "dependencies": {
         "@nuntius/shared": "workspace:*",
         "@tanstack/react-query": "^5.59.0",
@@ -48,7 +48,7 @@
     },
     "shared": {
       "name": "@nuntius/shared",
-      "version": "0.1.0",
+      "version": "0.0.1",
       "dependencies": {
         "highlight.js": "^11.10.0",
         "react": "^18.3.1",

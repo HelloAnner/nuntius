@@ -35,6 +35,15 @@ cargo test --workspace
 - Server 数据目录由 `--data-dir` 指定；Client 固定 `~/.nuntius/`。测试时用 `HOME=/tmp/xxx` 隔离。
 - 不要提交 `node_modules/`；密钥、令牌不进日志与仓库。
 
+## 统一产品版本（强制）
+
+- 根 `Cargo.toml` 的 `[workspace.package].version` 是 Nuntius 唯一产品版本；`nuntius-client` 与 `nuntius-server` 必须继承并使用完全相同的版本，禁止分别设置版本。
+- 产品版本从 `0.0.1` 开始。每个进入正式二进制的独立功能或修复提交，默认必须把最后一段严格增加 1，例如 `0.0.1 -> 0.0.2 -> 0.0.3`。同一个功能提交只增加一次，不按文件数量增加。
+- Agent 默认只能增加最后一段。任何前两段变化（例如 `0.0.x -> 0.1.0` 或 `0.x -> 1.0.0`）都必须由用户明确指定，Agent 不得自行决定。
+- Client、Server、共享前端、Updater、Ops 或发布行为发生会进入正式产物的功能变化时，都视为一次产品更新并同步版本。纯文档、注释或测试数据修改可以不增加版本。
+- Client 与 Server 设备隧道必须执行产品版本精确匹配。版本不一致时禁止注册为在线设备、禁止处理业务命令、事件和历史同步；只允许使用受限升级通道传递不兼容原因和签名 Client 更新。
+- commit 前必须运行 `bun run version:check`。版本源、Rust workspace 包、前端 workspace metadata 或 lockfile 不一致时禁止 commit 和 push。
+
 ## Git 工作流
 
 - 每一个独立的大功能开发完成后，不需要等待用户再次提醒，立即创建一个语义清晰的 Git commit，并自动 push 到当前分支对应的远端；当前分支尚无 upstream 时，设置并 push 到 `origin` 的同名分支。云端流水线负责构建与完整验证。

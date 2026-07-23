@@ -81,7 +81,14 @@ pub async fn prepare_local_update(
         .inspect_err(|_| {
             let _ = fs::remove_file(&staged_path);
         })?;
-    probe_binary(&staged_path, binary_name, commit_sha, 0, expected_target)
+    probe_binary(
+        &staged_path,
+        binary_name,
+        commit_sha,
+        0,
+        None,
+        expected_target,
+    )
         .await
         .inspect_err(|_| {
             let _ = fs::remove_file(&staged_path);
@@ -150,6 +157,7 @@ pub fn build_target() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct ClientRelease {
     pub release_id: String,
+    pub product_version: String,
     pub commit_sha: String,
     pub release_sequence: u64,
     pub target: String,
@@ -287,6 +295,7 @@ async fn prepare_client_update(
             config,
             &release.commit_sha,
             release.release_sequence,
+            &release.product_version,
             &archive,
         )
         .await?,
@@ -336,6 +345,7 @@ async fn stage_update(
     config: &UpdateConfig,
     commit_sha: &str,
     release_sequence: u64,
+    product_version: &str,
     archive: &[u8],
 ) -> Result<PreparedUpdate> {
     let stage_guard = STAGE_UPDATE_LOCK.clone().lock_owned().await;
@@ -360,6 +370,7 @@ async fn stage_update(
         &config.binary_name,
         commit_sha,
         release_sequence,
+        Some(product_version),
         &config.expected_target,
     )
     .await
@@ -383,7 +394,8 @@ async fn stage_update(
 fn validate_client_release(config: &UpdateConfig, release: &ClientRelease) -> Result<()> {
     validate_commit_sha(&release.commit_sha)?;
     validate_digest(&release.sha256)?;
-    if release.release_id.is_empty()
+    if !valid_product_version(&release.product_version)
+        || release.release_id.is_empty()
         || release.release_id.len() > 128
         || !release
             .release_id
@@ -415,6 +427,17 @@ fn validate_client_release(config: &UpdateConfig, release: &ClientRelease) -> Re
         bail!("client release URL is outside the paired server origin");
     }
     Ok(())
+}
+
+fn valid_product_version(value: &str) -> bool {
+    let mut parts = value.split('.');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(major), Some(minor), Some(patch), None)
+            if [major, minor, patch]
+                .into_iter()
+                .all(|part| !part.is_empty() && part.parse::<u64>().is_ok())
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -557,6 +580,7 @@ async fn probe_binary(
     expected_name: &str,
     expected_sha: &str,
     expected_sequence: u64,
+    expected_version: Option<&str>,
     expected_target: &str,
 ) -> Result<()> {
     let output = Command::new(path)
@@ -571,13 +595,15 @@ async fn probe_binary(
     let info: BuildInfo = serde_json::from_slice(&output.stdout)
         .context("decode updated binary build information")?;
     if info.name != expected_name
+        || expected_version.is_some_and(|version| info.version != version)
         || info.build_sha != expected_sha
         || (expected_sequence > 0 && info.release_sequence != expected_sequence)
         || info.target != expected_target
     {
         bail!(
-            "updated binary identity mismatch: name={}, sha={}, sequence={}, target={}",
+            "updated binary identity mismatch: name={}, version={}, sha={}, sequence={}, target={}",
             info.name,
+            info.version,
             info.build_sha,
             info.release_sequence,
             info.target,
@@ -935,6 +961,7 @@ mod tests {
         );
         let release = ClientRelease {
             release_id: "1-aaaaaaaaaaaa".into(),
+            product_version: "0.0.1".into(),
             commit_sha: "a".repeat(40),
             release_sequence: 1,
             target: "aarch64-apple-darwin".into(),
@@ -956,6 +983,7 @@ mod tests {
         );
         let release = ClientRelease {
             release_id: "1784512000000-aaaaaaaaaaaa".into(),
+            product_version: "0.0.1".into(),
             commit_sha: "a".repeat(40),
             release_sequence: 1_784_512_000_000,
             target: "aarch64-apple-darwin".into(),

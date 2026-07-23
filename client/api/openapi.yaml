@@ -19,10 +19,12 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [apiVersion, clientVersion, buildSha, deviceId, displayName, paired, localBind, appServerRunning, providers, projects, pendingCommands, pendingEvents, activeTurns, capabilities]
+                required: [apiVersion, clientVersion, serverVersion, versionCompatibility, buildSha, deviceId, displayName, paired, localBind, appServerRunning, providers, projects, pendingCommands, pendingEvents, activeTurns, capabilities]
                 properties:
                   apiVersion: {type: string}
                   clientVersion: {type: string}
+                  serverVersion: {type: [string, 'null']}
+                  versionCompatibility: {enum: [compatible, mismatch, unknown]}
                   buildSha: {type: string}
                   deviceId: {type: string}
                   displayName: {type: string}

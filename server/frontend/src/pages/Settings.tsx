@@ -9,6 +9,7 @@ import {
   IconDevice,
   IconKey,
   IconRefresh,
+  IconShield,
   Segmented,
   Spinner,
   fullTime,
@@ -31,6 +32,7 @@ import { useAccessMode, useSession, useThemeStore } from "../stores";
 import { useNavigate } from "../hooks";
 import { ConnIndicator, TopBar } from "../components";
 import { RenameDeviceSheet } from "../sheets/RenameDeviceSheet";
+import { fleetVersionState } from "../versioning";
 
 export function SettingsPage() {
   const navigate = useNavigate();
@@ -53,7 +55,14 @@ export function SettingsPage() {
   });
   const usageGroups = groupUsageByDevice(providerUsage.data ?? []);
   const pairedDevices = devices.data ?? [];
+  const activeDevices = pairedDevices.filter((device) => device.status !== "revoked");
   const onlineDevices = pairedDevices.filter((device) => device.status === "online").length;
+  const versionState = fleetVersionState(info.data?.serverVersion, devices.data);
+  const versionStateLabel = {
+    compatible: "全部一致",
+    mismatch: "版本不一致",
+    unknown: "等待确认",
+  }[versionState];
 
   const newPairingCode = async () => {
     setBusyPairing(true);
@@ -151,6 +160,51 @@ export function SettingsPage() {
             </span>
             <IconChevronRight size={17} />
           </button>
+
+          <div className="section-label micro">版本对齐</div>
+          <div className={`card version-panel ${versionState}`}>
+            <header className="version-panel-head">
+              <span className="version-panel-icon">
+                <IconShield size={18} />
+              </span>
+              <span className="version-panel-copy">
+                <strong>Client / Server 版本</strong>
+                <small>只有版本完全一致时才允许建立业务连接</small>
+              </span>
+              <span className={`version-state ${versionState}`}>{versionStateLabel}</span>
+            </header>
+            <div className="version-rows">
+              <div className="version-row">
+                <span>
+                  <strong>Server</strong>
+                  <small>当前控制服务</small>
+                </span>
+                <code>{info.data?.serverVersion ?? "—"}</code>
+              </div>
+              {activeDevices.length === 0 ? (
+                <div className="version-empty">尚无可确认版本的 Client</div>
+              ) : (
+                activeDevices.map((device) => (
+                  <div className="version-row" key={device.id}>
+                    <span>
+                      <strong>{device.displayName}</strong>
+                      <small>Client · {osLabel(device.osFamily, device.architecture)}</small>
+                    </span>
+                    <span className="version-row-value">
+                      <code>{device.agentVersion ?? "未知"}</code>
+                      <small className={device.versionCompatibility}>
+                        {device.versionCompatibility === "compatible"
+                          ? "一致"
+                          : device.versionCompatibility === "mismatch"
+                            ? `需要 ${device.expectedVersion}`
+                            : "待确认"}
+                      </small>
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
 
           <div className="section-label micro">对话访问级别</div>
           <div className="card access-settings">

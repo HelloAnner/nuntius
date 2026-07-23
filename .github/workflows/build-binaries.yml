@@ -41,6 +41,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
@@ -49,6 +51,9 @@ jobs:
 
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
+
+      - name: Verify product version alignment
+        run: bun run version:check
 
       - name: Typecheck frontends
         run: bun run typecheck

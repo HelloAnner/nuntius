@@ -372,6 +372,9 @@ async fn run_socket(
     let supports_client_update = client_capabilities
         .iter()
         .any(|capability| capability == CLIENT_UPDATE_CAPABILITY);
+    let supports_strict_version = client_capabilities
+        .iter()
+        .any(|capability| capability == STRICT_VERSION_CAPABILITY);
     let supports_provider_usage = client_capabilities
         .iter()
         .any(|capability| capability == PROVIDER_USAGE_CAPABILITY);
@@ -381,6 +384,71 @@ async fn run_socket(
     let supports_thread_view_state = client_capabilities
         .iter()
         .any(|capability| capability == THREAD_VIEW_STATE_CAPABILITY);
+    let server_version = env!("CARGO_PKG_VERSION");
+    if !product_versions_match(&agent_version, server_version) {
+        state
+            .store
+            .record_device_version_attempt(&device_id, &agent_version)
+            .await?;
+        let release = state.releases.current().await;
+        publish_device_event(
+            &state,
+            user_id,
+            &device_id,
+            "device.version_mismatch",
+            json!({
+                "clientVersion":agent_version,
+                "serverVersion":server_version,
+            }),
+        )
+        .await?;
+        if supports_strict_version {
+            ws_tx
+                .send(Message::Text(
+                    serde_json::to_string(&TunnelFrame::VersionMismatch {
+                        client_version: agent_version,
+                        server_version: server_version.into(),
+                        release,
+                    })?
+                    .into(),
+                ))
+                .await?;
+        } else {
+            // Legacy clients only understand Welcome as the first server frame.
+            // Give them a short upgrade-only session, but never register the
+            // tunnel as ready or admit business traffic.
+            ws_tx
+                .send(Message::Text(
+                    serde_json::to_string(&TunnelFrame::Welcome {
+                        protocol_version: DEVICE_PROTOCOL_VERSION,
+                        server_version: server_version.into(),
+                        connection_id: new_id("upgrade"),
+                        connection_epoch: 0,
+                        command_queue_epoch: state.store.queue_epoch().into(),
+                        server_time: now(),
+                        transport_security: expected_security,
+                        capabilities: vec![
+                            CLIENT_UPDATE_CAPABILITY.into(),
+                            STRICT_VERSION_CAPABILITY.into(),
+                        ],
+                        display_name: None,
+                    })?
+                    .into(),
+                ))
+                .await?;
+            let frame = match (supports_client_update, release) {
+                (true, Some(release)) => TunnelFrame::ClientUpdate { release },
+                _ => TunnelFrame::ServerNotice {
+                    code: "client_version_mismatch".into(),
+                    message: format!("{agent_version}:{server_version}"),
+                },
+            };
+            ws_tx
+                .send(Message::Text(serde_json::to_string(&frame)?.into()))
+                .await?;
+        }
+        return Ok(());
+    }
 
     let (out_tx, mut out_rx) = mpsc::channel::<TunnelFrame>(256);
     let (supersede_tx, mut superseded) = oneshot::channel();
@@ -422,6 +490,7 @@ async fn run_socket(
         out_tx
             .send(TunnelFrame::Welcome {
                 protocol_version: DEVICE_PROTOCOL_VERSION,
+                server_version: server_version.into(),
                 connection_id: new_id("conn"),
                 connection_epoch: epoch,
                 command_queue_epoch: state.store.queue_epoch().into(),
@@ -435,6 +504,7 @@ async fn run_socket(
                     "project-delete.v1".into(),
                     DEVICE_DISPLAY_NAME_SYNC_CAPABILITY.into(),
                     CLIENT_UPDATE_CAPABILITY.into(),
+                    STRICT_VERSION_CAPABILITY.into(),
                     "image-input.v1".into(),
                     "agent-provider.v1".into(),
                     PROVIDER_USAGE_CAPABILITY.into(),
@@ -841,6 +911,7 @@ async fn handle_frame(
         }
         TunnelFrame::Hello { .. }
         | TunnelFrame::Welcome { .. }
+        | TunnelFrame::VersionMismatch { .. }
         | TunnelFrame::Command { .. }
         | TunnelFrame::EventAck { .. }
         | TunnelFrame::HistoryAck { .. }
@@ -851,6 +922,10 @@ async fn handle_frame(
         | TunnelFrame::ServerNotice { .. } => return Err(anyhow!("frame not allowed from device")),
     }
     Ok(())
+}
+
+fn product_versions_match(client_version: &str, server_version: &str) -> bool {
+    client_version == server_version
 }
 
 fn event_closes_thread_approvals(event: &NuntiusEvent) -> bool {
@@ -1002,6 +1077,13 @@ pub async fn publish_device_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn product_versions_require_exact_match() {
+        assert!(product_versions_match("0.0.1", "0.0.1"));
+        assert!(!product_versions_match("0.0.1", "0.0.2"));
+        assert!(!product_versions_match("0.0.1", "0.1.1"));
+    }
 
     #[test]
     fn only_terminal_provider_events_close_thread_approvals() {

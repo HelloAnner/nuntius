@@ -122,6 +122,13 @@ fn validate_release(data_dir: &Path, public_base_url: &str, release: &ClientRele
     if !safe_component(&release.release_id) {
         bail!("invalid client release ID");
     }
+    if release.product_version != env!("CARGO_PKG_VERSION") {
+        bail!(
+            "client release version {} does not match server version {}",
+            release.product_version,
+            env!("CARGO_PKG_VERSION")
+        );
+    }
     validate_hex(&release.commit_sha, 40, "client release commit SHA")?;
     validate_hex(&release.sha256, 64, "client release SHA-256")?;
     if release.release_sequence == 0 || release.target != "aarch64-apple-darwin" {

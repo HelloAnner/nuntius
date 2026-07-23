@@ -1,5 +1,6 @@
 /* App chrome: top bar, tabs, nav rail, list rows. */
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   ConnPill,
   IconChat,
@@ -27,16 +28,28 @@ import {
 import { usePendingApprovalCount, useRoute, type Route } from "./stores";
 import { useSse } from "./events";
 import { useNavigate } from "./hooks";
+import { api } from "./api";
 
 export function ConnIndicator() {
   const status = useSse((s) => s.status);
+  const info = useQuery({
+    queryKey: ["info"],
+    queryFn: api.info,
+    refetchInterval: 10_000,
+    retry: false,
+  });
   const map: Record<string, { state: ConnState; label: string }> = {
     live: { state: "live", label: "实时" },
     connecting: { state: "busy", label: "连接中" },
     reconnecting: { state: "busy", label: "重连中" },
     syncing: { state: "busy", label: "同步中" },
   };
-  const { state, label } = map[status] ?? map.connecting;
+  const versionMismatch =
+    info.data?.paired && info.data.versionCompatibility === "mismatch";
+  const { state, label } =
+    status === "live" && versionMismatch
+      ? { state: "warning" as const, label: "版本不一致" }
+      : map[status] ?? map.connecting;
   return <ConnPill state={state} label={label} />;
 }
 

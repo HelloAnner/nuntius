@@ -1,5 +1,6 @@
 /* Server console chrome and design-system primitives. */
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   IconArchive,
   IconBook,
@@ -30,24 +31,60 @@ import {
   type ThreadSummary,
 } from "@nuntius/shared";
 import { useNavigate } from "./hooks";
+import { api } from "./api";
 import { useSse } from "./events";
 import { usePendingApprovalCount, useRoute, useSession, type Route } from "./stores";
+import { fleetVersionState } from "./versioning";
 
 export function ConnIndicator() {
   const status = useSse((state) => state.status);
+  const navigate = useNavigate();
+  const info = useQuery({
+    queryKey: ["info"],
+    queryFn: api.info,
+    staleTime: 60_000,
+  });
+  const devices = useQuery({
+    queryKey: ["devices"],
+    queryFn: api.devices,
+    refetchInterval: 15_000,
+  });
   const map: Record<string, { state: ConnState; label: string }> = {
     live: { state: "live", label: "已连接" },
     connecting: { state: "busy", label: "连接中" },
     reconnecting: { state: "busy", label: "重连中" },
     syncing: { state: "busy", label: "同步中" },
   };
-  const current = map[status] ?? map.connecting;
-  return (
-    <span className="console-connection">
-      <span className={`connection-pulse ${current.state}`} aria-hidden="true">
+  const transport = map[status] ?? map.connecting;
+  const versionState = fleetVersionState(info.data?.serverVersion, devices.data);
+  const current =
+    status === "live" && versionState === "mismatch"
+      ? { state: "busy" as const, label: "版本不一致" }
+      : status === "live" && versionState === "unknown"
+        ? { state: "busy" as const, label: "版本待确认" }
+        : transport;
+  const versionWarning = status === "live" && versionState !== "compatible";
+  const contents = (
+    <>
+      <span className={`connection-pulse ${current.state}${versionWarning ? " version-warning" : ""}`} aria-hidden="true">
         <span />
       </span>
       <span>{current.label}</span>
+    </>
+  );
+  return versionWarning ? (
+    <button
+      className="console-connection version-warning"
+      type="button"
+      onClick={() => navigate({ name: "settings" })}
+      aria-label={`${current.label}，打开设置查看详情`}
+      title="打开设置查看 Client / Server 版本"
+    >
+      {contents}
+    </button>
+  ) : (
+    <span className="console-connection" role="status" aria-label={current.label}>
+      {contents}
     </span>
   );
 }
@@ -241,6 +278,7 @@ export function ProviderBadge({ provider }: { provider: ThreadSummary["provider"
 }
 
 function deviceTone(device: DeviceSummary): StatusTone {
+  if (device.versionCompatibility === "mismatch") return "warning";
   if (device.status === "online") return "success";
   if (device.status === "syncing" || device.status === "pairing") return "warning";
   if (device.status === "degraded") return "danger";
@@ -266,7 +304,7 @@ export function DeviceRow({ device }: { device: DeviceSummary }) {
         </div>
         <span className={`status-pill ${deviceTone(device)}`}>
           <span className="status-dot" />
-          {statusLabel(device.status)}
+          {device.versionCompatibility === "mismatch" ? "版本不一致" : statusLabel(device.status)}
         </span>
       </div>
       <div className="device-stats">

@@ -513,6 +513,89 @@
 .settings-destination-copy small { overflow: hidden; color: var(--ink-3); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
 .settings-destination-count { flex: none; color: var(--ink-2); font-size: 11.5px; }
 .settings-destination > svg { flex: none; color: var(--ink-3); }
+.version-panel {
+  overflow: hidden;
+  padding: 0;
+}
+.version-panel-head {
+  min-height: 74px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+}
+.version-panel-icon {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+.version-panel.mismatch .version-panel-icon,
+.version-panel.unknown .version-panel-icon {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+.version-panel-copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.version-panel-copy strong { font-size: 14.5px; font-weight: 630; }
+.version-panel-copy small { color: var(--ink-3); font-size: 11.5px; }
+.version-state {
+  flex: none;
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: var(--ok);
+  background: var(--ok-soft);
+  font-size: 11px;
+  font-weight: 650;
+}
+.version-state.mismatch,
+.version-state.unknown {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+.version-rows { border-top: 1px solid var(--hairline); }
+.version-row {
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 9px 16px;
+  border-top: 1px solid var(--hairline);
+}
+.version-row:first-child { border-top: 0; }
+.version-row > span:first-child {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.version-row strong { overflow: hidden; font-size: 13px; font-weight: 580; text-overflow: ellipsis; white-space: nowrap; }
+.version-row small { color: var(--ink-3); font-size: 11px; }
+.version-row code {
+  color: var(--ink);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.version-row-value {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 2px;
+}
+.version-row-value small.compatible { color: var(--ok); }
+.version-row-value small.mismatch { color: var(--warn); }
+.version-empty { padding: 14px 16px; color: var(--ink-3); font-size: 12px; }
 .settings-panel { padding: 16px; }
 .pairing-intro { color: var(--ink-2); font-size: 13px; }
 .pairing-expiry { color: var(--ink-3); font-size: 12.5px; text-align: center; }

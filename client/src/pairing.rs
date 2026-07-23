@@ -92,6 +92,31 @@ async fn checked(response: Response) -> Result<Response> {
     if status.is_success() {
         Ok(response)
     } else {
+        let body = response.text().await.unwrap_or_default();
+        if let Ok(error) = serde_json::from_str::<serde_json::Value>(&body) {
+            let code = error
+                .pointer("/error/code")
+                .and_then(|value| value.as_str());
+            if code == Some("client_version_mismatch") {
+                let client_version = error
+                    .pointer("/error/details/clientVersion")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(env!("CARGO_PKG_VERSION"));
+                let server_version = error
+                    .pointer("/error/details/serverVersion")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                bail!(
+                    "product version mismatch: client {client_version}, server {server_version}; pairing refused"
+                )
+            }
+            if let Some(message) = error
+                .pointer("/error/message")
+                .and_then(|value| value.as_str())
+            {
+                bail!("server returned {status}: {message}")
+            }
+        }
         bail!("server returned {status}")
     }
 }

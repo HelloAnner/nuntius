@@ -188,6 +188,10 @@ export function startEvents(qc: QueryClient): () => void {
       void qc.invalidateQueries({ queryKey: ["devices"] });
       return;
     }
+    if (type === "device.version_mismatch") {
+      void qc.invalidateQueries({ queryKey: ["devices"] });
+      return;
+    }
     if (type === "provider.usage.reported") {
       void qc.invalidateQueries({ queryKey: ["providerUsage"] });
       return;

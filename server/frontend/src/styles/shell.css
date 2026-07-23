@@ -181,6 +181,9 @@ body {
 .filter-select .select-menu-popover { min-width: min(260px, calc(100vw - 32px)); }
 
 .console-connection {
+  border: 0;
+  font: inherit;
+  cursor: default;
   width: fit-content;
   display: inline-flex;
   align-items: center;
@@ -192,6 +195,12 @@ body {
   font-size: 11.5px;
   font-weight: 600;
   white-space: nowrap;
+}
+
+.console-connection.version-warning {
+  color: var(--warn);
+  background: var(--warn-soft);
+  cursor: pointer;
 }
 
 .connection-pulse,
@@ -217,6 +226,7 @@ body {
 
 .connection-pulse.busy { color: var(--warn); }
 .connection-pulse.busy span { animation: pulse-dot 1.1s infinite; }
+.connection-pulse.busy.version-warning span { animation: none; }
 .connection-pulse.live { color: var(--ok); }
 .status-orbit.active { color: var(--accent); }
 .status-orbit.warning { color: var(--warn); }

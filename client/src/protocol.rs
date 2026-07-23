@@ -10,6 +10,7 @@ pub const DEVICE_PROTOCOL_VERSION: u16 = 1;
 pub const DEVICE_SUBPROTOCOL: &str = "nuntius.device.v1";
 pub const DEVICE_DISPLAY_NAME_SYNC_CAPABILITY: &str = "device-display-name-sync.v1";
 pub const CLIENT_UPDATE_CAPABILITY: &str = "client-update.v1";
+pub const STRICT_VERSION_CAPABILITY: &str = "strict-product-version.v1";
 pub const PROVIDER_USAGE_CAPABILITY: &str = "provider-usage.v1";
 pub const THREAD_RENAME_CAPABILITY: &str = "thread-rename.v1";
 pub const THREAD_VIEW_STATE_CAPABILITY: &str = "thread-view-state.v1";
@@ -530,6 +531,7 @@ pub struct DeviceHealth {
 #[serde(rename_all = "camelCase")]
 pub struct ClientRelease {
     pub release_id: String,
+    pub product_version: String,
     pub commit_sha: String,
     pub release_sequence: u64,
     pub target: String,
@@ -561,6 +563,7 @@ pub enum TunnelFrame {
     },
     Welcome {
         protocol_version: u16,
+        server_version: String,
         connection_id: String,
         connection_epoch: i64,
         #[serde(default = "legacy_queue_epoch")]
@@ -570,6 +573,12 @@ pub enum TunnelFrame {
         capabilities: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_name: Option<String>,
+    },
+    VersionMismatch {
+        client_version: String,
+        server_version: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        release: Option<ClientRelease>,
     },
     Command {
         #[serde(default = "legacy_queue_epoch")]

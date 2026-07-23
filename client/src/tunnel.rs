@@ -179,6 +179,7 @@ async fn run_connection(
                 PROVIDER_USAGE_CAPABILITY.into(),
                 THREAD_RENAME_CAPABILITY.into(),
                 THREAD_VIEW_STATE_CAPABILITY.into(),
+                STRICT_VERSION_CAPABILITY.into(),
             ],
         },
     )
@@ -190,20 +191,62 @@ async fn run_connection(
     let Message::Text(text) = welcome else {
         bail!("server welcome was not text")
     };
-    let (server_queue_epoch, display_name) = match serde_json::from_str::<TunnelFrame>(&text)? {
+    let (server_queue_epoch, display_name, server_version) = match serde_json::from_str::<
+        TunnelFrame,
+    >(&text)?
+    {
         TunnelFrame::Welcome {
             protocol_version,
             transport_security,
             command_queue_epoch,
             display_name,
+            server_version,
             ..
         } if protocol_version == DEVICE_PROTOCOL_VERSION
-            && transport_security == executor.config.transport_security() =>
+            && transport_security == executor.config.transport_security()
+            && product_versions_match(env!("CARGO_PKG_VERSION"), &server_version) =>
         {
-            (command_queue_epoch, display_name)
+            (command_queue_epoch, display_name, server_version)
+        }
+        TunnelFrame::VersionMismatch {
+            client_version,
+            server_version,
+            release,
+        } => {
+            executor
+                .store
+                .state_set("paired_server_version", &server_version)
+                .await?;
+            executor
+                .store
+                .state_set("version_compatibility", "mismatch")
+                .await?;
+            if let Some(release) = release {
+                desired_release.send_replace(Some(nuntius_updater::ClientRelease {
+                    release_id: release.release_id,
+                    product_version: release.product_version,
+                    commit_sha: release.commit_sha,
+                    release_sequence: release.release_sequence,
+                    target: release.target,
+                    url: release.url,
+                    sha256: release.sha256,
+                    size: release.size,
+                }));
+            }
+            bail!(
+                "product version mismatch: client {client_version}, server {server_version}; normal tunnel connection refused"
+            )
         }
         other => bail!("invalid server welcome: {other:?}"),
     };
+    executor
+        .store
+        .state_set("paired_server_version", &server_version)
+        .await?;
+    executor
+        .store
+        .state_set("version_compatibility", "compatible")
+        .await?;
     if let Some(display_name) = display_name {
         executor.apply_device_display_name(&display_name).await?;
     }
@@ -411,6 +454,7 @@ async fn handle_server_frame(
             tracing::info!(release_id=%release.release_id,commit_sha=%release.commit_sha,release_sequence=release.release_sequence,"desired client release received");
             desired_release.send_replace(Some(nuntius_updater::ClientRelease {
                 release_id: release.release_id,
+                product_version: release.product_version,
                 commit_sha: release.commit_sha,
                 release_sequence: release.release_sequence,
                 target: release.target,
@@ -427,6 +471,7 @@ async fn handle_server_frame(
             }
         }
         TunnelFrame::Welcome { .. }
+        | TunnelFrame::VersionMismatch { .. }
         | TunnelFrame::Hello { .. }
         | TunnelFrame::CommandAck { .. }
         | TunnelFrame::Event { .. }
@@ -695,6 +740,10 @@ async fn queue_pending(
     Ok(())
 }
 
+fn product_versions_match(client_version: &str, server_version: &str) -> bool {
+    client_version == server_version
+}
+
 async fn queue_frame(out: &mpsc::Sender<Message>, frame: &TunnelFrame) -> Result<()> {
     out.send(Message::Text(serde_json::to_string(frame)?.into()))
         .await
@@ -761,5 +810,12 @@ mod tests {
             assert!(window.track_history(&format!("hbatch_{index}")));
         }
         assert!(!window.track_history("hbatch_overflow"));
+    }
+
+    #[test]
+    fn product_versions_require_exact_match() {
+        assert!(product_versions_match("0.0.1", "0.0.1"));
+        assert!(!product_versions_match("0.0.1", "0.0.2"));
+        assert!(!product_versions_match("0.0.1", "0.1.1"));
     }
 }

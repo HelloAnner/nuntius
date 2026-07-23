@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "nuntius-client"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "nuntius-ops"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1509,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "nuntius-server"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1548,7 +1548,7 @@ dependencies = [
 
 [[package]]
 name = "nuntius-updater"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "flate2",

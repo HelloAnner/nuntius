@@ -23,8 +23,11 @@ export function OverviewPage() {
   const data = info.data;
   const queueBusy = Boolean(data && (data.pendingCommands > 0 || data.pendingEvents > 0));
   const hasProvider = Boolean(data?.providers.some((provider) => provider.available));
+  const versionMismatch = Boolean(
+    data?.paired && data.versionCompatibility === "mismatch",
+  );
   const issueCount = data
-    ? Number(!hasProvider) + Number(!data.paired) + Number(queueBusy)
+    ? Number(!hasProvider) + Number(!data.paired) + Number(queueBusy) + Number(versionMismatch)
     : 0;
 
   return (
@@ -76,12 +79,26 @@ export function OverviewPage() {
                         detail={`${data.pendingCommands} 个命令 · ${data.pendingEvents} 个事件`}
                       />
                     ) : null}
+                    {versionMismatch ? (
+                      <IssueRow
+                        title="Client / Server 版本不一致"
+                        detail={`Client ${data.clientVersion} · Server ${data.serverVersion ?? "未知"}，业务连接已暂停`}
+                      />
+                    ) : null}
                   </div>
                 </>
               ) : null}
 
               <div className="section-label micro">概况</div>
               <div className="fact-grid">
+                <div className="fact">
+                  <div className="k">Client 版本</div>
+                  <div className="v num">{data.clientVersion}</div>
+                </div>
+                <div className="fact">
+                  <div className="k">Server 版本</div>
+                  <div className="v num">{data.serverVersion ?? "未连接"}</div>
+                </div>
                 <div className="fact">
                   <div className="k">项目</div>
                   <div className="v num">{data.projects}</div>

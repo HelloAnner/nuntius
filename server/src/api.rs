@@ -411,6 +411,13 @@ async fn pair_device(
     bounded_nonempty("agentVersion", &request.agent_version, 128)?;
     bounded_nonempty("osFamily", &request.os_family, 64)?;
     bounded_nonempty("architecture", &request.architecture, 64)?;
+    let server_version = env!("CARGO_PKG_VERSION");
+    if request.agent_version != server_version {
+        return Err(ApiError::VersionMismatch {
+            client_version: request.agent_version,
+            server_version: server_version.into(),
+        });
+    }
     if request.public_key.len() > 64 {
         return Err(ApiError::BadRequest("publicKey is too long".into()));
     }

@@ -170,6 +170,7 @@ struct OpsState {
 #[serde(rename_all = "camelCase")]
 struct ClientRelease {
     release_id: String,
+    product_version: String,
     commit_sha: String,
     release_sequence: u64,
     target: String,
@@ -182,6 +183,7 @@ struct ClientRelease {
 #[serde(rename_all = "camelCase")]
 struct BuildInfo {
     name: String,
+    version: String,
     build_sha: String,
     release_sequence: u64,
     target: String,
@@ -567,7 +569,7 @@ async fn verify_ops_binary(path: &Path, sha: &str) -> Result<()> {
     let mut command = Command::new(path);
     command.arg("build-info");
     let output = checked(command, "probe macOS Ops", Duration::from_secs(30)).await?;
-    validate_build_info(&output.stdout, "nuntius-ops", sha, 0, MACOS_TARGET)
+    validate_build_info(&output.stdout, "nuntius-ops", sha, 0, MACOS_TARGET).map(|_| ())
 }
 
 async fn ensure_environment(config: &OpsConfig) -> Result<()> {
@@ -675,7 +677,7 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
     let mut fetch = Command::new("git");
     fetch
         .current_dir(&source_dir)
-        .args(["fetch", "--depth", "1", "origin", sha]);
+        .args(["fetch", "--depth", "2", "origin", sha]);
     checked(fetch, "fetch source commit", Duration::from_secs(300)).await?;
     let mut checkout = Command::new("git");
     checkout
@@ -692,6 +694,16 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
         bun_install,
         "install frontend dependencies",
         Duration::from_secs(600),
+    )
+    .await?;
+    let mut version_check = low_priority_command("bun");
+    version_check
+        .current_dir(&source_dir)
+        .args(["run", "version:check"]);
+    checked(
+        version_check,
+        "verify product version alignment",
+        Duration::from_secs(60),
     )
     .await?;
     let mut typecheck = low_priority_command("bun");
@@ -763,13 +775,23 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
 
     let client_binary = mac_target.join("release/nuntius-client");
     let server_binary = linux_target.join("release/nuntius-server");
-    verify_client_binary(&client_binary, sha, sequence).await?;
-    verify_server_binary(config, &server_binary, sha, sequence).await?;
+    let client_build = verify_client_binary(&client_binary, sha, sequence).await?;
+    let server_build = verify_server_binary(config, &server_binary, sha, sequence).await?;
+    if client_build.version != server_build.version {
+        bail!(
+            "client/server product version mismatch: client {}, server {}",
+            client_build.version,
+            server_build.version
+        );
+    }
 
     update_state(config, |state| state.phase = "signing".into())?;
     sign_client_binary(config, &client_binary).await?;
     verify_client_signature(config, &client_binary).await?;
-    verify_client_binary(&client_binary, sha, sequence).await?;
+    let signed_client_build = verify_client_binary(&client_binary, sha, sequence).await?;
+    if signed_client_build.version != client_build.version {
+        bail!("client product version changed after signing");
+    }
 
     update_state(config, |state| state.phase = "package".into())?;
     let client_archive = package_dir.join(CLIENT_ARCHIVE);
@@ -781,6 +803,7 @@ async fn build_release(config: &OpsConfig, sha: &str) -> Result<BuildOutput> {
     let base = config.public_base_url.trim_end_matches('/');
     let release = ClientRelease {
         release_id: release_id.clone(),
+        product_version: client_build.version,
         commit_sha: sha.into(),
         release_sequence: sequence,
         target: MACOS_TARGET.into(),
@@ -805,7 +828,7 @@ fn low_priority_command(program: &str) -> Command {
     command
 }
 
-async fn verify_client_binary(path: &Path, sha: &str, sequence: u64) -> Result<()> {
+async fn verify_client_binary(path: &Path, sha: &str, sequence: u64) -> Result<BuildInfo> {
     let mut command = Command::new(path);
     command.arg("build-info");
     let output = checked(command, "probe macOS client", Duration::from_secs(30)).await?;
@@ -968,7 +991,7 @@ async fn verify_server_binary(
     path: &Path,
     sha: &str,
     sequence: u64,
-) -> Result<()> {
+) -> Result<BuildInfo> {
     let parent = path.parent().context("server binary has no parent")?;
     let mut command = Command::new("docker");
     command
@@ -992,7 +1015,7 @@ fn validate_build_info(
     sha: &str,
     sequence: u64,
     target: &str,
-) -> Result<()> {
+) -> Result<BuildInfo> {
     let info: BuildInfo = serde_json::from_slice(bytes).context("decode binary build info")?;
     if info.name != expected_name
         || info.build_sha != sha
@@ -1001,7 +1024,7 @@ fn validate_build_info(
     {
         bail!("binary build identity mismatch: {info:?}");
     }
-    Ok(())
+    Ok(info)
 }
 
 async fn create_archive(binary: &Path, destination: &Path) -> Result<()> {

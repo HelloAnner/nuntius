@@ -764,6 +764,10 @@
   background: transparent;
   animation: spin 0.8s linear infinite;
 }
+.conn-pill.warning {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
 .conn-pill.down {
   color: var(--danger);
 }

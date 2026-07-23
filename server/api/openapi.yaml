@@ -79,6 +79,7 @@ paths:
       responses:
         '201': {description: 设备注册成功, content: {application/json: {schema: {type: object, required: [deviceId], properties: {deviceId: {type: string}}}}}}
         '400': {$ref: '#/components/responses/BadRequest'}
+        '409': {description: Client 与 Server 产品版本不一致，配对码不会被消耗, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
   /device-auth/challenge:
     post:
       security: []
@@ -451,13 +452,15 @@ components:
         architecture: {type: string, maxLength: 64}
     Device:
       type: object
-      required: [id, displayName, status, projectCount, activeTurnCount, pendingApprovalCount, historyCompleteness, inboxDepth, outboxDepth, historyBackfillDepth, providers]
+      required: [id, displayName, status, expectedVersion, versionCompatibility, projectCount, activeTurnCount, pendingApprovalCount, historyCompleteness, inboxDepth, outboxDepth, historyBackfillDepth, providers]
       properties:
         id: {type: string}
         displayName: {type: string}
         status: {enum: [pairing, syncing, online, degraded, offline, revoked]}
         lastSeenAt: {type: [string, 'null'], format: date-time}
         agentVersion: {type: [string, 'null']}
+        expectedVersion: {type: string}
+        versionCompatibility: {enum: [compatible, mismatch, unknown]}
         codexVersion: {type: [string, 'null']}
         osFamily: {type: [string, 'null']}
         architecture: {type: [string, 'null']}

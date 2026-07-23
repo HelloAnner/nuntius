@@ -456,39 +456,68 @@ impl ServerStore {
             .bind(user_id).fetch_all(&self.pool).await?;
         Ok(rows
             .into_iter()
-            .map(|r| DeviceSummary {
-                id: r.get("id"),
-                display_name: r.get("display_name"),
-                status: if r.get::<String, _>("status") == "revoked" {
-                    DeviceStatus::Revoked
-                } else {
-                    DeviceStatus::Offline
-                },
-                last_seen_at: r.get("last_seen_at"),
-                agent_version: r.get("agent_version"),
-                codex_version: r.get("codex_version"),
-                os_family: r.get("os_family"),
-                architecture: r.get("architecture"),
-                project_count: r.get("project_count"),
-                active_turn_count: r.get("active_turn_count"),
-                pending_approval_count: r.get("pending_approval_count"),
-                history_completeness: parse_completeness(
-                    &r.get::<String, _>("history_completeness"),
-                ),
-                history_last_synced_at: r.get("history_last_synced_at"),
-                transport_security: r
-                    .get::<Option<String>, _>("transport_security")
-                    .as_deref()
-                    .map(parse_transport),
-                app_server_status: r.get("app_server_status"),
-                storage_status: r.get("storage_status"),
-                inbox_depth: r.get("inbox_depth"),
-                outbox_depth: r.get("outbox_depth"),
-                history_backfill_depth: r.get("history_backfill_depth"),
-                providers: serde_json::from_str(&r.get::<String, _>("provider_statuses_json"))
-                    .unwrap_or_default(),
+            .map(|r| {
+                let agent_version = r.get::<Option<String>, _>("agent_version");
+                let expected_version = env!("CARGO_PKG_VERSION").to_owned();
+                let version_compatibility = match agent_version.as_deref() {
+                    Some(version) if version == expected_version => {
+                        VersionCompatibility::Compatible
+                    }
+                    Some(_) => VersionCompatibility::Mismatch,
+                    None => VersionCompatibility::Unknown,
+                };
+                DeviceSummary {
+                    id: r.get("id"),
+                    display_name: r.get("display_name"),
+                    status: if r.get::<String, _>("status") == "revoked" {
+                        DeviceStatus::Revoked
+                    } else {
+                        DeviceStatus::Offline
+                    },
+                    last_seen_at: r.get("last_seen_at"),
+                    agent_version,
+                    expected_version,
+                    version_compatibility,
+                    codex_version: r.get("codex_version"),
+                    os_family: r.get("os_family"),
+                    architecture: r.get("architecture"),
+                    project_count: r.get("project_count"),
+                    active_turn_count: r.get("active_turn_count"),
+                    pending_approval_count: r.get("pending_approval_count"),
+                    history_completeness: parse_completeness(
+                        &r.get::<String, _>("history_completeness"),
+                    ),
+                    history_last_synced_at: r.get("history_last_synced_at"),
+                    transport_security: r
+                        .get::<Option<String>, _>("transport_security")
+                        .as_deref()
+                        .map(parse_transport),
+                    app_server_status: r.get("app_server_status"),
+                    storage_status: r.get("storage_status"),
+                    inbox_depth: r.get("inbox_depth"),
+                    outbox_depth: r.get("outbox_depth"),
+                    history_backfill_depth: r.get("history_backfill_depth"),
+                    providers: serde_json::from_str(&r.get::<String, _>("provider_statuses_json"))
+                        .unwrap_or_default(),
+                }
             })
             .collect())
+    }
+
+    pub async fn record_device_version_attempt(
+        &self,
+        device_id: &str,
+        agent_version: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE devices SET last_seen_at=?,agent_version=? WHERE id=? AND status='active'",
+        )
+        .bind(now())
+        .bind(agent_version)
+        .bind(device_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn mark_device_seen(

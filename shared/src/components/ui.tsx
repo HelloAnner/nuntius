@@ -460,7 +460,7 @@ export function SelectMenu<T extends string>({
 }
 
 /* ---- connection status pill ---- */
-export type ConnState = "live" | "busy" | "down";
+export type ConnState = "live" | "busy" | "warning" | "down";
 export function ConnPill({ state, label }: { state: ConnState; label: string }) {
   return (
     <span className={`conn-pill ${state}`} role="status" aria-label={label} title={label}>
