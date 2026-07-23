@@ -214,8 +214,16 @@ export interface SavedItemView {
   id: string;
   sourceThreadId: string;
   sourceItemId: string;
+  sourceThreadTitle: string | null;
   contentMarkdown: string;
   createdAt: string;
+}
+
+export interface SavedItemsPage {
+  items: SavedItemView[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export interface AttachmentView {

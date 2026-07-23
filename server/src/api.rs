@@ -127,7 +127,10 @@ pub fn router(state: AppState) -> Router {
             post(sync_thread_history),
         )
         .route("/api/v1/turns/{turn_id}/items", get(history_items))
-        .route("/api/v1/saved-items", post(create_saved_item))
+        .route(
+            "/api/v1/saved-items",
+            get(list_saved_items).post(create_saved_item),
+        )
         .route(
             "/api/v1/approvals/{approval_id}/decision",
             post(decide_approval),
@@ -928,6 +931,42 @@ async fn history_items(
 #[serde(rename_all = "camelCase")]
 struct CreateSavedItemRequest {
     source_item_id: String,
+}
+
+#[derive(Deserialize)]
+struct ListSavedItemsQuery {
+    query: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+async fn list_saved_items(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListSavedItemsQuery>,
+) -> Result<Json<SavedItemsPage>, ApiError> {
+    let session = auth::authenticate_web(&state.store, &headers).await?;
+    let search = query
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if search.is_some_and(|value| value.chars().count() > 256) {
+        return Err(ApiError::BadRequest(
+            "query must not exceed 256 characters".into(),
+        ));
+    }
+    Ok(Json(
+        state
+            .store
+            .list_saved_items(
+                &session.user_id,
+                search,
+                query.limit.unwrap_or(8).clamp(1, 50),
+                query.offset.unwrap_or(0).clamp(0, 1_000_000),
+            )
+            .await?,
+    ))
 }
 
 async fn create_saved_item(

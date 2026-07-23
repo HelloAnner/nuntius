@@ -4,7 +4,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Avatar,
   IconBolt,
+  IconChevronRight,
   IconClock,
+  IconDevice,
   IconKey,
   IconRefresh,
   Segmented,
@@ -26,10 +28,12 @@ import {
 } from "@nuntius/shared";
 import { api } from "../api";
 import { useAccessMode, useSession, useThemeStore } from "../stores";
+import { useNavigate } from "../hooks";
 import { ConnIndicator, TopBar } from "../components";
 import { RenameDeviceSheet } from "../sheets/RenameDeviceSheet";
 
 export function SettingsPage() {
+  const navigate = useNavigate();
   const toast = useToast();
   const qc = useQueryClient();
   const { session, setSession } = useSession();
@@ -48,6 +52,8 @@ export function SettingsPage() {
     queryFn: api.providerUsage,
   });
   const usageGroups = groupUsageByDevice(providerUsage.data ?? []);
+  const pairedDevices = devices.data ?? [];
+  const onlineDevices = pairedDevices.filter((device) => device.status === "online").length;
 
   const newPairingCode = async () => {
     setBusyPairing(true);
@@ -127,6 +133,24 @@ export function SettingsPage() {
               退出
             </button>
           </div>
+
+          <div className="section-label micro">设备与连接</div>
+          <button
+            className="card settings-destination"
+            onClick={() => navigate({ name: "devices" })}
+          >
+            <span className="settings-destination-icon">
+              <IconDevice size={20} />
+            </span>
+            <span className="settings-destination-copy">
+              <strong>设备管理</strong>
+              <small>查看在线状态、项目数量与同步诊断</small>
+            </span>
+            <span className="settings-destination-count num">
+              {devices.isLoading ? "—" : `${onlineDevices} / ${pairedDevices.length} 在线`}
+            </span>
+            <IconChevronRight size={17} />
+          </button>
 
           <div className="section-label micro">对话访问级别</div>
           <div className="card access-settings">

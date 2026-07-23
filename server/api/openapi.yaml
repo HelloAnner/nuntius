@@ -320,6 +320,15 @@ paths:
         - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}}
       responses: {'200': {description: Server 聚合的消息与工具项, content: {application/json: {schema: {type: array, items: {type: object, additionalProperties: true}}}}}}
   /saved-items:
+    get:
+      operationId: listSavedItems
+      description: 按保存时间倒序分页返回学习内容；query 对 Markdown 正文和仍存在的来源会话标题做不区分 ASCII 大小写的子串搜索。
+      parameters:
+        - {name: query, in: query, schema: {type: string, maxLength: 256}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 50, default: 8}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 1000000, default: 0}}
+      responses:
+        '200': {description: 已保存内容分页, content: {application/json: {schema: {$ref: '#/components/schemas/SavedItemsPage'}}}}
     post:
       operationId: createSavedItem
       description: 将一条已完整同步的 AI 回复保存为独立 Markdown 文本快照；重复保存同一回复时返回原记录。
@@ -587,8 +596,17 @@ components:
         id: {type: string}
         sourceThreadId: {type: string}
         sourceItemId: {type: string}
+        sourceThreadTitle: {type: [string, 'null']}
         contentMarkdown: {type: string}
         createdAt: {type: string, format: date-time}
+    SavedItemsPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/SavedItem'}}
+        total: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1}
+        offset: {type: integer, minimum: 0}
     DirectoryPage:
       type: object
       required: [deviceId, breadcrumb, entries, expiresAt]

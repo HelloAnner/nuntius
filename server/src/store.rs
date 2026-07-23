@@ -926,7 +926,7 @@ impl ServerStore {
         idempotency_key: &str,
     ) -> Result<Option<(SavedItemView, bool)>> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        if let Some(row) = sqlx::query("SELECT id,source_thread_id,source_item_id,content_markdown,created_at FROM saved_items WHERE user_id=? AND idempotency_key=?")
+        if let Some(row) = sqlx::query("SELECT s.id,s.source_thread_id,s.source_item_id,h.title source_thread_title,s.content_markdown,s.created_at FROM saved_items s LEFT JOIN threads h ON h.id=s.source_thread_id WHERE s.user_id=? AND s.idempotency_key=?")
             .bind(user_id)
             .bind(idempotency_key)
             .fetch_optional(&mut *tx)
@@ -938,7 +938,7 @@ impl ServerStore {
             return Ok(Some((saved_item_from_row(row), false)));
         }
 
-        let source = sqlx::query("SELECT h.id source_thread_id,i.content_text FROM items i JOIN turns t ON t.id=i.turn_id JOIN threads h ON h.id=t.thread_id WHERE h.user_id=? AND i.id=? AND i.kind='agent_message' AND i.status='completed' AND i.is_truncated=0")
+        let source = sqlx::query("SELECT h.id source_thread_id,h.title source_thread_title,i.content_text FROM items i JOIN turns t ON t.id=i.turn_id JOIN threads h ON h.id=t.thread_id WHERE h.user_id=? AND i.id=? AND i.kind='agent_message' AND i.status='completed' AND i.is_truncated=0")
             .bind(user_id)
             .bind(source_item_id)
             .fetch_optional(&mut *tx)
@@ -953,7 +953,7 @@ impl ServerStore {
             return Ok(None);
         }
 
-        if let Some(row) = sqlx::query("SELECT id,source_thread_id,source_item_id,content_markdown,created_at FROM saved_items WHERE user_id=? AND source_item_id=?")
+        if let Some(row) = sqlx::query("SELECT s.id,s.source_thread_id,s.source_item_id,h.title source_thread_title,s.content_markdown,s.created_at FROM saved_items s LEFT JOIN threads h ON h.id=s.source_thread_id WHERE s.user_id=? AND s.source_item_id=?")
             .bind(user_id)
             .bind(source_item_id)
             .fetch_optional(&mut *tx)
@@ -966,6 +966,7 @@ impl ServerStore {
             id: new_id("sav"),
             source_thread_id: source.get("source_thread_id"),
             source_item_id: source_item_id.into(),
+            source_thread_title: source.get("source_thread_title"),
             content_markdown,
             created_at: now(),
         };
@@ -981,6 +982,53 @@ impl ServerStore {
             .await?;
         tx.commit().await?;
         Ok(Some((saved, true)))
+    }
+
+    pub async fn list_saved_items(
+        &self,
+        user_id: &str,
+        search: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<SavedItemsPage> {
+        let search = search.map(str::trim).filter(|value| !value.is_empty());
+        let (total, rows) = if let Some(search) = search {
+            let total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM saved_items s LEFT JOIN threads h ON h.id=s.source_thread_id WHERE s.user_id=? AND (instr(lower(s.content_markdown),lower(?))>0 OR instr(lower(COALESCE(h.title,'')),lower(?))>0)")
+                .bind(user_id)
+                .bind(search)
+                .bind(search)
+                .fetch_one(&self.pool)
+                .await?;
+            let rows = sqlx::query("SELECT s.id,s.source_thread_id,s.source_item_id,h.title source_thread_title,s.content_markdown,s.created_at FROM saved_items s LEFT JOIN threads h ON h.id=s.source_thread_id WHERE s.user_id=? AND (instr(lower(s.content_markdown),lower(?))>0 OR instr(lower(COALESCE(h.title,'')),lower(?))>0) ORDER BY julianday(s.created_at) DESC,s.id DESC LIMIT ? OFFSET ?")
+                .bind(user_id)
+                .bind(search)
+                .bind(search)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?;
+            (total, rows)
+        } else {
+            let total = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM saved_items WHERE user_id=?",
+            )
+            .bind(user_id)
+            .fetch_one(&self.pool)
+            .await?;
+            let rows = sqlx::query("SELECT s.id,s.source_thread_id,s.source_item_id,h.title source_thread_title,s.content_markdown,s.created_at FROM saved_items s LEFT JOIN threads h ON h.id=s.source_thread_id WHERE s.user_id=? ORDER BY julianday(s.created_at) DESC,s.id DESC LIMIT ? OFFSET ?")
+                .bind(user_id)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?;
+            (total, rows)
+        };
+        Ok(SavedItemsPage {
+            items: rows.into_iter().map(saved_item_from_row).collect(),
+            total,
+            limit,
+            offset,
+        })
     }
 
     async fn item_attachments(&self, item_id: &str) -> Result<Vec<AttachmentView>> {
@@ -1995,6 +2043,7 @@ fn saved_item_from_row(r: sqlx::sqlite::SqliteRow) -> SavedItemView {
         id: r.get("id"),
         source_thread_id: r.get("source_thread_id"),
         source_item_id: r.get("source_item_id"),
+        source_thread_title: r.get("source_thread_title"),
         content_markdown: r.get("content_markdown"),
         created_at: r.get("created_at"),
     }
@@ -2889,6 +2938,32 @@ mod tests {
             .unwrap();
         assert!(!replay_created);
         assert_eq!(replayed.id, saved.id);
+        let saved_page = store
+            .list_saved_items(&user.id, None, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(saved_page.total, 1);
+        assert_eq!(saved_page.items[0].id, saved.id);
+        assert_eq!(
+            saved_page.items[0].source_thread_title.as_deref(),
+            Some("Imported")
+        );
+        assert_eq!(
+            store
+                .list_saved_items(&user.id, Some("DONE"), 10, 0)
+                .await
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(
+            store
+                .list_saved_items(&user.id, Some("missing"), 10, 0)
+                .await
+                .unwrap()
+                .total,
+            0
+        );
         let history_items = store
             .history_items(&user.id, "trn_history", 10, 0)
             .await

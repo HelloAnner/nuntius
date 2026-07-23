@@ -15,6 +15,7 @@ import {
   type ProviderUsageLatestView,
   type ProviderUsageRefreshResponse,
   type SavedItemView,
+  type SavedItemsPage,
   type ServerInfo,
   type SyncSnapshot,
   type ThreadSummary,
@@ -182,6 +183,11 @@ export const api = {
     req<HistoryItemView[]>("GET", `/turns/${turnId}/items?limit=${limit}`),
   saveItem: (sourceItemId: string, idemKey: string) =>
     req<SavedItemView>("POST", "/saved-items", { sourceItemId }, { idemKey }),
+  savedItems: (query: string, limit: number, offset: number) => {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (query.trim()) params.set("query", query.trim());
+    return req<SavedItemsPage>("GET", `/saved-items?${params}`);
+  },
 
   uploadAttachment,
   deleteAttachment: (attachmentId: string) =>

@@ -58,6 +58,7 @@ export const useAccessMode = create<AccessModeState>((set) => ({
 
 /* ---------- router ---------- */
 export type Route =
+  | { name: "learning" }
   | { name: "devices" }
   | { name: "recents" }
   | { name: "projects" }
@@ -70,8 +71,10 @@ export type Route =
 
 export function routeToPath(r: Route): string {
   switch (r.name) {
-    case "devices":
+    case "learning":
       return "/";
+    case "devices":
+      return "/settings/devices";
     case "recents":
       return "/recents";
     case "projects":
@@ -81,7 +84,7 @@ export function routeToPath(r: Route): string {
     case "settings":
       return "/settings";
     case "device":
-      return `/d/${r.deviceId}`;
+      return `/settings/devices/${r.deviceId}`;
     case "project":
       return `/d/${r.deviceId}/p/${r.projectId}`;
     case "recentThread":
@@ -93,11 +96,18 @@ export function routeToPath(r: Route): string {
 
 export function pathToRoute(path: string): Route {
   const seg = path.split("/").filter(Boolean);
-  if (seg.length === 0) return { name: "devices" };
+  if (seg.length === 0) return { name: "learning" };
   if (seg.length === 1 && seg[0] === "recents") return { name: "recents" };
   if (seg.length === 1 && seg[0] === "projects") return { name: "projects" };
   if (seg.length === 1 && seg[0] === "approvals") return { name: "approvals" };
   if (seg.length === 1 && seg[0] === "settings") return { name: "settings" };
+  if (seg.length === 2 && seg[0] === "settings" && seg[1] === "devices") {
+    return { name: "devices" };
+  }
+  if (seg.length === 3 && seg[0] === "settings" && seg[1] === "devices") {
+    return { name: "device", deviceId: seg[2] };
+  }
+  // Preserve old device-detail links while canonicalizing them under Settings.
   if (seg.length === 2 && seg[0] === "d") {
     return { name: "device", deviceId: seg[1] };
   }
@@ -110,7 +120,7 @@ export function pathToRoute(path: string): Route {
   if (seg.length === 6 && seg[0] === "d" && seg[2] === "p" && seg[4] === "t") {
     return { name: "thread", deviceId: seg[1], projectId: seg[3], threadId: seg[5] };
   }
-  return { name: "devices" };
+  return { name: "learning" };
 }
 
 function routeFromLocation(): Route {

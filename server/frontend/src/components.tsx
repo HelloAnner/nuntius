@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   IconArchive,
+  IconBook,
   IconChat,
   IconChevronLeft,
   IconChevronRight,
@@ -92,14 +93,16 @@ export function TopBar({
 
 const TABS: { route: Route; label: string; icon: (size: number) => ReactNode }[] = [
   { route: { name: "recents" }, label: "最近", icon: (size) => <IconClock size={size} /> },
-  { route: { name: "devices" }, label: "设备", icon: (size) => <IconDevice size={size} /> },
+  { route: { name: "learning" }, label: "学习", icon: (size) => <IconBook size={size} /> },
   { route: { name: "projects" }, label: "项目", icon: (size) => <IconFolder size={size} /> },
   { route: { name: "approvals" }, label: "审批", icon: (size) => <IconShield size={size} /> },
   { route: { name: "settings" }, label: "设置", icon: (size) => <IconSettings size={size} /> },
 ];
 
 function tabActive(route: Route, tab: Route): boolean {
-  if (tab.name === "devices") return route.name === "devices" || route.name === "device";
+  if (tab.name === "settings") {
+    return route.name === "settings" || route.name === "devices" || route.name === "device";
+  }
   if (tab.name === "projects") {
     return route.name === "projects" || route.name === "project" || route.name === "thread";
   }

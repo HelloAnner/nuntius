@@ -408,8 +408,18 @@ pub struct SavedItemView {
     pub id: String,
     pub source_thread_id: String,
     pub source_item_id: String,
+    pub source_thread_title: Option<String>,
     pub content_markdown: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedItemsPage {
+    pub items: Vec<SavedItemView>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

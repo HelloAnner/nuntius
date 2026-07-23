@@ -16,6 +16,7 @@ import { ThreadPage } from "./pages/Thread";
 import { RecentsEntryRoute, RecentThreadRoute } from "./pages/RecentWorkspace";
 import { ApprovalsPage } from "./pages/Approvals";
 import { SettingsPage } from "./pages/Settings";
+import { LearningPage } from "./pages/Learning";
 
 function Boot() {
   const qc = useQueryClient();
@@ -82,6 +83,8 @@ function Boot() {
 function RouterView() {
   const route = useRoute((s) => s.route);
   switch (route.name) {
+    case "learning":
+      return <LearningPage />;
     case "devices":
       return <DevicesPage />;
     case "recents":

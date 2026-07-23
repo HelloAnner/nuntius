@@ -3,10 +3,12 @@ import { useQuery } from "@tanstack/react-query";
 import { Empty, IconBook, IconDevice, IconPlus, IconTerminal, statusLabel } from "@nuntius/shared";
 import { api } from "../api";
 import { useNavigate } from "../hooks";
+import { useRoute } from "../stores";
 import { DeviceRow, StatusDot, TopBar } from "../components";
 
 export function DevicesPage() {
   const navigate = useNavigate();
+  const back = useRoute((state) => state.back);
   const devices = useQuery({ queryKey: ["devices"], queryFn: api.devices });
   const sorted = [...(devices.data ?? [])].sort((a, b) => {
     const rank = (status: string) => (status === "online" ? 0 : status === "syncing" || status === "degraded" ? 1 : 2);
@@ -17,7 +19,8 @@ export function DevicesPage() {
   return (
     <div className="page devices-page">
       <TopBar
-        title="设备"
+        title="设备与连接"
+        onBack={() => back({ name: "settings" })}
         subtitle={
           <>
             <span className="desktop-only">{sorted.length} 台已配对设备 · {onlineCount} 台在线 · 离线设备的历史仍可阅读</span>
