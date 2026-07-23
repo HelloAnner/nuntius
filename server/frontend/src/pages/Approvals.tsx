@@ -41,11 +41,17 @@ export function ApprovalsPage() {
     };
   }, [items, order]);
 
-  const decide = async (a: ApprovalView, decision: string) => {
+  const decide = async (a: ApprovalView, decision: string, response?: unknown) => {
     const store = useApprovals.getState();
     store.setState(a.id, "responding");
     try {
-      const receipt = await api.decideApproval(a.deviceId, a.id, decision, newIdemKey());
+      const receipt = await api.decideApproval(
+        a.deviceId,
+        a.id,
+        decision,
+        newIdemKey(),
+        response,
+      );
       trackCommand(qc, receipt.commandId, a.threadId ?? undefined, "approval.decide");
       store.setState(a.id, decision === "decline" || decision === "cancel" ? "denied" : "approved", decision);
     } catch (e) {
@@ -87,7 +93,8 @@ export function ApprovalsPage() {
                       <div key={a.id} className="approval-inbox-item">
                         <ApprovalCard
                           approval={enriched}
-                          onDecide={(d) => void decide(a, d)}
+                          onDecide={(decision, response) =>
+                            void decide(a, decision, response)}
                           locked={!approvalConnected(a)}
                         />
                         {a.threadId ? (

@@ -382,12 +382,18 @@ export function ThreadPage({
     }
   };
 
-  const decide = async (approvalId: string, decision: string) => {
+  const decide = async (approvalId: string, decision: string, response?: unknown) => {
     const approvalsApi = useApprovals.getState();
     approvalsApi.setState(approvalId, "responding");
     const idemKey = newIdemKey();
     try {
-      const receipt = await api.decideApproval(deviceId, approvalId, decision, idemKey);
+      const receipt = await api.decideApproval(
+        deviceId,
+        approvalId,
+        decision,
+        idemKey,
+        response,
+      );
       trackCommand(qc, receipt.commandId, threadId, "approval.decide");
       approvalsApi.setState(
         approvalId,

@@ -17,6 +17,23 @@ use tokio::sync::{Mutex, Notify, RwLock, broadcast};
 const STARTUP_RECOVERY_CONCURRENCY: usize = 4;
 const STARTUP_RECOVERY_CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[derive(Clone, Default)]
+pub struct ProviderHistoryLocks {
+    codex: Arc<Mutex<()>>,
+    kimi: Arc<Mutex<()>>,
+    pi: Arc<Mutex<()>>,
+}
+
+impl ProviderHistoryLocks {
+    fn for_provider(&self, provider: AgentProvider) -> &Mutex<()> {
+        match provider {
+            AgentProvider::Codex => &self.codex,
+            AgentProvider::Kimi => &self.kimi,
+            AgentProvider::Pi => &self.pi,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CommandExecutor {
     pub config: Arc<ClientConfig>,
@@ -27,7 +44,7 @@ pub struct CommandExecutor {
     pub events: broadcast::Sender<NuntiusEvent>,
     pub command_acks: broadcast::Sender<TunnelFrame>,
     pub command_notify: Arc<Notify>,
-    pub history_import_lock: Arc<Mutex<()>>,
+    pub history_import_locks: ProviderHistoryLocks,
 }
 
 impl CommandExecutor {
@@ -701,10 +718,22 @@ impl CommandExecutor {
                 request.client_message_id.as_deref(),
             )
             .await?;
-        let provider_turn = extract_id(
-            &result,
-            &["turn/id", "turnId", "id", "prompt_id", "prompt/prompt_id"],
-        );
+        // Kimi's durable transcript is keyed by `user_message_id`; `prompt_id`
+        // is queue/runtime identity and is not guaranteed to appear on history
+        // messages. Pi's prompt_id is already its stable JSONL entry id.
+        let provider_turn = if thread.provider == AgentProvider::Kimi {
+            extract_id(&result, &["user_message_id"]).or_else(|| {
+                extract_id(
+                    &result,
+                    &["turn/id", "turnId", "id", "prompt_id", "prompt/prompt_id"],
+                )
+            })
+        } else {
+            extract_id(
+                &result,
+                &["turn/id", "turnId", "id", "prompt_id", "prompt/prompt_id"],
+            )
+        };
         let local_turn = self
             .store
             .record_user_turn(
@@ -898,8 +927,12 @@ impl CommandExecutor {
         thread_id: &str,
         timeout: Duration,
     ) -> Result<()> {
-        let _guard = self.history_import_lock.lock().await;
         let thread = self.thread(thread_id).await?;
+        let _guard = self
+            .history_import_locks
+            .for_provider(thread.provider)
+            .lock()
+            .await;
         let app_thread_id = thread
             .app_server_thread_id
             .as_deref()
@@ -919,7 +952,27 @@ impl CommandExecutor {
                 &thread_fingerprint_key(thread.provider, app_thread_id),
                 &thread_fingerprint(&provider_thread)?,
             )
-            .await
+            .await?;
+        if thread.provider == AgentProvider::Kimi
+            && let Some(seq) = provider_thread
+                .pointer("/_nuntiusProviderCursor/seq")
+                .and_then(Value::as_u64)
+        {
+            self.agents
+                .kimi
+                .ack_event(
+                    app_thread_id,
+                    seq,
+                    provider_thread
+                        .pointer("/_nuntiusProviderCursor/epoch")
+                        .and_then(Value::as_str),
+                )
+                .await?;
+            if app_thread_status(&provider_thread) == "active" {
+                self.agents.kimi.retry_subscription(app_thread_id).await;
+            }
+        }
+        Ok(())
     }
 
     /// Reconcile the most recently changed Codex sessions, including sessions
@@ -1067,7 +1120,11 @@ impl CommandExecutor {
             .get("id")
             .and_then(Value::as_str)
             .context("rollout inventory has no thread id")?;
-        let _guard = self.history_import_lock.lock().await;
+        let _guard = self
+            .history_import_locks
+            .for_provider(AgentProvider::Codex)
+            .lock()
+            .await;
         if self
             .store
             .local_provider_thread_id(AgentProvider::Codex, app_id)
@@ -1115,7 +1172,11 @@ impl CommandExecutor {
     /// Used by the rollout-file monitor so external terminal activity does not
     /// depend on this App Server instance receiving runtime notifications.
     pub async fn reconcile_app_thread(&self, app_id: &str) -> Result<()> {
-        let _guard = self.history_import_lock.lock().await;
+        let _guard = self
+            .history_import_locks
+            .for_provider(AgentProvider::Codex)
+            .lock()
+            .await;
         let response = self
             .agents
             .codex
@@ -1414,7 +1475,11 @@ impl CommandExecutor {
         local_thread: &str,
         app_thread: &Value,
     ) -> Result<()> {
-        let _guard = self.history_import_lock.lock().await;
+        let _guard = self
+            .history_import_locks
+            .for_provider(provider)
+            .lock()
+            .await;
         let app_id = app_thread
             .get("id")
             .and_then(Value::as_str)
@@ -1430,7 +1495,27 @@ impl CommandExecutor {
                 )
             })?;
         self.store.import_app_history(local_thread, &detail).await?;
-        self.sync_thread(local_thread).await
+        self.sync_thread(local_thread).await?;
+        if provider == AgentProvider::Kimi
+            && let Some(seq) = detail
+                .pointer("/_nuntiusProviderCursor/seq")
+                .and_then(Value::as_u64)
+        {
+            self.agents
+                .kimi
+                .ack_event(
+                    app_id,
+                    seq,
+                    detail
+                        .pointer("/_nuntiusProviderCursor/epoch")
+                        .and_then(Value::as_str),
+                )
+                .await?;
+            if app_thread_status(&detail) == "active" {
+                self.agents.kimi.retry_subscription(app_id).await;
+            }
+        }
+        Ok(())
     }
     pub async fn emit_inventory(&self) -> Result<()> {
         for project in self.store.list_projects(&self.device_id).await? {
@@ -1746,8 +1831,25 @@ pub async fn process_kimi_events(executor: CommandExecutor) {
     loop {
         match receiver.recv().await {
             Ok(message) => {
-                if let Err(error) = process_kimi_event(&executor, message).await {
-                    tracing::warn!(error=?error, "failed to process Kimi event")
+                let cursor = kimi_message_cursor(&message);
+                match process_kimi_event(&executor, message).await {
+                    Ok(()) => {
+                        if let Some((session_id, seq, epoch)) = cursor
+                            && let Err(error) = executor
+                                .agents
+                                .kimi
+                                .ack_event(&session_id, seq, epoch.as_deref())
+                                .await
+                        {
+                            tracing::warn!(
+                                error=?error,
+                                %session_id,
+                                seq,
+                                "failed to persist Kimi event cursor"
+                            );
+                        }
+                    }
+                    Err(error) => tracing::warn!(error=?error, "failed to process Kimi event"),
                 }
             }
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -1783,12 +1885,80 @@ async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Resul
         return Ok(());
     };
     let thread = executor.thread(&thread_id).await?;
-    let payload = message.get("payload").cloned().unwrap_or(Value::Null);
-    let turn_id = kimi_event_id(&payload, "turnId");
+    let mut payload = message.get("payload").cloned().unwrap_or(Value::Null);
+    if let Some(object) = payload.as_object_mut() {
+        if !object.contains_key("streamOffset")
+            && let Some(offset) = message.get("offset")
+        {
+            object.insert("streamOffset".into(), offset.clone());
+        }
+        if !object.contains_key("providerSeq")
+            && let Some(seq) = message.get("seq")
+        {
+            object.insert("providerSeq".into(), seq.clone());
+        }
+    }
+    let provider_turn_id = kimi_provider_turn_id(&payload);
+    let provider_turn = if let Some(provider_turn_id) = provider_turn_id.as_deref() {
+        executor
+            .store
+            .local_turn_id_for_app(&thread_id, provider_turn_id)
+            .await?
+    } else {
+        None
+    };
+    let mut local_turn_id = provider_turn;
+    if local_turn_id.is_none() {
+        local_turn_id = executor.store.active_local_turn_id(&thread_id).await?;
+    }
+
+    if kimi_non_main_transcript_event(event_type, &payload) {
+        return Ok(());
+    }
 
     if event_type == "nuntius.resync_required" {
         executor.refresh_thread_history(&thread_id).await?;
         executor.emit_thread_summary(&thread_id).await?;
+        executor.agents.kimi.retry_subscription(session_id).await;
+        return Ok(());
+    }
+
+    if event_type == "event.assistant.delta" && payload.get("delta").is_some_and(Value::is_object)
+    {
+        let durable = message.get("volatile").and_then(Value::as_bool) != Some(true);
+        let message_id = payload
+            .get("message_id")
+            .and_then(Value::as_str)
+            .unwrap_or("kimi-assistant");
+        let content_index = payload
+            .get("content_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        for (kind, field) in [
+            ("agent.assistant.delta", "text"),
+            ("agent.thinking.delta", "thinking"),
+        ] {
+            if let Some(delta) = payload
+                .pointer(&format!("/delta/{field}"))
+                .and_then(Value::as_str)
+                .filter(|delta| !delta.is_empty())
+            {
+                executor
+                    .emit(
+                        kind,
+                        Some(&thread.project_id),
+                        Some(&thread_id),
+                        local_turn_id.as_deref(),
+                        json!({
+                            "delta":delta,
+                            "itemId":format!("{message_id}:{content_index}:{field}"),
+                            "providerSeq":payload.get("providerSeq"),
+                        }),
+                        durable,
+                    )
+                    .await?;
+            }
+        }
         return Ok(());
     }
 
@@ -1816,7 +1986,7 @@ async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Resul
                     "approval.requested",
                     Some(&thread.project_id),
                     Some(&thread_id),
-                    turn_id.as_deref(),
+                    local_turn_id.as_deref(),
                     json!({"approvalId":approval_id,"method":"kimi/approval","params":payload}),
                     true,
                 )
@@ -1825,12 +1995,105 @@ async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Resul
         return Ok(());
     }
 
+    if event_type == "event.question.requested" {
+        let provider_question_id = payload
+            .get("question_id")
+            .and_then(Value::as_str)
+            .context("Kimi question event has no question_id")?;
+        let approval_id = format!("apr_kimi_question_{provider_question_id}");
+        let inserted = executor
+            .store
+            .save_provider_request(
+                AgentProvider::Kimi,
+                &approval_id,
+                &json!({
+                    "kind":"question",
+                    "questionId":provider_question_id,
+                    "sessionId":session_id,
+                }),
+                "kimi/question",
+                &payload,
+                Some(&thread.project_id),
+                Some(&thread_id),
+            )
+            .await?;
+        if inserted {
+            executor
+                .emit(
+                    "approval.requested",
+                    Some(&thread.project_id),
+                    Some(&thread_id),
+                    local_turn_id.as_deref(),
+                    json!({
+                        "approvalId":approval_id,
+                        "method":"kimi/question",
+                        "params":payload,
+                    }),
+                    true,
+                )
+                .await?;
+        }
+        return Ok(());
+    }
+
+    let resolved_approval = match event_type {
+        "event.approval.resolved" => payload
+            .get("approval_id")
+            .and_then(Value::as_str)
+            .map(|id| {
+                let decision = match payload.get("decision").and_then(Value::as_str) {
+                    Some("approved") => "accept",
+                    Some("rejected") => "decline",
+                    _ => "cancel",
+                };
+                (format!("apr_kimi_{id}"), "decided", Some(decision))
+            }),
+        "event.approval.expired" => payload
+            .get("approval_id")
+            .and_then(Value::as_str)
+            .map(|id| (format!("apr_kimi_{id}"), "unknown", None)),
+        "event.question.answered" => payload
+            .get("question_id")
+            .and_then(Value::as_str)
+            .map(|id| {
+                (
+                    format!("apr_kimi_question_{id}"),
+                    "decided",
+                    Some("accept"),
+                )
+            }),
+        "event.question.dismissed" => payload
+            .get("question_id")
+            .and_then(Value::as_str)
+            .map(|id| {
+                (
+                    format!("apr_kimi_question_{id}"),
+                    "decided",
+                    Some("cancel"),
+                )
+            }),
+        _ => None,
+    };
+    if let Some((approval_id, status, decision)) = resolved_approval {
+        executor
+            .store
+            .finish_app_request(&approval_id, status, decision, None)
+            .await?;
+        executor
+            .emit_approval_resolved(&approval_id, Some(&thread), status, decision)
+            .await;
+        return Ok(());
+    }
+
+    let mut reconcile_terminal = false;
     match event_type {
         "turn.started" => {
-            executor
-                .store
-                .mark_app_turn_started(&thread_id, None)
-                .await?;
+            local_turn_id = Some(
+                executor
+                    .store
+                    .mark_app_turn_started(&thread_id, None)
+                    .await?,
+            );
             executor.sync_thread(&thread_id).await?;
             executor.emit_thread_summary(&thread_id).await?;
         }
@@ -1840,26 +2103,42 @@ async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Resul
                 .and_then(Value::as_str)
                 .unwrap_or("completed");
             let status = kimi_turn_status(reason);
-            executor
-                .store
-                .complete_app_turn(&thread_id, None, status)
-                .await?;
+            if local_turn_id.is_some() {
+                executor
+                    .store
+                    .complete_app_turn(&thread_id, None, status)
+                    .await?;
+            }
             executor.sync_thread(&thread_id).await?;
             executor.emit_thread_summary(&thread_id).await?;
+            reconcile_terminal = true;
         }
         "event.session.work_changed" => {
-            if payload.get("busy").and_then(Value::as_bool) == Some(true) {
-                executor.store.touch_thread(&thread_id, "active").await?;
+            let busy = payload.get("busy").and_then(Value::as_bool) == Some(true);
+            let main_turn_active = payload
+                .get("main_turn_active")
+                .and_then(Value::as_bool)
+                .unwrap_or(busy);
+            if main_turn_active {
+                local_turn_id = Some(
+                    executor
+                        .store
+                        .mark_app_turn_started(&thread_id, None)
+                        .await?,
+                );
             } else {
                 let status = payload
                     .get("last_turn_reason")
                     .and_then(Value::as_str)
                     .map(kimi_turn_status)
                     .unwrap_or("completed");
-                executor
-                    .store
-                    .complete_app_turn(&thread_id, None, status)
-                    .await?;
+                if local_turn_id.is_some() {
+                    executor
+                        .store
+                        .complete_app_turn(&thread_id, None, status)
+                        .await?;
+                }
+                reconcile_terminal = true;
             }
             executor.sync_thread(&thread_id).await?;
             executor.emit_thread_summary(&thread_id).await?;
@@ -1868,20 +2147,59 @@ async fn process_kimi_event(executor: &CommandExecutor, message: Value) -> Resul
     }
 
     let durable = message.get("volatile").and_then(Value::as_bool) != Some(true);
+    let (emitted_event_type, emitted_payload) = match event_type {
+        "event.tool.started" => (
+            "tool.call.started",
+            json!({
+                "toolCallId":payload.get("tool_call_id"),
+                "name":payload.get("tool_name"),
+                "args":payload.get("input"),
+            }),
+        ),
+        "event.tool.output" => (
+            "tool.progress",
+            json!({
+                "toolCallId":payload.get("tool_call_id"),
+                "update":payload.get("chunk"),
+                "stream":payload.get("stream"),
+                "mode":"append",
+            }),
+        ),
+        "event.tool.progress" => (
+            "tool.progress",
+            json!({
+                "toolCallId":payload.get("tool_call_id"),
+                "update":payload.get("message"),
+                "progress":payload.get("progress"),
+                "mode":"append",
+            }),
+        ),
+        "event.tool.completed" => (
+            "tool.result",
+            json!({
+                "toolCallId":payload.get("tool_call_id"),
+                "output":payload.get("output"),
+                "isError":payload.get("is_error"),
+                "durationMs":payload.get("duration_ms"),
+            }),
+        ),
+        _ => (event_type, payload),
+    };
     executor
         .emit(
-            &format!("agent.{event_type}"),
+            &format!("agent.{emitted_event_type}"),
             Some(&thread.project_id),
             Some(&thread_id),
-            turn_id.as_deref(),
-            payload,
+            local_turn_id.as_deref(),
+            emitted_payload,
             durable,
         )
         .await?;
 
-    if event_type == "turn.ended" {
+    if reconcile_terminal {
         executor.refresh_thread_history(&thread_id).await?;
         executor.emit_thread_summary(&thread_id).await?;
+        executor.agents.kimi.unsubscribe_session(session_id).await;
     }
     Ok(())
 }
@@ -1967,9 +2285,13 @@ async fn process_pi_event(executor: &CommandExecutor, message: Value) -> Result<
 
     match event_type {
         "agent_start" => {
-            executor
+            let local_turn_id = executor
                 .store
                 .mark_app_turn_started(&thread_id, None)
+                .await?;
+            executor
+                .store
+                .state_set(&format!("pi:last-end:{session_id}"), "running")
                 .await?;
             executor.sync_thread(&thread_id).await?;
             executor.emit_thread_summary(&thread_id).await?;
@@ -1978,7 +2300,7 @@ async fn process_pi_event(executor: &CommandExecutor, message: Value) -> Result<
                     "agent.turn.started",
                     Some(&thread.project_id),
                     Some(&thread_id),
-                    None,
+                    Some(&local_turn_id),
                     json!({}),
                     true,
                 )
@@ -1988,7 +2310,39 @@ async fn process_pi_event(executor: &CommandExecutor, message: Value) -> Result<
             let reason = pi_agent_end_reason(&event);
             executor
                 .store
-                .complete_app_turn(&thread_id, None, kimi_turn_status(reason))
+                .state_set(&format!("pi:last-end:{session_id}"), reason)
+                .await?;
+            let local_turn_id = executor.store.active_local_turn_id(&thread_id).await?;
+            executor
+                .emit(
+                    "agent.run.ended",
+                    Some(&thread.project_id),
+                    Some(&thread_id),
+                    local_turn_id.as_deref(),
+                    json!({
+                        "reason":reason,
+                        "willRetry":event.get("willRetry").and_then(Value::as_bool).unwrap_or(false),
+                    }),
+                    true,
+                )
+                .await?;
+        }
+        "agent_settled" => {
+            let local_turn_id = executor.store.active_local_turn_id(&thread_id).await?;
+            let app_turn_id = executor.store.active_app_turn_id(&thread_id).await?;
+            let reason = executor
+                .store
+                .state_get(&format!("pi:last-end:{session_id}"))
+                .await?
+                .filter(|reason| reason != "running")
+                .unwrap_or_else(|| "completed".into());
+            executor
+                .store
+                .complete_app_turn(
+                    &thread_id,
+                    app_turn_id.as_deref(),
+                    kimi_turn_status(&reason),
+                )
                 .await?;
             executor.sync_thread(&thread_id).await?;
             executor.emit_thread_summary(&thread_id).await?;
@@ -1997,7 +2351,7 @@ async fn process_pi_event(executor: &CommandExecutor, message: Value) -> Result<
                     "agent.turn.ended",
                     Some(&thread.project_id),
                     Some(&thread_id),
-                    None,
+                    local_turn_id.as_deref(),
                     json!({"reason":reason}),
                     true,
                 )
@@ -2067,6 +2421,7 @@ async fn process_pi_event(executor: &CommandExecutor, message: Value) -> Result<
                             "toolCallId": event.get("toolCallId"),
                             "name": event.get("toolName"),
                             "update": update,
+                            "mode": "replace",
                         }),
                         false,
                     )
@@ -2125,6 +2480,61 @@ fn kimi_turn_status(reason: &str) -> &'static str {
         "failed" | "blocked" => "failed",
         _ => "completed",
     }
+}
+
+fn kimi_message_cursor(message: &Value) -> Option<(String, u64, Option<String>)> {
+    if message.get("volatile").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let session_id = message
+        .get("session_id")
+        .and_then(Value::as_str)
+        .or_else(|| message.pointer("/payload/session_id").and_then(Value::as_str))?
+        .to_owned();
+    let seq = if message.get("type").and_then(Value::as_str)
+        == Some("nuntius.resync_required")
+    {
+        message.pointer("/payload/current_seq").and_then(Value::as_u64)
+    } else {
+        message.get("seq").and_then(Value::as_u64)
+    }?;
+    let epoch = message
+        .get("epoch")
+        .and_then(Value::as_str)
+        .or_else(|| message.pointer("/payload/epoch").and_then(Value::as_str))
+        .map(str::to_owned);
+    Some((session_id, seq, epoch))
+}
+
+fn kimi_provider_turn_id(payload: &Value) -> Option<String> {
+    [
+        "user_message_id",
+        "userMessageId",
+        "prompt_id",
+        "promptId",
+        "turnId",
+        "turn_id",
+        "current_prompt_id",
+    ]
+    .into_iter()
+    .find_map(|key| kimi_event_id(payload, key))
+}
+
+fn kimi_non_main_transcript_event(event_type: &str, payload: &Value) -> bool {
+    let agent_id = payload
+        .get("agentId")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("agent_id").and_then(Value::as_str));
+    if agent_id.is_none_or(|agent_id| agent_id == "main") {
+        return false;
+    }
+    let event_type = event_type.strip_prefix("event.").unwrap_or(event_type);
+    event_type.starts_with("turn.")
+        || event_type.starts_with("assistant.")
+        || event_type.starts_with("thinking.")
+        || event_type.starts_with("tool.")
+        || event_type.starts_with("prompt.")
+        || event_type == "error"
 }
 
 fn kimi_event_id(payload: &Value, key: &str) -> Option<String> {
@@ -2486,6 +2896,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn kimi_cursor_ignores_volatile_frames_and_tracks_resync_watermarks() {
+        assert!(kimi_message_cursor(&json!({
+            "type":"assistant.delta",
+            "session_id":"session_1",
+            "seq":7,
+            "volatile":true,
+            "payload":{"delta":"x"}
+        }))
+        .is_none());
+        assert_eq!(
+            kimi_message_cursor(&json!({
+                "type":"nuntius.resync_required",
+                "session_id":"session_1",
+                "payload":{"current_seq":9,"epoch":"epoch_2"}
+            })),
+            Some(("session_1".into(), 9, Some("epoch_2".into())))
+        );
+    }
+
+    #[test]
+    fn kimi_subagent_transcript_events_do_not_mix_into_the_main_turn() {
+        assert!(kimi_non_main_transcript_event(
+            "assistant.delta",
+            &json!({"agentId":"subagent_1","delta":"hidden"})
+        ));
+        assert!(!kimi_non_main_transcript_event(
+            "event.approval.requested",
+            &json!({"agentId":"subagent_1"})
+        ));
+        assert!(!kimi_non_main_transcript_event(
+            "assistant.delta",
+            &json!({"agentId":"main","delta":"visible"})
+        ));
+    }
+
     fn fake_app_server(temp: &TempDir) -> (PathBuf, PathBuf) {
         let script = temp.path().join("fake-app-server.sh");
         let calls = temp.path().join("app-server-calls.jsonl");
@@ -2566,7 +3012,7 @@ done
             events,
             command_acks,
             command_notify: Arc::new(Notify::new()),
-            history_import_lock: Arc::new(Mutex::new(())),
+            history_import_locks: ProviderHistoryLocks::default(),
         }
     }
 

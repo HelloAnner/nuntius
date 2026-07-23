@@ -101,6 +101,6 @@ export const api = {
       "POST",
       `/threads/${threadId}/viewed`,
     ),
-  decideApproval: (approvalId: string, decision: string) =>
-    req<unknown>("POST", `/approvals/${approvalId}/decision`, { decision }),
+  decideApproval: (approvalId: string, decision: string, response?: unknown) =>
+    req<unknown>("POST", `/approvals/${approvalId}/decision`, { decision, response }),
 };

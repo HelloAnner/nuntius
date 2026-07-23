@@ -236,11 +236,11 @@ export function ThreadPage({ projectId, threadId }: { projectId: string; threadI
     }
   };
 
-  const decide = async (approvalId: string, decision: string) => {
+  const decide = async (approvalId: string, decision: string, response?: unknown) => {
     const store = useApprovals.getState();
     store.setState(approvalId, "responding");
     try {
-      await api.decideApproval(approvalId, decision);
+      await api.decideApproval(approvalId, decision, response);
       store.setState(
         approvalId,
         decision === "decline" || decision === "cancel" ? "denied" : "approved",

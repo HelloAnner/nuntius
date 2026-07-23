@@ -228,11 +228,17 @@ export const api = {
   markThreadViewed: (threadId: string, idemKey?: string) =>
     req<CommandReceipt>("POST", `/threads/${threadId}/viewed`, undefined, { idemKey }),
 
-  decideApproval: (deviceId: string, approvalId: string, decision: string, idemKey: string) =>
+  decideApproval: (
+    deviceId: string,
+    approvalId: string,
+    decision: string,
+    idemKey: string,
+    response?: unknown,
+  ) =>
     req<CommandReceipt>(
       "POST",
       `/approvals/${approvalId}/decision`,
-      { decision },
+      { decision, response },
       { idemKey, deviceId },
     ),
 

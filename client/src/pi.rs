@@ -122,9 +122,9 @@ impl PiRuntime {
             None
         };
         let models = if available {
-            let (models, refresh_due) = self.catalog_snapshot(live.is_some()).await;
+            let (models, refresh_due) = self.catalog_snapshot().await;
             if refresh_due {
-                self.schedule_catalog_refresh(live.clone());
+                self.schedule_catalog_refresh();
             }
             models
         } else {
@@ -151,7 +151,7 @@ impl PiRuntime {
     /// perform network I/O while serving `get_available_models`, and the
     /// complete device heartbeat has a shorter deadline than that operation.
     /// Return cache/fallback immediately and refresh it in one detached task.
-    async fn catalog_snapshot(&self, has_live_process: bool) -> (Vec<AgentModelOption>, bool) {
+    async fn catalog_snapshot(&self) -> (Vec<AgentModelOption>, bool) {
         let (models, cache_fresh) = self
             .model_catalog
             .lock()
@@ -170,7 +170,7 @@ impl PiRuntime {
             .await
             .as_ref()
             .is_some_and(|failed_at| failed_at.elapsed() < CATALOG_FAILURE_TTL);
-        let refresh_due = !cache_fresh && (has_live_process || !failure_is_fresh);
+        let refresh_due = !cache_fresh && !failure_is_fresh;
         (
             (!models.is_empty())
                 .then_some(models)
@@ -179,38 +179,18 @@ impl PiRuntime {
         )
     }
 
-    fn schedule_catalog_refresh(&self, live: Option<PiHandle>) {
+    fn schedule_catalog_refresh(&self) {
         if self.catalog_refresh_running.swap(true, Ordering::AcqRel) {
             return;
         }
         let runtime = self.clone();
         tokio::spawn(async move {
             let _guard = CatalogRefreshGuard(runtime.catalog_refresh_running.clone());
-            if let Some(handle) = live {
-                let models = tokio::time::timeout(
-                    Duration::from_secs(15),
-                    runtime.catalog_from(&handle),
-                )
-                .await
-                .ok()
-                .flatten();
-                runtime.store_catalog_result(models).await;
-            } else {
-                let _ = runtime.probe_model_catalog().await;
-            }
+            // A long-lived session process can retain the provider/model registry
+            // it loaded at startup. Always probe a fresh no-session process so
+            // newly installed providers and model updates become visible.
+            let _ = runtime.probe_model_catalog().await;
         });
-    }
-
-    async fn store_catalog_result(&self, models: Option<Vec<AgentModelOption>>) {
-        if let Some(models) = models.filter(|models| !models.is_empty()) {
-            *self.catalog_probe_failed_at.lock().await = None;
-            *self.model_catalog.lock().await = Some(CachedCatalog {
-                fetched_at: std::time::Instant::now(),
-                models,
-            });
-        } else {
-            *self.catalog_probe_failed_at.lock().await = Some(std::time::Instant::now());
-        }
     }
 
     /// Fetch the real `/model` catalog from a short-lived probe process.
@@ -395,12 +375,45 @@ impl PiRuntime {
         let handle = self.attach(session_id).await?;
         self.apply_turn_options(&handle, options).await?;
         let (message, images) = pi_content(input).await?;
+        let previous_leaf = match self.entry_leaf(&handle).await {
+            Ok(leaf) => leaf,
+            Err(error) => {
+                tracing::warn!(
+                    error=?error,
+                    %session_id,
+                    "Pi entry cursor unavailable before prompt"
+                );
+                None
+            }
+        };
         let mut command = json!({"type":"prompt","message":message});
         if !images.is_empty() {
             command["images"] = json!(images);
         }
         self.call(&handle, command).await?;
-        Ok(json!({"accepted":true}))
+        let entries = match self.entries_since(&handle, previous_leaf.as_deref()).await {
+            Ok(entries) => Some(entries),
+            Err(error) => {
+                // The prompt command has already been accepted. Failing the
+                // outer command here would invite a retry and duplicate it.
+                tracing::warn!(
+                    error=?error,
+                    %session_id,
+                    "Pi accepted the prompt but its stable entry id is not available yet"
+                );
+                None
+            }
+        };
+        let prompt_id = entries.as_ref().and_then(newest_user_entry_id);
+        let entry_cursor = entries
+            .as_ref()
+            .and_then(|entries| entries.get("leafId"))
+            .cloned();
+        Ok(json!({
+            "accepted":true,
+            "prompt_id":prompt_id,
+            "entry_cursor":entry_cursor,
+        }))
     }
 
     pub async fn steer_prompt(
@@ -531,6 +544,7 @@ impl PiRuntime {
         let mut reply = json!({"type":"extension_ui_response","id":request_id});
         match (ui_method, decision) {
             ("confirm", "accept") => reply["confirmed"] = json!(true),
+            ("confirm", "decline") => reply["confirmed"] = json!(false),
             ("select" | "input" | "editor", "accept") => {
                 if let Some(value) = response.and_then(|value| value.get("value")) {
                     reply["value"] = value.clone();
@@ -566,6 +580,22 @@ impl PiRuntime {
                 .context("Pi rejected the selected thinking level")?;
         }
         Ok(())
+    }
+
+    async fn entry_leaf(&self, handle: &PiHandle) -> Result<Option<String>> {
+        let entries = self.call(handle, json!({"type":"get_entries"})).await?;
+        Ok(entries
+            .get("leafId")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+
+    async fn entries_since(&self, handle: &PiHandle, since: Option<&str>) -> Result<Value> {
+        let mut command = json!({"type":"get_entries"});
+        if let Some(since) = since {
+            command["since"] = json!(since);
+        }
+        self.call(handle, command).await
     }
 
     async fn call(&self, handle: &PiHandle, command: Value) -> Result<Value> {
@@ -1038,15 +1068,17 @@ fn split_model(model: &str) -> Option<(&str, &str)> {
     Some((provider, id))
 }
 
-/// Pi thinking levels: off, minimal, low, medium, high, xhigh. Other
+/// Pi thinking levels: off, minimal, low, medium, high, xhigh, max. Other
 /// providers' vocabulary is mapped onto the closest level.
 fn pi_thinking_level(value: &Value) -> Option<String> {
     let map = |effort: &str| -> Option<String> {
         match effort {
-            "off" | "minimal" | "low" | "medium" | "high" | "xhigh" => Some(effort.into()),
+            "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => {
+                Some(effort.into())
+            }
             "none" => Some("off".into()),
             "on" => Some("medium".into()),
-            "max" | "ultra" => Some("high".into()),
+            "ultra" => Some("max".into()),
             _ => None,
         }
     };
@@ -1091,7 +1123,7 @@ fn parse_pi_models(catalog: &Value, current: Option<(&str, &str)>) -> Vec<AgentM
                 .get("thinkingLevelMap")
                 .and_then(Value::as_object)
                 .map(|levels| {
-                    ["off", "minimal", "low", "medium", "high", "xhigh"]
+                    ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
                         .into_iter()
                         .filter(|level| {
                             levels.get(*level).is_some_and(|value| !value.is_null())
@@ -1135,6 +1167,22 @@ fn parse_pi_models(catalog: &Value, current: Option<(&str, &str)>) -> Vec<AgentM
             })
         })
         .collect()
+}
+
+fn newest_user_entry_id(entries: &Value) -> Option<String> {
+    entries
+        .get("entries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .rev()
+        .find(|entry| {
+            entry.get("type").and_then(Value::as_str) == Some("message")
+                && entry.pointer("/message/role").and_then(Value::as_str) == Some("user")
+        })
+        .and_then(|entry| entry.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 fn fallback_pi_models() -> Vec<AgentModelOption> {
@@ -1221,7 +1269,8 @@ mod tests {
     fn thinking_levels_map_cross_provider_vocabulary() {
         assert_eq!(pi_thinking_level(&json!("high")), Some("high".into()));
         assert_eq!(pi_thinking_level(&json!("on")), Some("medium".into()));
-        assert_eq!(pi_thinking_level(&json!("max")), Some("high".into()));
+        assert_eq!(pi_thinking_level(&json!("max")), Some("max".into()));
+        assert_eq!(pi_thinking_level(&json!("ultra")), Some("max".into()));
         assert_eq!(
             pi_thinking_level(&json!({"enabled":false})),
             Some("off".into())
@@ -1258,7 +1307,7 @@ mod tests {
                 "name":"DeepSeek V4 Pro",
                 "provider":"deepseek",
                 "reasoning":true,
-                "thinkingLevelMap":{"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max"}
+                "thinkingLevelMap":{"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":"max"}
             },
             {
                 "id":"k3",
@@ -1270,10 +1319,29 @@ mod tests {
         let models = parse_pi_models(&catalog, Some(("kimi-coding", "k3")));
         assert_eq!(models.len(), 2);
         assert!(!models[0].is_default);
-        assert_eq!(models[0].reasoning_efforts, vec!["high".to_owned(), "xhigh".to_owned()]);
+        assert_eq!(
+            models[0].reasoning_efforts,
+            vec!["high".to_owned(), "xhigh".to_owned(), "max".to_owned()]
+        );
         assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("high"));
         assert!(models[1].is_default);
         assert_eq!(models[1].default_reasoning_effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn newest_user_entry_uses_the_provider_stable_entry_id() {
+        let entries = json!({
+            "entries": [
+                {"type":"message","id":"assistant-old","message":{"role":"assistant"}},
+                {"type":"message","id":"user-new","message":{"role":"user"}},
+                {"type":"message","id":"assistant-new","message":{"role":"assistant"}}
+            ],
+            "leafId":"assistant-new"
+        });
+        assert_eq!(
+            newest_user_entry_id(&entries).as_deref(),
+            Some("user-new")
+        );
     }
 
     #[tokio::test]

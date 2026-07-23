@@ -170,7 +170,13 @@ impl AgentRuntimes {
                     .call(method, json!({"threadId":session_id}))
                     .await
             }
-            AgentProvider::Kimi => self.kimi.archive_session(session_id, archived).await,
+            AgentProvider::Kimi => {
+                let result = self.kimi.archive_session(session_id, archived).await?;
+                if archived {
+                    self.kimi.unsubscribe_session(session_id).await;
+                }
+                Ok(result)
+            }
             // Pi has no provider-side archive; Nuntius keeps the projection.
             AgentProvider::Pi => Ok(json!({"archived":archived,"scope":"nuntius"})),
         }
@@ -266,6 +272,7 @@ impl AgentRuntimes {
                 self.codex.call("turn/start", Value::Object(params)).await
             }
             AgentProvider::Kimi => {
+                self.kimi.subscribe_session(session_id).await;
                 self.kimi
                     .submit_prompt(session_id, input, access_mode, options)
                     .await
@@ -298,6 +305,7 @@ impl AgentRuntimes {
                 self.codex.call("turn/steer", params).await
             }
             AgentProvider::Kimi => {
+                self.kimi.subscribe_session(session_id).await;
                 self.kimi
                     .steer_prompt(session_id, input, access_mode, options)
                     .await
@@ -322,7 +330,10 @@ impl AgentRuntimes {
                     )
                     .await
             }
-            AgentProvider::Kimi => self.kimi.interrupt(session_id).await,
+            AgentProvider::Kimi => {
+                self.kimi.subscribe_session(session_id).await;
+                self.kimi.interrupt(session_id).await
+            }
             AgentProvider::Pi => self.pi.interrupt(session_id).await,
         }
     }
@@ -341,9 +352,19 @@ impl AgentRuntimes {
                 Ok(response.get("thread").unwrap_or(&response).clone())
             }
             AgentProvider::Kimi => {
-                self.kimi.subscribe_session(session_id).await;
                 let snapshot = self.kimi.snapshot(session_id).await?;
-                normalize_kimi_snapshot(&snapshot)
+                let active = snapshot
+                    .get("session")
+                    .is_some_and(kimi_session_is_active);
+                let normalized = normalize_kimi_snapshot(&snapshot)?;
+                // A newly discovered active session is subscribed only after
+                // its snapshot cursor has been durably imported. This closes
+                // the snapshot-to-WebSocket race where events between those
+                // two operations could otherwise be skipped.
+                if !active {
+                    self.kimi.unsubscribe_session(session_id).await;
+                }
+                Ok(normalized)
             }
             AgentProvider::Pi => self.pi.read_thread(session_id).await,
         }
@@ -390,9 +411,6 @@ impl AgentRuntimes {
                     if cwd.is_some_and(|path| session_cwd != path.to_str()) {
                         continue;
                     }
-                    if let Some(id) = session.get("id").and_then(Value::as_str) {
-                        self.kimi.subscribe_session(id).await;
-                    }
                     threads.push(normalize_kimi_session(&session, None)?);
                 }
                 Ok(threads)
@@ -423,6 +441,21 @@ impl AgentRuntimes {
                 let session_id = session_id
                     .or_else(|| provider_request_id.get("sessionId").and_then(Value::as_str))
                     .context("Kimi approval has no session")?;
+                if provider_request_id.get("kind").and_then(Value::as_str) == Some("question") {
+                    let question_id = provider_request_id
+                        .get("questionId")
+                        .and_then(Value::as_str)
+                        .context("Kimi question id is not a string")?;
+                    self.kimi
+                        .resolve_question(
+                            session_id,
+                            question_id,
+                            decision,
+                            response.as_ref(),
+                        )
+                        .await?;
+                    return Ok(());
+                }
                 let approval_id = provider_request_id
                     .as_str()
                     .or_else(|| {
@@ -499,11 +532,25 @@ fn codex_turn_access(mode: ConversationAccessMode) -> Map<String, Value> {
     }
 }
 
+fn kimi_session_is_active(session: &Value) -> bool {
+    let busy = session.get("busy").and_then(Value::as_bool) == Some(true);
+    session
+        .get("main_turn_active")
+        .and_then(Value::as_bool)
+        .unwrap_or(busy)
+}
+
 fn normalize_kimi_snapshot(snapshot: &Value) -> Result<Value> {
     let session = snapshot
         .get("session")
         .context("Kimi snapshot has no session")?;
-    let mut groups: Vec<(String, Vec<Value>, Option<i64>)> = Vec::new();
+    struct Group {
+        id: String,
+        prompt_id: Option<String>,
+        items: Vec<Value>,
+        started: Option<i64>,
+    }
+    let mut groups: Vec<Group> = Vec::new();
     for message in snapshot
         .pointer("/messages/items")
         .and_then(Value::as_array)
@@ -517,54 +564,89 @@ fn normalize_kimi_snapshot(snapshot: &Value) -> Result<Value> {
         if role == "system" {
             continue;
         }
+        let message_id = message
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
         let prompt_id = message
             .get("prompt_id")
             .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| {
-                (role != "user")
-                    .then(|| groups.last().map(|group| group.0.clone()))
-                    .flatten()
-            })
-            .unwrap_or_else(|| {
-                message
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_owned()
-            });
-        let item = normalize_kimi_message(message);
+            .map(str::to_owned);
         let timestamp = rfc3339_unix(message.get("created_at"));
-        if let Some(group) = groups.iter_mut().find(|group| group.0 == prompt_id) {
-            group.1.push(item);
+        let group_index = if role == "user" {
+            groups.push(Group {
+                // This is the durable identity returned as `user_message_id`
+                // by prompt submission and present on every history record.
+                id: message_id,
+                prompt_id,
+                items: Vec::new(),
+                started: timestamp,
+            });
+            groups.len() - 1
         } else {
-            groups.push((prompt_id, vec![item], timestamp));
-        }
+            prompt_id
+                .as_deref()
+                .and_then(|prompt_id| {
+                    groups
+                        .iter()
+                        .rposition(|group| group.prompt_id.as_deref() == Some(prompt_id))
+                })
+                .or_else(|| groups.len().checked_sub(1))
+                .unwrap_or_else(|| {
+                    groups.push(Group {
+                        id: message_id,
+                        prompt_id,
+                        items: Vec::new(),
+                        started: timestamp,
+                    });
+                    groups.len() - 1
+                })
+        };
+        groups[group_index]
+            .items
+            .extend(normalize_kimi_message(message));
     }
-    let active_prompt = session.get("current_prompt_id").and_then(Value::as_str);
+    let busy = session.get("busy").and_then(Value::as_bool) == Some(true);
+    let main_turn_active = session
+        .get("main_turn_active")
+        .and_then(Value::as_bool)
+        .unwrap_or(busy);
+    let mut active_group_id = None;
     if let Some(in_flight) = snapshot
         .get("in_flight_turn")
         .filter(|value| !value.is_null())
     {
-        let prompt_id = in_flight
+        let active_prompt = in_flight
             .get("current_prompt_id")
             .and_then(Value::as_str)
-            .or(active_prompt)
-            .unwrap_or("kimi-in-flight")
-            .to_owned();
-        let group = if let Some(index) = groups.iter().position(|group| group.0 == prompt_id) {
-            &mut groups[index]
+            .or_else(|| session.get("current_prompt_id").and_then(Value::as_str));
+        let group_index = if let Some(index) = active_prompt.and_then(|prompt_id| {
+            groups
+                .iter()
+                .rposition(|group| group.prompt_id.as_deref() == Some(prompt_id))
+        }) {
+            index
+        } else if let Some(index) = groups.len().checked_sub(1) {
+            index
         } else {
-            groups.push((prompt_id.clone(), Vec::new(), None));
-            groups.last_mut().expect("group appended")
+            groups.push(Group {
+                id: active_prompt.unwrap_or("kimi-in-flight").to_owned(),
+                prompt_id: active_prompt.map(str::to_owned),
+                items: Vec::new(),
+                started: None,
+            });
+            groups.len() - 1
         };
+        let group = &mut groups[group_index];
+        active_group_id = Some(group.id.clone());
         if let Some(text) = in_flight
             .get("thinking_text")
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
         {
-            group.1.push(json!({
-                "id":format!("{prompt_id}:thinking"),
+            group.items.push(json!({
+                "id":format!("{}:thinking", group.id),
                 "type":"reasoning",
                 "status":"inProgress",
                 "text":text,
@@ -576,40 +658,62 @@ fn normalize_kimi_snapshot(snapshot: &Value) -> Result<Value> {
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
         {
-            group.1.push(json!({
-                "id":format!("{prompt_id}:assistant"),
+            group.items.push(json!({
+                "id":format!("{}:assistant", group.id),
                 "type":"agentMessage",
                 "status":"inProgress",
                 "text":text,
                 "structuredDetail":in_flight,
             }));
         }
+        for tool in in_flight
+            .get("running_tools")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let tool_id = tool
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .unwrap_or("kimi-running-tool");
+            let item = json!({
+                "id":tool_id,
+                "type":"commandExecution",
+                "status":"inProgress",
+                "text":tool.pointer("/last_progress/text").and_then(Value::as_str).unwrap_or_default(),
+                "structuredDetail":tool,
+            });
+            if let Some(existing) = group.items.iter_mut().find(|item| {
+                item.get("id").and_then(Value::as_str) == Some(tool_id)
+            }) {
+                *existing = item;
+            } else {
+                group.items.push(item);
+            }
+        }
     }
-    let busy = session.get("busy").and_then(Value::as_bool) == Some(true);
-    let main_turn_active = session
-        .get("main_turn_active")
-        .and_then(Value::as_bool)
-        .unwrap_or(busy);
-    let active_group = main_turn_active.then(|| {
-        active_prompt
-            .map(str::to_owned)
-            .or_else(|| groups.last().map(|group| group.0.clone()))
-            .unwrap_or_else(|| "kimi-in-flight".into())
-    });
+    if main_turn_active && active_group_id.is_none() {
+        active_group_id = groups.last().map(|group| group.id.clone());
+    }
     let turns = groups
         .into_iter()
-        .map(|(id, items, started)| {
-            let active = active_group.as_deref() == Some(id.as_str());
+        .map(|group| {
+            let active = active_group_id.as_deref() == Some(group.id.as_str());
             json!({
-                "id":id,
+                "id":group.id,
                 "status":if active {"inProgress"} else {"completed"},
-                "startedAt":started,
-                "completedAt":if active {Value::Null} else {started.map(Value::from).unwrap_or(Value::Null)},
-                "items":items,
+                "startedAt":group.started,
+                "completedAt":if active {Value::Null} else {group.started.map(Value::from).unwrap_or(Value::Null)},
+                "items":group.items,
             })
         })
         .collect::<Vec<_>>();
-    normalize_kimi_session(session, Some(turns))
+    let mut normalized = normalize_kimi_session(session, Some(turns))?;
+    normalized["_nuntiusProviderCursor"] = json!({
+        "seq":snapshot.get("as_of_seq"),
+        "epoch":snapshot.get("epoch"),
+    });
+    Ok(normalized)
 }
 
 fn normalize_kimi_session(session: &Value, turns: Option<Vec<Value>>) -> Result<Value> {
@@ -622,7 +726,7 @@ fn normalize_kimi_session(session: &Value, turns: Option<Vec<Value>>) -> Result<
         "name":session.get("title").and_then(Value::as_str).unwrap_or("Kimi 对话"),
         "preview":session.get("last_prompt"),
         "cwd":session.pointer("/metadata/cwd"),
-        "status":if session.get("busy").and_then(Value::as_bool) == Some(true) {"active"} else {"idle"},
+        "status":if kimi_session_is_active(session) {"active"} else {"idle"},
         "archived":session.get("archived").and_then(Value::as_bool).unwrap_or(false),
         "updatedAt":rfc3339_unix(session.get("updated_at")),
         "createdAt":rfc3339_unix(session.get("created_at")),
@@ -630,54 +734,102 @@ fn normalize_kimi_session(session: &Value, turns: Option<Vec<Value>>) -> Result<
     }))
 }
 
-fn normalize_kimi_message(message: &Value) -> Value {
+fn normalize_kimi_message(message: &Value) -> Vec<Value> {
     let role = message
         .get("role")
         .and_then(Value::as_str)
         .unwrap_or("system");
-    let kind = match role {
-        "user" => "userMessage",
-        "assistant" => "agentMessage",
-        "tool" => "commandExecution",
-        _ => "reasoning",
-    };
-    let mut text = Vec::new();
-    for content in message
+    let message_id = message
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    message
         .get("content")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-    {
-        if let Some(value) = content.get("text").and_then(Value::as_str) {
-            text.push(value.to_owned());
-        } else if let Some(value) = content.get("thinking").and_then(Value::as_str) {
-            text.push(value.to_owned());
-        } else if content.get("type").and_then(Value::as_str) == Some("tool_result") {
-            text.push(
-                content
-                    .get("output")
-                    .map(Value::to_string)
-                    .unwrap_or_default(),
-            );
-        } else if content.get("type").and_then(Value::as_str) == Some("tool_use") {
-            let name = content
-                .get("tool_name")
+        .enumerate()
+        .map(|(index, content)| {
+            let content_type = content
+                .get("type")
                 .and_then(Value::as_str)
-                .unwrap_or("tool");
-            let input = content
-                .get("input")
-                .map(Value::to_string)
-                .unwrap_or_default();
-            text.push(format!("{name} {input}"));
-        }
-    }
-    json!({
-        "id":message.get("id"),
-        "type":kind,
-        "status":"completed",
-        "text":text.join("\n"),
-        "structuredDetail":message,
-    })
+                .unwrap_or("unknown");
+            let (kind, text, status) = match content_type {
+                "thinking" => (
+                    "reasoning",
+                    content
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    "completed",
+                ),
+                "tool_use" => {
+                    let name = content
+                        .get("tool_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool");
+                    let input = content
+                        .get("input")
+                        .map(Value::to_string)
+                        .unwrap_or_default();
+                    ("commandExecution", format!("{name} {input}"), "completed")
+                }
+                "tool_result" => (
+                    "commandExecution",
+                    content
+                        .get("output")
+                        .map(Value::to_string)
+                        .unwrap_or_default(),
+                    if content.get("is_error").and_then(Value::as_bool) == Some(true) {
+                        "failed"
+                    } else {
+                        "completed"
+                    },
+                ),
+                "text" => (
+                    match role {
+                        "user" => "userMessage",
+                        "tool" => "commandExecution",
+                        _ => "agentMessage",
+                    },
+                    content
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    "completed",
+                ),
+                _ => (
+                    if role == "user" {
+                        "userMessage"
+                    } else {
+                        "agentMessage"
+                    },
+                    String::new(),
+                    "completed",
+                ),
+            };
+            let id = content
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    if role == "user" && index == 0 {
+                        message_id.to_owned()
+                    } else {
+                        format!("{message_id}:{content_type}:{index}")
+                    }
+                });
+            json!({
+                "id":id,
+                "type":kind,
+                "status":status,
+                "text":text,
+                "structuredDetail":{"message":message,"content":content},
+            })
+        })
+        .collect()
 }
 
 fn rfc3339_unix(value: Option<&Value>) -> Option<i64> {
@@ -831,5 +983,66 @@ mod tests {
             models[0].reasoning_efforts,
             vec!["low".to_owned(), "xhigh".to_owned()]
         );
+    }
+
+    #[test]
+    fn kimi_history_uses_user_message_identity_and_preserves_content_kinds() {
+        let snapshot = json!({
+            "session":{
+                "id":"session_1",
+                "busy":false,
+                "main_turn_active":false,
+                "title":"Kimi",
+                "metadata":{"cwd":"/tmp"},
+                "created_at":"2026-07-23T00:00:00Z",
+                "updated_at":"2026-07-23T00:01:00Z"
+            },
+            "messages":{"items":[
+                {
+                    "id":"message_1",
+                    "role":"user",
+                    "prompt_id":"prompt_runtime_1",
+                    "created_at":"2026-07-23T00:00:00Z",
+                    "content":[{"type":"text","text":"hello"}]
+                },
+                {
+                    "id":"message_2",
+                    "role":"assistant",
+                    "prompt_id":"prompt_runtime_1",
+                    "created_at":"2026-07-23T00:00:01Z",
+                    "content":[
+                        {"type":"thinking","thinking":"plan"},
+                        {"type":"text","text":"answer"},
+                        {"type":"tool_use","tool_call_id":"tool_1","tool_name":"Read","input":{"path":"a"}}
+                    ]
+                }
+            ]},
+            "in_flight_turn":null
+        });
+        let normalized = normalize_kimi_snapshot(&snapshot).unwrap();
+        assert_eq!(normalized.pointer("/turns/0/id"), Some(&json!("message_1")));
+        assert_eq!(
+            normalized.pointer("/turns/0/items/0/type"),
+            Some(&json!("userMessage"))
+        );
+        assert_eq!(
+            normalized.pointer("/turns/0/items/1/type"),
+            Some(&json!("reasoning"))
+        );
+        assert_eq!(
+            normalized.pointer("/turns/0/items/2/type"),
+            Some(&json!("agentMessage"))
+        );
+        assert_eq!(
+            normalized.pointer("/turns/0/items/3/type"),
+            Some(&json!("commandExecution"))
+        );
+    }
+
+    #[test]
+    fn kimi_main_turn_active_is_not_misreported_as_idle() {
+        assert!(kimi_session_is_active(
+            &json!({"busy":false,"main_turn_active":true})
+        ));
     }
 }

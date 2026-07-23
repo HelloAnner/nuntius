@@ -343,7 +343,7 @@ async fn run() -> Result<()> {
         events,
         command_acks,
         command_notify: Arc::new(tokio::sync::Notify::new()),
-        history_import_lock: Arc::new(tokio::sync::Mutex::new(())),
+        history_import_locks: executor::ProviderHistoryLocks::default(),
     };
     let provider_usage_task = cfg
         .device_id

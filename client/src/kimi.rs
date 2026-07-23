@@ -1,5 +1,5 @@
 use crate::{
-    config::ClientConfig,
+    config::{self, ClientConfig},
     protocol::{
         AgentModelOption, AgentProvider, AgentProviderStatus, ConversationAccessMode, new_id,
     },
@@ -9,9 +9,10 @@ use base64::Engine;
 use directories::BaseDirs;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Method;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -31,6 +32,13 @@ const API_PREFIX: &str = "/api/v1";
 const DEFAULT_MODEL: &str = "kimi-code/k3";
 const DEFAULT_THINKING: &str = "max";
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct KimiSessionCursor {
+    seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    epoch: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct KimiRuntime {
     config: Arc<ClientConfig>,
@@ -38,6 +46,8 @@ pub struct KimiRuntime {
     startup: Arc<Mutex<()>>,
     process: Arc<Mutex<Option<Child>>>,
     subscriptions: Arc<Mutex<HashSet<String>>>,
+    cursor_path: Option<PathBuf>,
+    cursors: Arc<Mutex<HashMap<String, KimiSessionCursor>>>,
     approvals_seen: Arc<Mutex<HashSet<String>>>,
     subscriptions_changed: Arc<Notify>,
     events: broadcast::Sender<Value>,
@@ -55,6 +65,10 @@ impl KimiRuntime {
 
     fn with_process_ownership(config: Arc<ClientConfig>, owns_process: bool) -> Self {
         let (events, _) = broadcast::channel(4096);
+        let cursor_path = config::data_dir()
+            .ok()
+            .map(|root| root.join("run/kimi-event-cursors.json"));
+        let cursors = load_event_cursors(cursor_path.as_deref());
         Self {
             config,
             http: reqwest::Client::builder()
@@ -65,6 +79,8 @@ impl KimiRuntime {
             startup: Arc::new(Mutex::new(())),
             process: Arc::new(Mutex::new(None)),
             subscriptions: Arc::new(Mutex::new(HashSet::new())),
+            cursor_path,
+            cursors: Arc::new(Mutex::new(cursors)),
             approvals_seen: Arc::new(Mutex::new(HashSet::new())),
             subscriptions_changed: Arc::new(Notify::new()),
             events,
@@ -85,6 +101,64 @@ impl KimiRuntime {
         {
             self.subscriptions_changed.notify_one();
         }
+    }
+
+    pub async fn unsubscribe_session(&self, session_id: &str) {
+        if self.subscriptions.lock().await.remove(session_id) {
+            self.subscriptions_changed.notify_one();
+        }
+    }
+
+    pub async fn retry_subscription(&self, session_id: &str) {
+        self.subscriptions
+            .lock()
+            .await
+            .insert(session_id.to_owned());
+        self.subscriptions_changed.notify_one();
+    }
+
+    pub async fn ack_event(
+        &self,
+        session_id: &str,
+        seq: u64,
+        epoch: Option<&str>,
+    ) -> Result<()> {
+        let encoded = {
+            let mut cursors = self.cursors.lock().await;
+            let current = cursors.entry(session_id.to_owned()).or_default();
+            let epoch_changed = epoch.is_some() && current.epoch.as_deref() != epoch;
+            if epoch_changed {
+                current.seq = 0;
+            }
+            if seq <= current.seq && !epoch_changed {
+                return Ok(());
+            }
+            current.seq = seq;
+            if let Some(epoch) = epoch {
+                current.epoch = Some(epoch.to_owned());
+            }
+            serde_json::to_vec(&*cursors)?
+        };
+        if let Some(path) = &self.cursor_path {
+            config::atomic_private_write(path, &encoded)?;
+        }
+        Ok(())
+    }
+
+    async fn cursors_for(
+        &self,
+        sessions: &HashSet<String>,
+    ) -> HashMap<String, KimiSessionCursor> {
+        let cursors = self.cursors.lock().await;
+        sessions
+            .iter()
+            .filter_map(|session_id| {
+                cursors
+                    .get(session_id)
+                    .cloned()
+                    .map(|cursor| (session_id.clone(), cursor))
+            })
+            .collect()
     }
 
     pub async fn provider_status(&self) -> AgentProviderStatus {
@@ -274,16 +348,35 @@ impl KimiRuntime {
             let before_id = snapshot
                 .pointer("/messages/items/0/id")
                 .and_then(Value::as_str)
-                .context("Kimi snapshot reports older messages without a cursor")?;
+                .context("Kimi snapshot reports older messages without a cursor")?
+                .to_owned();
             let encoded =
                 url::form_urlencoded::byte_serialize(before_id.as_bytes()).collect::<String>();
-            let page = self
+            let page = match self
                 .request(
                     Method::GET,
                     &format!("/sessions/{session_id}/messages?page_size=100&before_id={encoded}"),
                     None,
                 )
-                .await?;
+                .await
+            {
+                Ok(page) => page,
+                Err(error) if is_missing_workspace_error(&error) => {
+                    tracing::warn!(
+                        %session_id,
+                        error=?error,
+                        "Kimi history workspace is gone; retaining the available transcript page"
+                    );
+                    snapshot["messages"]["has_more"] = Value::Bool(false);
+                    snapshot["history_incomplete"] = json!({
+                        "reason":"workspace_missing",
+                        "before_id":before_id,
+                    });
+                    self.publish_pending_approvals(&snapshot).await;
+                    return Ok(snapshot);
+                }
+                Err(error) => return Err(error),
+            };
             let mut older = page
                 .get("items")
                 .and_then(Value::as_array)
@@ -321,6 +414,24 @@ impl KimiRuntime {
                     "type":"event.approval.requested",
                     "session_id":session_id,
                     "payload":approval,
+                }));
+            }
+        }
+        for question in snapshot
+            .get("pending_questions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(question_id) = question.get("question_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let key = format!("{session_id}:question:{question_id}");
+            if self.approvals_seen.lock().await.insert(key) {
+                let _ = self.events.send(json!({
+                    "type":"event.question.requested",
+                    "session_id":session_id,
+                    "payload":question,
                 }));
             }
         }
@@ -454,6 +565,33 @@ impl KimiRuntime {
         .await
     }
 
+    pub async fn resolve_question(
+        &self,
+        session_id: &str,
+        question_id: &str,
+        decision: &str,
+        response: Option<&Value>,
+    ) -> Result<Value> {
+        if matches!(decision, "decline" | "cancel") {
+            return self
+                .request(
+                    Method::POST,
+                    &format!("/sessions/{session_id}/questions/{question_id}:dismiss"),
+                    Some(json!({})),
+                )
+                .await;
+        }
+        let response = response
+            .filter(|response| response.get("answers").is_some())
+            .context("Kimi question response has no answers")?;
+        self.request(
+            Method::POST,
+            &format!("/sessions/{session_id}/questions/{question_id}"),
+            Some(response.clone()),
+        )
+        .await
+    }
+
     pub async fn shutdown(&self) {
         self.stop_owned_process().await;
     }
@@ -472,7 +610,7 @@ impl KimiRuntime {
         }
     }
 
-    async fn run_event_connection(&self, sessions: HashSet<String>) -> Result<()> {
+    async fn run_event_connection(&self, mut subscribed: HashSet<String>) -> Result<()> {
         self.ensure_ready().await?;
         let token = self.token().await?;
         let client_id = new_id("nuntius");
@@ -505,14 +643,15 @@ impl KimiRuntime {
             bail!("Kimi WebSocket did not begin with server_hello")
         }
         let hello_id = new_id("hello");
+        let cursors = self.cursors_for(&subscribed).await;
         sink.send(Message::Text(
             json!({
                 "type":"client_hello",
                 "id":hello_id,
                 "payload":{
                     "client_id":client_id,
-                    "subscriptions":sessions,
-                    "cursors":{},
+                    "subscriptions":subscribed,
+                    "cursors":cursors,
                 }
             })
             .to_string()
@@ -521,7 +660,33 @@ impl KimiRuntime {
         .await?;
         loop {
             tokio::select! {
-                _ = self.subscriptions_changed.notified() => return Ok(()),
+                _ = self.subscriptions_changed.notified() => {
+                    let desired = self.subscriptions.lock().await.clone();
+                    let additions = desired.difference(&subscribed).cloned().collect::<HashSet<_>>();
+                    if !additions.is_empty() {
+                        let cursors = self.cursors_for(&additions).await;
+                        sink.send(Message::Text(json!({
+                            "type":"subscribe",
+                            "id":new_id("subscribe"),
+                            "payload":{
+                                "session_ids":additions,
+                                "cursors":cursors,
+                            },
+                        }).to_string().into())).await?;
+                    }
+                    let removals = subscribed.difference(&desired).cloned().collect::<Vec<_>>();
+                    if !removals.is_empty() {
+                        sink.send(Message::Text(json!({
+                            "type":"unsubscribe",
+                            "id":new_id("unsubscribe"),
+                            "payload":{"session_ids":removals},
+                        }).to_string().into())).await?;
+                    }
+                    subscribed = desired;
+                    if subscribed.is_empty() {
+                        return Ok(());
+                    }
+                },
                 message = stream.next() => {
                     match message {
                         Some(Ok(Message::Text(text))) => {
@@ -531,14 +696,16 @@ impl KimiRuntime {
                                 sink.send(Message::Text(json!({"type":"pong","payload":{"nonce":nonce}}).to_string().into())).await?;
                             } else if value.get("type").and_then(Value::as_str) == Some("resync_required") {
                                 if let Some(session_id) = value.pointer("/payload/session_id").and_then(Value::as_str) {
+                                    subscribed.remove(session_id);
                                     let _ = self.events.send(json!({
                                         "type":"nuntius.resync_required",
                                         "session_id":session_id,
-                                        "payload":value.get("payload"),
+                                        "payload":value.get("payload").cloned().unwrap_or(Value::Null),
                                     }));
                                 }
                             } else if value.get("type").and_then(Value::as_str) == Some("ack") {
                                 for session_id in value.pointer("/payload/resync_required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+                                    subscribed.remove(session_id);
                                     let _ = self.events.send(json!({
                                         "type":"nuntius.resync_required",
                                         "session_id":session_id,
@@ -649,6 +816,42 @@ fn kimi_home() -> Option<PathBuf> {
     std::env::var_os("KIMI_CODE_HOME")
         .map(PathBuf::from)
         .or_else(|| BaseDirs::new().map(|dirs| dirs.home_dir().join(".kimi-code")))
+}
+
+fn load_event_cursors(path: Option<&Path>) -> HashMap<String, KimiSessionCursor> {
+    let Some(path) = path else {
+        return HashMap::new();
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(cursors) => cursors,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path=%path.display(),
+                    "ignoring malformed Kimi event cursor file"
+                );
+                HashMap::new()
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path=%path.display(),
+                "cannot read Kimi event cursor file"
+            );
+            HashMap::new()
+        }
+    }
+}
+
+fn is_missing_workspace_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    message.contains("workspace")
+        && (message.contains("does not exist")
+            || message.contains("not found")
+            || message.contains("no such file"))
 }
 
 fn parse_kimi_models(catalog: &Value) -> Vec<AgentModelOption> {
@@ -878,5 +1081,15 @@ mod tests {
                 "plan_mode": true
             })
         );
+    }
+
+    #[test]
+    fn missing_workspace_errors_are_recoverable_history_gaps() {
+        assert!(is_missing_workspace_error(&anyhow!(
+            "Kimi API /sessions/s/messages failed (404, code 1): workspace root does not exist"
+        )));
+        assert!(!is_missing_workspace_error(&anyhow!(
+            "Kimi API /sessions/s/messages failed (503, code 1): upstream unavailable"
+        )));
     }
 }

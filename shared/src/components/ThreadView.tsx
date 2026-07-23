@@ -439,7 +439,7 @@ export function ThreadView({
   loading?: boolean;
   live: ThreadLive;
   approvals: ApprovalView[];
-  onDecide: (id: string, decision: string) => void;
+  onDecide: (id: string, decision: string, response?: unknown) => void;
   approvalsLocked?: boolean;
   hasMoreHistory?: boolean;
   loadingMore?: boolean;
@@ -854,7 +854,8 @@ export function ThreadView({
               <ApprovalCard
                 key={entry.key}
                 approval={entry.approval}
-                onDecide={(decision) => onDecide(entry.approval.id, decision)}
+                onDecide={(decision, response) =>
+                  onDecide(entry.approval.id, decision, response)}
                 locked={approvalsLocked}
               />
             );

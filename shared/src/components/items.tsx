@@ -301,12 +301,18 @@ export function ApprovalCard({
   locked,
 }: {
   approval: ApprovalView;
-  onDecide: (decision: string) => void;
+  onDecide: (decision: string, response?: unknown) => void;
   locked?: boolean;
 }) {
   const { kind, detail } = approvalSummary(approval.method, approval.params);
   const pending = approval.state === "pending";
   const responding = approval.state === "responding";
+  const isKimiQuestion = approval.method === "kimi/question";
+  const supportsSessionDecision = approval.method !== "pi/extension_ui";
+  const piMethod = approval.method === "pi/extension_ui"
+    ? ((approval.params ?? {}) as Record<string, unknown>).method
+    : null;
+  const isPiInteractive = piMethod === "select" || piMethod === "input" || piMethod === "editor";
   return (
     <div className={`approval-card${pending || responding ? "" : " decided"}`}>
       <div className="ap-head">
@@ -320,12 +326,26 @@ export function ApprovalCard({
         {approval.projectName ? <span>项目 {approval.projectName}</span> : null}
         <span className="mono" style={{ fontSize: 11 }}>{approval.method}</span>
       </div>
-      {detail && detail !== "null" ? (
+      {!isKimiQuestion && !isPiInteractive && detail && detail !== "null" ? (
         <div className="ap-detail">
           <pre>{detail.length > 4000 ? `${detail.slice(0, 4000)}\n…（内容已截断）` : detail}</pre>
         </div>
       ) : null}
-      {pending || responding ? (
+      {(pending || responding) && isKimiQuestion ? (
+        <KimiQuestionForm
+          params={approval.params}
+          disabled={responding || locked}
+          responding={responding}
+          onDecide={onDecide}
+        />
+      ) : (pending || responding) && isPiInteractive ? (
+        <PiExtensionForm
+          params={approval.params}
+          disabled={responding || locked}
+          responding={responding}
+          onDecide={onDecide}
+        />
+      ) : pending || responding ? (
         <div className="ap-actions">
           <button
             className="btn primary sm"
@@ -335,13 +355,15 @@ export function ApprovalCard({
             {responding ? <Spinner sm /> : null}
             批准
           </button>
-          <button
-            className="btn ghost sm"
-            disabled={responding || locked}
-            onClick={() => onDecide("accept_for_session")}
-          >
-            本会话都允许
-          </button>
+          {supportsSessionDecision ? (
+            <button
+              className="btn ghost sm"
+              disabled={responding || locked}
+              onClick={() => onDecide("accept_for_session")}
+            >
+              本会话都允许
+            </button>
+          ) : null}
           <button
             className="btn danger sm"
             disabled={responding || locked}
@@ -351,6 +373,208 @@ export function ApprovalCard({
           </button>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function PiExtensionForm({
+  params,
+  disabled,
+  responding,
+  onDecide,
+}: {
+  params: unknown;
+  disabled?: boolean;
+  responding: boolean;
+  onDecide: (decision: string, response?: unknown) => void;
+}) {
+  const raw = (params ?? {}) as Record<string, unknown>;
+  const method = typeof raw.method === "string" ? raw.method : "input";
+  const options = (Array.isArray(raw.options) ? raw.options : []).map((option) => {
+    if (typeof option === "string") return { label: option, value: option };
+    const value = (option ?? {}) as Record<string, unknown>;
+    const label = typeof value.label === "string"
+      ? value.label
+      : typeof value.value === "string"
+        ? value.value
+        : String(value.value ?? "");
+    return { label, value: value.value ?? label };
+  });
+  const [value, setValue] = useState<unknown>(
+    typeof raw.prefill === "string" ? raw.prefill : "",
+  );
+  const ready = method !== "select" || options.some((option) => option.value === value);
+  return (
+    <div className="ap-question-form">
+      <fieldset disabled={disabled}>
+        <legend>{String(raw.title ?? raw.message ?? (method === "select" ? "请选择" : "请输入"))}</legend>
+        {raw.title && raw.message && raw.title !== raw.message ? (
+          <p>{String(raw.message)}</p>
+        ) : null}
+        {method === "select" ? (
+          <div className="ap-question-options">
+            {options.map((option, index) => (
+              <label key={`${String(option.value)}:${index}`}>
+                <input
+                  type="radio"
+                  name={`pi-extension-${String(raw.id ?? raw.requestId ?? "select")}`}
+                  checked={option.value === value}
+                  onChange={() => setValue(option.value)}
+                />
+                <span><strong>{option.label}</strong></span>
+              </label>
+            ))}
+          </div>
+        ) : method === "editor" ? (
+          <textarea
+            className="ap-question-other"
+            rows={5}
+            value={String(value)}
+            onChange={(event) => setValue(event.target.value)}
+            placeholder={typeof raw.placeholder === "string" ? raw.placeholder : undefined}
+          />
+        ) : (
+          <input
+            className="ap-question-other"
+            value={String(value)}
+            onChange={(event) => setValue(event.target.value)}
+            placeholder={typeof raw.placeholder === "string" ? raw.placeholder : undefined}
+          />
+        )}
+      </fieldset>
+      <div className="ap-actions">
+        <button
+          className="btn primary sm"
+          disabled={disabled || !ready}
+          onClick={() => onDecide("accept", { value })}
+        >
+          {responding ? <Spinner sm /> : null}
+          提交
+        </button>
+        <button className="btn danger sm" disabled={disabled} onClick={() => onDecide("cancel")}>
+          取消
+        </button>
+      </div>
+    </div>
+  );
+}
+
+interface KimiQuestionOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+interface KimiQuestionItem {
+  id: string;
+  question: string;
+  header?: string;
+  body?: string;
+  options: KimiQuestionOption[];
+  multi_select?: boolean;
+  allow_other?: boolean;
+  other_label?: string;
+}
+
+function KimiQuestionForm({
+  params,
+  disabled,
+  responding,
+  onDecide,
+}: {
+  params: unknown;
+  disabled?: boolean;
+  responding: boolean;
+  onDecide: (decision: string, response?: unknown) => void;
+}) {
+  const raw = (params ?? {}) as Record<string, unknown>;
+  const questions = (Array.isArray(raw.questions) ? raw.questions : [])
+    .filter((question): question is KimiQuestionItem => {
+      if (!question || typeof question !== "object") return false;
+      const item = question as Partial<KimiQuestionItem>;
+      return typeof item.id === "string"
+        && typeof item.question === "string"
+        && Array.isArray(item.options);
+    });
+  const [selected, setSelected] = useState<Record<string, string[]>>({});
+  const [other, setOther] = useState<Record<string, string>>({});
+  const answered = questions.length > 0 && questions.every((question) =>
+    (selected[question.id]?.length ?? 0) > 0
+    || (question.allow_other && (other[question.id]?.trim().length ?? 0) > 0)
+  );
+  const submit = () => {
+    const answers: Record<string, unknown> = {};
+    for (const question of questions) {
+      const optionIds = selected[question.id] ?? [];
+      const otherText = other[question.id]?.trim() ?? "";
+      answers[question.id] = otherText
+        ? optionIds.length
+          ? { kind: "multi_with_other", option_ids: optionIds, other_text: otherText }
+          : { kind: "other", text: otherText }
+        : question.multi_select
+          ? { kind: "multi", option_ids: optionIds }
+          : { kind: "single", option_id: optionIds[0] };
+    }
+    onDecide("accept", { answers, method: "click" });
+  };
+  return (
+    <div className="ap-question-form">
+      {questions.map((question) => (
+        <fieldset key={question.id} disabled={disabled}>
+          <legend>{question.header || question.question}</legend>
+          {question.header && question.header !== question.question ? (
+            <p>{question.question}</p>
+          ) : null}
+          {question.body ? <p>{question.body}</p> : null}
+          <div className="ap-question-options">
+            {question.options.map((option) => {
+              const checked = selected[question.id]?.includes(option.id) ?? false;
+              return (
+                <label key={option.id}>
+                  <input
+                    type={question.multi_select ? "checkbox" : "radio"}
+                    name={`kimi-question-${question.id}`}
+                    checked={checked}
+                    onChange={(event) => {
+                      setSelected((current) => {
+                        const previous = current[question.id] ?? [];
+                        const next = question.multi_select
+                          ? event.target.checked
+                            ? [...new Set([...previous, option.id])]
+                            : previous.filter((id) => id !== option.id)
+                          : [option.id];
+                        return { ...current, [question.id]: next };
+                      });
+                    }}
+                  />
+                  <span>
+                    <strong>{option.label}</strong>
+                    {option.description ? <small>{option.description}</small> : null}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          {question.allow_other ? (
+            <input
+              className="ap-question-other"
+              value={other[question.id] ?? ""}
+              onChange={(event) =>
+                setOther((current) => ({ ...current, [question.id]: event.target.value }))}
+              placeholder={question.other_label || "其他答案"}
+            />
+          ) : null}
+        </fieldset>
+      ))}
+      <div className="ap-actions">
+        <button className="btn primary sm" disabled={disabled || !answered} onClick={submit}>
+          {responding ? <Spinner sm /> : null}
+          提交回答
+        </button>
+        <button className="btn danger sm" disabled={disabled} onClick={() => onDecide("cancel")}>
+          取消
+        </button>
+      </div>
     </div>
   );
 }

@@ -41,11 +41,11 @@ export function ApprovalsPage() {
     };
   }, [items, order]);
 
-  const decide = async (a: ApprovalView, decision: string) => {
+  const decide = async (a: ApprovalView, decision: string, response?: unknown) => {
     const store = useApprovals.getState();
     store.setState(a.id, "responding");
     try {
-      await api.decideApproval(a.id, decision);
+      await api.decideApproval(a.id, decision, response);
       store.setState(a.id, decision === "decline" || decision === "cancel" ? "denied" : "approved", decision);
     } catch (e) {
       store.setState(a.id, "pending");
@@ -72,7 +72,7 @@ export function ApprovalsPage() {
                     <div key={a.id} style={{ marginBottom: 14 }}>
                       <ApprovalCard
                         approval={enrich(a)}
-                        onDecide={(d) => void decide(a, d)}
+                        onDecide={(decision, response) => void decide(a, decision, response)}
                         locked={!approvalProviderConnected(a)}
                       />
                       {a.threadId ? (

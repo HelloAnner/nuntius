@@ -62,6 +62,8 @@ export interface LiveTurn {
   itemIndex: Record<string, number>;
   startedAt: string;
   startedSequence: number;
+  /** Provider-local generation for multi-step assistant streams (for example Kimi). */
+  streamGeneration?: string;
 }
 
 export interface ThreadLive {
@@ -448,6 +450,7 @@ export class ThreadLiveStore {
     if (type.startsWith("agent.")) {
       const method = type.slice("agent.".length).toLowerCase();
       const handled = method === "turn.started"
+        || method === "turn.step.started"
         || method === "turn.ended"
         || method === "event.session.work_changed"
         || method === "error"
@@ -466,6 +469,16 @@ export class ThreadLiveStore {
           ?? this.ensureTurn(threadId, turnHint, event.occurredAt, event.seq)
         : this.ensureTurn(threadId, turnHint, event.occurredAt, event.seq);
       if (method === "turn.started") {
+        turn.status = "running";
+        this.bump();
+        return;
+      }
+      if (method === "turn.step.started") {
+        turn.streamGeneration =
+          str(payload.stepUuid)
+          ?? str(payload.uuid)
+          ?? (typeof payload.step === "number" ? String(payload.step) : null)
+          ?? event.eventId;
         turn.status = "running";
         this.bump();
         return;
@@ -520,11 +533,16 @@ export class ThreadLiveStore {
         if (!delta) return;
         const item = this.ensureItem(
           turn,
-          `${event.turnId ?? "current"}:${method}`,
+          str(payload.itemId)
+            ?? `${event.turnId ?? "current"}:${turn.streamGeneration ?? "step"}:${method}`,
           method === "thinking.delta" ? "reasoning" : "agent",
           event.occurredAt,
           event.seq,
         );
+        const streamOffset = typeof payload.streamOffset === "number"
+          ? payload.streamOffset
+          : null;
+        if (streamOffset !== null && streamOffset < item.text.length) return;
         item.text += delta;
         item.status = "running";
         this.scheduleBump();
@@ -547,7 +565,9 @@ export class ThreadLiveStore {
             : printable(payload.output) ?? printable(payload.result);
         if (detail) {
           item.text = method === "tool.progress"
-            ? `${item.text}${item.text ? "\n" : ""}${detail}`
+            ? payload.mode === "replace"
+              ? detail
+              : `${item.text}${item.text ? "\n" : ""}${detail}`
             : detail;
         }
         item.status = method === "tool.result" ? "completed" : "running";

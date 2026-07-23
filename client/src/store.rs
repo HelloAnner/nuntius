@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{
-    ConnectOptions, Row, SqlitePool,
+    ConnectOptions, Row, Sqlite, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::{
@@ -550,6 +550,27 @@ impl ClientStore {
             "SELECT app_server_turn_id FROM turns WHERE thread_id=? AND status IN ('active','running','inProgress') AND app_server_turn_id IS NOT NULL ORDER BY ordinal DESC LIMIT 1",
         )
         .bind(thread_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+    pub async fn active_local_turn_id(&self, thread_id: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT id FROM turns WHERE thread_id=? AND lower(status) IN ('active','running','inprogress') ORDER BY ordinal DESC LIMIT 1",
+        )
+        .bind(thread_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+    pub async fn local_turn_id_for_app(
+        &self,
+        thread_id: &str,
+        app_turn_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT id FROM turns WHERE thread_id=? AND app_server_turn_id=?",
+        )
+        .bind(thread_id)
+        .bind(app_turn_id)
         .fetch_optional(&self.pool)
         .await?)
     }
@@ -1272,6 +1293,11 @@ impl ClientStore {
         Ok(())
     }
     pub async fn import_app_history(&self, thread_id: &str, thread: &Value) -> Result<()> {
+        let provider: String = sqlx::query_scalar("SELECT provider FROM threads WHERE id=?")
+            .bind(thread_id)
+            .fetch_one(&self.pool)
+            .await?;
+        let reconcile_unbound_turns = matches!(provider.as_str(), "kimi" | "pi");
         let provider_status = value_status(thread.get("status"), "idle");
         let residency_only = is_not_loaded_status(&provider_status);
         let local_status: Option<String> =
@@ -1286,7 +1312,13 @@ impl ClientStore {
             .and_then(Value::as_array)
             .map(Vec::as_slice)
             .unwrap_or_default();
+        let incoming_app_turn_ids = turns
+            .iter()
+            .filter_map(|turn| turn.get("id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
         let mut ordered_app_turn_ids = Vec::with_capacity(turns.len());
+        let mut claimed_unbound_turn_ids = HashSet::new();
         for turn in turns {
             // Commit per turn: a whole-thread transaction can hold the WAL write lock
             // for seconds on large histories and starve interactive writes.
@@ -1296,23 +1328,79 @@ impl ClientStore {
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("App Server turn has no id"))?;
             ordered_app_turn_ids.push(app_turn.to_owned());
-            let existing =
+            let status = value_status(turn.get("status"), "completed");
+            let started = unix_value_to_rfc3339(turn.get("startedAt"));
+            let completed = unix_value_to_rfc3339(turn.get("completedAt"));
+            let mut existing =
                 sqlx::query("SELECT id FROM turns WHERE thread_id=? AND app_server_turn_id=?")
                     .bind(thread_id)
                     .bind(app_turn)
                     .fetch_optional(&mut *tx)
                     .await?;
+            if reconcile_unbound_turns
+                && let Some(user_text) = imported_turn_user_text(turn)
+            {
+                let candidates = sqlx::query(
+                    "SELECT DISTINCT tr.id,tr.ordinal,tr.started_at,tr.app_server_turn_id FROM turns tr JOIN items i ON i.turn_id=tr.id WHERE tr.thread_id=? AND i.kind='user_message' AND i.content_text=? ORDER BY tr.ordinal DESC",
+                )
+                .bind(thread_id)
+                .bind(user_text)
+                .fetch_all(&mut *tx)
+                .await?;
+                let mut available = candidates
+                    .into_iter()
+                    .filter(|row| {
+                        !claimed_unbound_turn_ids.contains(&row.get::<String, _>("id"))
+                            && row
+                                .get::<Option<String>, _>("app_server_turn_id")
+                                .as_ref()
+                                .is_none_or(|id| !incoming_app_turn_ids.contains(id))
+                    })
+                    .collect::<Vec<_>>();
+                available.sort_by_key(|row| {
+                    turn_time_distance(
+                        started.as_deref(),
+                        row.get::<Option<String>, _>("started_at").as_deref(),
+                    )
+                    .unwrap_or(i128::MAX)
+                });
+                let candidate = available.first().and_then(|row| {
+                    let id = row.get::<String, _>("id");
+                    let distance = turn_time_distance(
+                        started.as_deref(),
+                        row.get::<Option<String>, _>("started_at").as_deref(),
+                    );
+                    (distance.is_none_or(|value| value <= 120_000)
+                        && (distance.is_some() || available.len() == 1))
+                        .then_some(id)
+                });
+                if let Some(candidate) = candidate {
+                    claimed_unbound_turn_ids.insert(candidate.clone());
+                    if let Some(target) = existing
+                        .as_ref()
+                        .map(|row| row.get::<String, _>("id"))
+                        .filter(|target| target != &candidate)
+                    {
+                        merge_turn_projection(&mut tx, &target, &candidate).await?;
+                    } else if existing.is_none() {
+                        existing = Some(
+                            sqlx::query("SELECT id FROM turns WHERE id=?")
+                                .bind(&candidate)
+                                .fetch_one(&mut *tx)
+                                .await?,
+                        );
+                    }
+                }
+            }
             let turn_id = existing
                 .as_ref()
                 .map(|row| row.get::<String, _>("id"))
                 .unwrap_or_else(|| new_id("trn"));
-            let status = value_status(turn.get("status"), "completed");
-            let started = unix_value_to_rfc3339(turn.get("startedAt"));
-            let completed = unix_value_to_rfc3339(turn.get("completedAt"));
             if existing.is_some() {
                 // `notLoaded` is App Server residency, not an execution verdict.
                 // Keep a newer rollout/live projection until its terminal event arrives.
-                sqlx::query("UPDATE turns SET status=CASE WHEN ? AND status IN ('active','running','inProgress','stalled') THEN status ELSE ? END,started_at=COALESCE(?,started_at),completed_at=CASE WHEN ? AND status IN ('active','running','inProgress','stalled') THEN completed_at ELSE COALESCE(?,completed_at) END WHERE id=?")
+                sqlx::query("UPDATE turns SET app_server_turn_id=?,status=CASE WHEN ? AND status IN ('active','running','inProgress','stalled') THEN status ELSE ? END,started_at=COALESCE(?,started_at),completed_at=CASE WHEN ? AND status IN ('active','running','inProgress','stalled') THEN completed_at ELSE COALESCE(?,completed_at) END WHERE id=?")
+                    .bind(app_turn)
                     .bind(preserve_runtime)
                     .bind(&status)
                     .bind(&started)
@@ -2135,6 +2223,111 @@ impl ClientStore {
         .await?;
         Ok((projects, inbox, outbox, active))
     }
+}
+
+fn imported_turn_user_text(turn: &Value) -> Option<&str> {
+    turn.get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|item| {
+            matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("userMessage") | Some("user_message")
+            )
+        })
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+}
+
+fn turn_time_distance(left: Option<&str>, right: Option<&str>) -> Option<i128> {
+    let parse = |value: &str| {
+        OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
+    };
+    let left = parse(left?)?;
+    let right = parse(right?)?;
+    Some(
+        (left.unix_timestamp_nanos() - right.unix_timestamp_nanos()).abs() / 1_000_000,
+    )
+}
+
+async fn merge_turn_projection(
+    tx: &mut Transaction<'_, Sqlite>,
+    target_turn_id: &str,
+    source_turn_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE turns SET access_mode=(SELECT access_mode FROM turns WHERE id=?) WHERE id=?",
+    )
+    .bind(source_turn_id)
+    .bind(target_turn_id)
+    .execute(&mut **tx)
+    .await?;
+    let source_items = sqlx::query(
+        "SELECT id,app_server_item_id,kind,content_text FROM items WHERE turn_id=? ORDER BY ordinal,id",
+    )
+    .bind(source_turn_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in source_items {
+        let source_item_id = row.get::<String, _>("id");
+        let app_item_id = row.get::<Option<String>, _>("app_server_item_id");
+        let kind = row.get::<String, _>("kind");
+        let content = row.get::<Option<String>, _>("content_text");
+        let mut target_item_id = if let Some(app_item_id) = app_item_id.as_deref() {
+            sqlx::query_scalar::<_, String>(
+                "SELECT id FROM items WHERE turn_id=? AND app_server_item_id=?",
+            )
+            .bind(target_turn_id)
+            .bind(app_item_id)
+            .fetch_optional(&mut **tx)
+            .await?
+        } else {
+            None
+        };
+        if target_item_id.is_none() {
+            target_item_id = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM items WHERE turn_id=? AND kind=? AND content_text IS ? ORDER BY ordinal LIMIT 1",
+            )
+            .bind(target_turn_id)
+            .bind(&kind)
+            .bind(&content)
+            .fetch_optional(&mut **tx)
+            .await?;
+        }
+        if let Some(target_item_id) = target_item_id {
+            let attachment_ids = sqlx::query_scalar::<_, String>(
+                "SELECT attachment_id FROM item_attachments WHERE item_id=? ORDER BY ordinal",
+            )
+            .bind(&source_item_id)
+            .fetch_all(&mut **tx)
+            .await?;
+            for attachment_id in attachment_ids {
+                sqlx::query("INSERT OR IGNORE INTO item_attachments(item_id,attachment_id,ordinal) VALUES(?,?,COALESCE((SELECT MAX(ordinal)+1 FROM item_attachments WHERE item_id=?),1))")
+                    .bind(&target_item_id)
+                    .bind(attachment_id)
+                    .bind(&target_item_id)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+            sqlx::query("DELETE FROM items WHERE id=?")
+                .bind(&source_item_id)
+                .execute(&mut **tx)
+                .await?;
+        } else {
+            sqlx::query("UPDATE items SET turn_id=?,ordinal=COALESCE((SELECT MAX(ordinal)+1 FROM items WHERE turn_id=?),1) WHERE id=?")
+                .bind(target_turn_id)
+                .bind(target_turn_id)
+                .bind(&source_item_id)
+                .execute(&mut **tx)
+                .await?;
+        }
+    }
+    sqlx::query("DELETE FROM turns WHERE id=?")
+        .bind(source_turn_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 fn inbox_from_row(r: &sqlx::sqlite::SqliteRow) -> Result<InboxRecord> {
@@ -3270,6 +3463,167 @@ mod tests {
                 .status,
             "active"
         );
+    }
+
+    #[tokio::test]
+    async fn pi_history_merges_a_legacy_unbound_duplicate_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_pi_merge", "Pi merge", &workspace, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_provider_thread(
+                "thr_pi_merge",
+                "prj_pi_merge",
+                AgentProvider::Pi,
+                "pi_session",
+                "Pi merge",
+                ConversationAccessMode::Full,
+                &json!({}),
+            )
+            .await
+            .unwrap();
+        store
+            .record_user_turn(
+                "thr_pi_merge",
+                None,
+                "same prompt",
+                &[],
+                ConversationAccessMode::Full,
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE turns SET started_at='2026-07-23T02:50:33.500Z' WHERE thread_id='thr_pi_merge' AND app_server_turn_id IS NULL")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO turns(id,thread_id,app_server_turn_id,ordinal,status,started_at,completed_at) VALUES('provider_turn','thr_pi_merge','pi_user_entry',2,'completed','2026-07-23T02:50:33Z','2026-07-23T02:51:00Z')")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO items(id,turn_id,app_server_item_id,ordinal,kind,status,content_text,occurred_at,completed_at) VALUES('provider_user','provider_turn','pi_user_entry',1,'user_message','completed','same prompt','2026-07-23T02:50:33Z','2026-07-23T02:50:33Z')")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store
+            .import_app_history(
+                "thr_pi_merge",
+                &json!({
+                    "status":"idle",
+                    "turns":[{
+                        "id":"pi_user_entry",
+                        "status":"completed",
+                        "startedAt":1784775033_i64,
+                        "completedAt":1784775060_i64,
+                        "items":[{
+                            "id":"pi_user_entry",
+                            "type":"userMessage",
+                            "text":"same prompt"
+                        }]
+                    }]
+                }),
+            )
+            .await
+            .unwrap();
+
+        let turns: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE thread_id='thr_pi_merge'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        let provider_id: String = sqlx::query_scalar(
+            "SELECT app_server_turn_id FROM turns WHERE thread_id='thr_pi_merge'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        let user_items: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM items i JOIN turns t ON t.id=i.turn_id WHERE t.thread_id='thr_pi_merge' AND i.kind='user_message'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(turns, 1);
+        assert_eq!(provider_id, "pi_user_entry");
+        assert_eq!(user_items, 1);
+    }
+
+    #[tokio::test]
+    async fn kimi_history_replaces_legacy_prompt_identity_with_user_message_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = ClientStore::open(temp.path()).await.unwrap();
+        store
+            .create_project("prj_kimi_identity", "Kimi identity", &workspace, &json!({}))
+            .await
+            .unwrap();
+        store
+            .create_provider_thread(
+                "thr_kimi_identity",
+                "prj_kimi_identity",
+                AgentProvider::Kimi,
+                "kimi_session",
+                "Kimi identity",
+                ConversationAccessMode::Full,
+                &json!({}),
+            )
+            .await
+            .unwrap();
+        store
+            .record_user_turn(
+                "thr_kimi_identity",
+                Some("legacy_prompt_id"),
+                "same prompt",
+                &[],
+                ConversationAccessMode::Full,
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE turns SET started_at='2026-07-23T02:50:33.500Z' WHERE thread_id='thr_kimi_identity'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store
+            .import_app_history(
+                "thr_kimi_identity",
+                &json!({
+                    "status":"idle",
+                    "turns":[{
+                        "id":"kimi_user_message_id",
+                        "status":"completed",
+                        "startedAt":1784775033_i64,
+                        "completedAt":1784775060_i64,
+                        "items":[{
+                            "id":"kimi_user_message_id",
+                            "type":"userMessage",
+                            "text":"same prompt"
+                        }]
+                    }]
+                }),
+            )
+            .await
+            .unwrap();
+
+        let turns: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM turns WHERE thread_id='thr_kimi_identity'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        let provider_id: String = sqlx::query_scalar(
+            "SELECT app_server_turn_id FROM turns WHERE thread_id='thr_kimi_identity'",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(turns, 1);
+        assert_eq!(provider_id, "kimi_user_message_id");
     }
 
     #[tokio::test]
